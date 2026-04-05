@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    sqlator_scaffold_lib::run()
+    sqlator_app_lib::run()
 }

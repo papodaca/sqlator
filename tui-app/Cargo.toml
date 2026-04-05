@@ -1,0 +1,9 @@
+[package]
+name = "sqlator-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for SQLator (future)"
+
+[dependencies]
+sqlator-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }

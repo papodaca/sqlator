@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sqlator-scaffold",
+  "productName": "SQLator",
   "version": "0.1.0",
   "identifier": "im.apodaca.sqlator",
   "build": {
@@ -12,9 +12,14 @@
   "app": {
     "windows": [
       {
-        "title": "sqlator-scaffold",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "SQLator",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true
       }
     ],
     "security": {

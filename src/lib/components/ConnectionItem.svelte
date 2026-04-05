@@ -1,0 +1,184 @@
+<script lang="ts">
+  import { getColorHex } from "$lib/constants/colors";
+  import { connections } from "$lib/stores/connections.svelte";
+  import type { ConnectionInfo } from "$lib/types";
+
+  let {
+    connection,
+    onedit,
+  }: {
+    connection: ConnectionInfo;
+    onedit: (conn: ConnectionInfo) => void;
+  } = $props();
+
+  let showMenu = $state(false);
+  let confirmDelete = $state(false);
+
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    showMenu = true;
+  }
+
+  function handleClick() {
+    connections.select(connection.id);
+  }
+
+  async function handleDelete() {
+    if (!confirmDelete) {
+      confirmDelete = true;
+      setTimeout(() => {
+        confirmDelete = false;
+      }, 3000);
+      return;
+    }
+    await connections.remove(connection.id);
+  }
+
+  function closeMenu() {
+    showMenu = false;
+  }
+</script>
+
+<svelte:window onclick={closeMenu} />
+
+<div class="connection-item-wrapper">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <button
+    class="connection-item"
+    class:active={connections.activeId === connection.id}
+    onclick={handleClick}
+    oncontextmenu={handleContextMenu}
+  >
+    <span
+      class="color-dot"
+      style="background-color: {getColorHex(connection.color_id)}"
+    ></span>
+    <div class="connection-info">
+      <span class="connection-name">{connection.name}</span>
+      <span class="connection-detail"
+        >{connection.db_type} &middot; {connection.host}</span
+      >
+    </div>
+  </button>
+
+  {#if showMenu}
+    <div class="context-menu" role="menu">
+      <button
+        class="menu-item"
+        role="menuitem"
+        onclick={(e: MouseEvent) => {
+          e.stopPropagation();
+          closeMenu();
+          onedit(connection);
+        }}
+      >
+        Edit
+      </button>
+      <button
+        class="menu-item danger"
+        role="menuitem"
+        onclick={(e: MouseEvent) => {
+          e.stopPropagation();
+          handleDelete();
+        }}
+      >
+        {confirmDelete ? "Confirm Delete?" : "Delete"}
+      </button>
+    </div>
+  {/if}
+</div>
+
+<style>
+  .connection-item-wrapper {
+    position: relative;
+  }
+
+  .connection-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background-color 0.1s;
+    text-align: left;
+    color: var(--color-text);
+  }
+
+  .connection-item:hover {
+    background: var(--color-surface-2);
+  }
+
+  .connection-item.active {
+    background: var(--color-accent);
+    color: white;
+  }
+
+  .color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .connection-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .connection-name {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .connection-detail {
+    font-size: 11px;
+    opacity: 0.65;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .context-menu {
+    position: absolute;
+    top: 100%;
+    left: 12px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 4px;
+    z-index: 50;
+    min-width: 120px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .menu-item {
+    display: block;
+    width: 100%;
+    padding: 6px 12px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 13px;
+    text-align: left;
+    border-radius: 4px;
+    color: var(--color-text);
+  }
+
+  .menu-item:hover {
+    background: var(--color-surface-2);
+  }
+
+  .menu-item.danger {
+    color: var(--color-error);
+  }
+</style>

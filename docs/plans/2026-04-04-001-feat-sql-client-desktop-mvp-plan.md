@@ -1,7 +1,7 @@
 ---
 title: "feat: SQLator — Desktop SQL Client MVP"
 type: feat
-status: active
+status: completed
 date: 2026-04-04
 ---
 
