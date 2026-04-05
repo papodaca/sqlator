@@ -1,7 +1,7 @@
 ---
 title: Refactor to Database-Specific Connection Pools
 type: refactor
-status: active
+status: completed
 date: 2026-04-05
 ---
 

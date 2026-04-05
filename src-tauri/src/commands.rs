@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection};
+use sqlator_core::DatabaseType;
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -21,11 +22,13 @@ pub async fn get_connections(state: State<'_, AppState>) -> CmdResult<Vec<Connec
 pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfig) -> CmdResult<ConnectionInfo> {
     let parsed = url::Url::parse(&config.url).map_err(map_err)?;
 
-    let db_type = match parsed.scheme() {
-        "postgres" | "postgresql" => "postgres",
-        "mysql" => "mysql",
-        "sqlite" => "sqlite",
-        scheme => return Err(format!("Unsupported database scheme: {}", scheme)),
+    let db_type = match sqlator_core::detect_database_type(&config.url) {
+        Some(DatabaseType::Postgres) => "postgres",
+        Some(DatabaseType::MySql) => {
+            if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
+        }
+        Some(DatabaseType::Sqlite) => "sqlite",
+        None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
     let conn = SavedConnection {
@@ -36,7 +39,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         host: parsed.host_str().unwrap_or("localhost").to_string(),
         port: parsed.port().unwrap_or(match db_type {
             "postgres" => 5432,
-            "mysql" => 3306,
+            "mysql" | "mariadb" => 3306,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -56,11 +59,13 @@ pub async fn update_connection(
 ) -> CmdResult<ConnectionInfo> {
     let parsed = url::Url::parse(&config.url).map_err(map_err)?;
 
-    let db_type = match parsed.scheme() {
-        "postgres" | "postgresql" => "postgres",
-        "mysql" => "mysql",
-        "sqlite" => "sqlite",
-        scheme => return Err(format!("Unsupported database scheme: {}", scheme)),
+    let db_type = match sqlator_core::detect_database_type(&config.url) {
+        Some(DatabaseType::Postgres) => "postgres",
+        Some(DatabaseType::MySql) => {
+            if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
+        }
+        Some(DatabaseType::Sqlite) => "sqlite",
+        None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
     let conn = SavedConnection {
@@ -71,7 +76,7 @@ pub async fn update_connection(
         host: parsed.host_str().unwrap_or("localhost").to_string(),
         port: parsed.port().unwrap_or(match db_type {
             "postgres" => 5432,
-            "mysql" => 3306,
+            "mysql" | "mariadb" => 3306,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),

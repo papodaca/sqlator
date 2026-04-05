@@ -8,7 +8,9 @@ description = "Core library for SQLator — database connection management and q
 sqlx = { version = "0.8", features = [
     "runtime-tokio", "tls-rustls",
     "postgres", "mysql", "sqlite", "any", "json",
+    "chrono", "uuid",
 ] }
+chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
