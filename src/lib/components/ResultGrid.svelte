@@ -41,98 +41,103 @@
   }
 </script>
 
-<div class="grid-wrapper">
-  <!-- Header -->
-  <div class="grid-header">
-    <div class="grid-row header-row">
-      {#each columns as col}
-        <div class="grid-cell header-cell" title={col}>
-          {col}
-        </div>
-      {/each}
-    </div>
-  </div>
-
-  <!-- Virtual scrolling body -->
-  <div class="grid-body" bind:this={scrollEl}>
-    <div style="height: {totalSize}px; position: relative;">
+<div class="grid-wrapper" bind:this={scrollEl}>
+  <table>
+    <thead>
+      <tr>
+        {#each columns as col}
+          <th>{col}</th>
+        {/each}
+      </tr>
+    </thead>
+    <tbody>
+      {#if (virtualItems[0]?.start ?? 0) > 0}
+        <tr class="spacer" style="height: {virtualItems[0].start}px;">
+          <td colspan={columns.length}></td>
+        </tr>
+      {/if}
       {#each virtualItems as item (item.key)}
         {@const row = rows[item.index]}
-        <div
-          class="grid-row"
-          class:alt={item.index % 2 === 1}
-          style="position: absolute; top: {item.start}px; width: 100%; height: {item.size}px;"
-        >
+        <tr class:alt={item.index % 2 === 1}>
           {#each columns as col}
-            <div
-              class="grid-cell"
-              class:null-cell={isNull(row[col])}
-              title={formatCell(row[col])}
-            >
+            <td class:null-cell={isNull(row[col])} title={formatCell(row[col])}>
               {formatCell(row[col])}
-            </div>
+            </td>
           {/each}
-        </div>
+        </tr>
       {/each}
-    </div>
-  </div>
+    </tbody>
+  </table>
 </div>
 
 <style>
   .grid-wrapper {
     flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
+    overflow: auto;
     font-family: var(--font-mono);
     font-size: 13px;
   }
 
-  .grid-header {
-    flex-shrink: 0;
-    overflow: hidden;
-    border-bottom: 2px solid var(--color-border);
+  table {
+    width: 100%;
+    border-collapse: collapse;
   }
 
-  .grid-body {
-    flex: 1;
-    overflow: auto;
+  thead {
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
 
-  .grid-row {
-    display: flex;
-    align-items: center;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .grid-row.alt {
-    background: var(--color-surface);
-  }
-
-  .header-row {
+  th {
     background: var(--color-surface-2);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
-  .grid-cell {
-    min-width: 80px;
-    max-width: 300px;
+    text-align: left;
     padding: 0 12px;
     height: 36px;
     line-height: 36px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    border-right: 1px solid var(--color-border);
-    flex: 1;
-  }
-
-  .header-cell {
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.3px;
     color: var(--color-text-muted);
+    font-weight: 600;
+    border-bottom: 2px solid var(--color-border);
+    white-space: nowrap;
+    position: relative;
+  }
+
+  th:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--color-border);
+  }
+
+  .spacer td {
+    padding: 0;
+    border: none;
+  }
+
+  td {
+    padding: 0 12px;
+    height: 36px;
+    line-height: 36px;
+    border-bottom: 1px solid var(--color-border);
+    border-right: 1px solid var(--color-border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+  }
+
+  td:last-child {
+    border-right: none;
+  }
+
+  tr.alt td {
+    background: var(--color-surface);
   }
 
   .null-cell {
