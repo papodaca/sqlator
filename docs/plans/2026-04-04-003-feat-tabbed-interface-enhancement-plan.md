@@ -68,7 +68,7 @@ Carried forward from MVP plan:
 - **CodeMirror 6** for SQL editor (see origin: lines 432-442, Monaco rejected due to Tauri CSP issues)
 - **TanStack Virtual** for result grids (see origin: lines 330-341)
 - **`DashMap<String, AnyPool>`** for concurrent connection pools (see origin: lines 237-248, 450-452)
-- **tauri-plugin-store** for persisted metadata (see origin: lines 152, 549)
+- **Core Config Manager** for persisted metadata (see origin: lines 152, 549)
 - **keyring** for credential storage (see origin: lines 76-86)
 
 ---
@@ -125,7 +125,7 @@ pub struct QueryTab {
 | `connect_database` | Now creates a new connection tab; connection_id returned |
 | `disconnect_database` | New: closes connection tab, removes pool from DashMap |
 | `get_open_tabs` | New: returns all connection tabs + query tabs state |
-| `save_tab_state` | New: persists tab layout to tauri-plugin-store |
+| `save_tab_state` | New: persists tab layout to Core Config Manager |
 | `create_query_tab` | New: creates query tab under connection |
 | `close_query_tab` | New: closes query tab, prompts if dirty |
 | `rename_query_tab` | New: renames query tab label |
@@ -134,7 +134,7 @@ pub struct QueryTab {
 ### Tab State Persistence
 
 ```typescript
-// Stored in tauri-plugin-store under key "tabState"
+// Stored in Core Config Manager under key "tabState"
 interface PersistedTabState {
   connectionTabs: ConnectionTabState[];
   activeConnectionId: string | null;
@@ -263,13 +263,13 @@ const TAB_PADDING = '12px';
 **Rust tasks:**
 - [ ] Implement `save_tab_state` command
 - [ ] Implement `restore_tab_state` command
-- [ ] Store tab state in `tauri-plugin-store` under key `tabState`
+- [ ] Store tab state in `Core Config Manager` under key `tabState`
 
 **Persistence behavior:**
 ```typescript
 // On tab change (debounced 500ms):
 // 1. Serialize current tab state
-// 2. Save to tauri-plugin-store
+// 2. Save to Core Config Manager
 
 // On app startup:
 // 1. Load persisted tab state
@@ -338,7 +338,7 @@ const TAB_PADDING = '12px';
 ### Interaction Graph
 
 1. **New connection from sidebar:**
-   - Click connection → `connect_database` command → `AnyPool::connect()` → pool stored in `DashMap` → new `ConnectionTab` created → first `QueryTab` auto-created → state saved to `tauri-plugin-store`
+   - Click connection → `connect_database` command → `AnyPool::connect()` → pool stored in `DashMap` → new `ConnectionTab` created → first `QueryTab` auto-created → state saved to `Core Config Manager`
 
 2. **Query execution in multi-tab context:**
    - `execute_query(connection_id, query_id, sql)` → pool from `DashMap.get(connection_id)` → query runs → `QueryEvent` streamed via Channel → results stored by `query_id` → active tab shows results
@@ -357,7 +357,7 @@ const TAB_PADDING = '12px';
 | Query tab close with dirty | Frontend modal | Confirmation dialog, save prompt |
 | Pool creation fails | `sqlx::Error` | Show error in connection tab, keep tab with disconnected state |
 | Reconnection fails on restore | `sqlx::Error` | Show "Connection failed" banner with Retry button |
-| Tab state save fails | `tauri-plugin-store` | Log warning, continue (non-critical) |
+| Tab state save fails | `Core Config Manager` | Log warning, continue (non-critical) |
 | Too many connections | Memory pressure | Warn when >10 connection tabs, suggest closing |
 
 ### State Lifecycle Risks
@@ -437,7 +437,7 @@ Note: No additional npm dependencies needed for tabs — Svelte 5 runes handle s
 
 ### Rust (additions to Cargo.toml)
 
-No new dependencies — existing `dashmap`, `tauri-plugin-store`, `sqlx` cover all needs.
+No new dependencies — existing `dashmap`, `Core Config Manager`, `sqlx` cover all needs.
 
 ### Component Library Decision
 
@@ -478,8 +478,12 @@ If future need arises for more complex components (menus, dialogs), consider add
 
 ```
 sqlator/
-├── src-tauri/
+├── core/
 │   └── src/
+│       ├── state.rs              # Core tab state
+├── tauri-app/
+│   ├── src-tauri/
+│   │   └── src/
 │       ├── state.rs              # Updated: ConnectionTab, QueryTab structs
 │       └── commands/
 │           └── tabs.rs           # NEW: tab management commands

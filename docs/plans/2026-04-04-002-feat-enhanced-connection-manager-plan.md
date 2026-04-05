@@ -51,15 +51,18 @@ The MVP connection manager (origin: `docs/plans/2026-04-04-001-feat-sql-client-d
 └───────────────────────────────┼─────────────────────────────────────┘
                                 │
 ┌───────────────────────────────┼─────────────────────────────────────┐
-│           Tauri 2 Rust Backend                                       │
-│                               │                                       │
+│           Tauri 2 App (Thin Wrapper)                                 │
 │  ┌────────────────────────────▼──────────────────────────────────┐  │
 │  │  Commands: save_connection, get_connections, test_connection, │  │
 │  │  create_ssh_tunnel, manage_ssh_profiles, import/export,       │  │
 │  │  validate_ssh_config                                          │  │
 │  └───────┬────────────────────────────────────────────────────────┘  │
-│          │                                                            │
-│  ┌───────▼──────────┐  ┌─────────────────┐  ┌────────────────────┐  │
+└──────────┼──────────────────────────────────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────────────┐
+│           Core Library (Pure Rust)                                   │
+│                                                                       │
+│  ┌──────────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
 │  │  russh           │  │  Credential     │  │  russh-config      │  │
 │  │  (SSH Tunnels)   │  │  Manager        │  │  (SSH Config)      │  │
 │  │  - Key auth      │  │  - keyring      │  │  - Parse ~/.ssh/   │  │
@@ -68,10 +71,10 @@ The MVP connection manager (origin: `docs/plans/2026-04-04-001-feat-sql-client-d
 │  └──────────────────┘  └─────────────────┘  └────────────────────┘  │
 │                                                                       │
 │  ┌────────────────────────────────────────────────────────────────┐  │
-│  │  tauri-plugin-store (connection metadata + SSH profiles)       │  │
+│  │  Core Config Manager (connection metadata + SSH profiles)      │  │
 │  │  + groups + status + import history                            │  │
 │  └────────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Credential Storage Architecture
@@ -661,7 +664,7 @@ dirs = "5"
 
 # Existing from MVP
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-store = "2"
+Core Config Manager = "2"
 sqlx = { version = "0.8", features = [...] }
 keyring = "3.3"
 dashmap = "6"
@@ -742,8 +745,14 @@ No new dependencies required beyond MVP stack.
 
 ```
 sqlator/
-├── src-tauri/
+├── core/                      # New core workspace
 │   ├── src/
+│   │   ├── config/            # Core Config Manager
+│   │   ├── ssh/               # Moved from src-tauri
+│   │   └── credentials/       # Moved from src-tauri
+├── tauri-app/
+│   ├── src-tauri/
+│   │   ├── src/
 │   │   ├── ssh/
 │   │   │   ├── mod.rs
 │   │   │   ├── tunnel.rs          # SshTunnel implementation
@@ -798,7 +807,7 @@ sqlator/
 - Key decisions carried forward:
   - Tauri 2 + Svelte 5 + Rust backend architecture
   - keyring 3.3 for OS keychain (now configurable with vault fallback)
-  - tauri-plugin-store for metadata (now includes SSH profiles, groups)
+  - Core Config Manager for metadata (now includes SSH profiles, groups)
   - DashMap for concurrent state (now includes tunnel tracking)
 
 ### External References

@@ -1168,8 +1168,12 @@ sqlparser = "0.45"  # For parsing SELECT queries to find table references
 
 ```
 sqlator/
-├── src-tauri/
+├── core/
 │   └── src/
+│       ├── schema_cache.rs      # Moved to core
+├── tauri-app/
+│   ├── src-tauri/
+│   │   └── src/
 │       ├── commands/
 │       │   ├── mod.rs
 │       │   ├── connections.rs

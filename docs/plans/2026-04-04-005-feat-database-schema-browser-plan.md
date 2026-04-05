@@ -705,7 +705,7 @@ fn apply_filters(
 - [ ] Add keyboard navigation for tree (arrow keys, Enter, Escape)
 - [ ] Add search box above tree for large schemas
 - [ ] Add table row count display (optional, behind setting)
-- [ ] Persist sort/filter state in `tauri-plugin-store`
+- [ ] Persist sort/filter state in `Core Config Manager`
 - [ ] Handle long table/column names with tooltip truncation
 - [ ] Add "Table dropped" error detection and auto-refresh
 
@@ -872,7 +872,7 @@ Both should use the same `Channel<QueryEvent>` pattern. `query_table` is a speci
 [dependencies]
 # Existing dependencies from MVP...
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-store = "2"
+Core Config Manager = "2"
 sqlx = { version = "0.8", features = [
     "runtime-tokio", "tls-rustls",
     "postgres", "mysql", "sqlite", "any", "json"
@@ -959,10 +959,14 @@ tokio-util = "0.7"  # For CancellationToken
 
 ```
 sqlator/
-├── src-tauri/
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
+├── core/
 │   └── src/
+│       ├── db/                  # Core DB introspection
+├── tauri-app/
+│   ├── src-tauri/
+│   │   ├── Cargo.toml
+│   │   ├── tauri.conf.json
+│   │   └── src/
 │       ├── lib.rs
 │       ├── state.rs
 │       ├── commands/

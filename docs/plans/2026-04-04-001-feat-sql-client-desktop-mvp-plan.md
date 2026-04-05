@@ -29,8 +29,9 @@ Existing SQL clients are either too heavyweight (DataGrip requires a JVM and sub
 
 ## Proposed Solution
 
-A Tauri 2 desktop app:
-- **Rust backend:** `sqlx 0.8` with `AnyPool` for Postgres/MySQL/SQLite; `keyring 3.3` for OS keychain; `tauri-plugin-store 2` for connection metadata
+A Cargo Workspace supporting both a Tauri 2 desktop app and a future Ratatui TUI:
+- **Core Library (Rust):** `sqlx 0.8` with `AnyPool` for Postgres/MySQL/SQLite; `keyring 3.3` for OS keychain; custom file-based config manager for metadata (framework-agnostic)
+- **Tauri App:** Thin wrapper around the Core Library exposing IPC commands
 - **Svelte 5 frontend:** Runes-based reactive state; CodeMirror 6 SQL editor; TanStack Virtual result grid
 - **Tailwind v4:** CSS-first theming with `@tailwindcss/vite`; `@custom-variant dark` for light/dark toggling
 
@@ -38,7 +39,9 @@ A Tauri 2 desktop app:
 
 ## Technical Approach
 
-### Architecture
+### Architecture (Cargo Workspace)
+
+To support both a Desktop GUI and a future Terminal UI (TUI), the project is structured as a Cargo workspace, strictly decoupling business logic from Tauri.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -53,15 +56,21 @@ A Tauri 2 desktop app:
 └─────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────┼───────────────────────────┐
-│           Tauri 2 Rust Backend                           │
-│                              │                           │
-│  ┌───────────────────────────▼───────────────────────┐  │
-│  │  Commands: connect_db, execute_query, test_conn,  │  │
-│  │  save_connection, get_connections, delete_conn    │  │
-│  └──────────┬────────────────────────────────────────┘  │
-│             │                                            │
-│  ┌──────────▼────────┐    ┌─────────────────────────┐  │
-│  │  sqlx AnyPool     │    │  tauri-plugin-store     │  │
+│           Tauri 2 App (Thin Wrapper)                     │
+│  ┌──────────────────────────▼────────────────────────┐  │
+│  │  Commands: connect_db, execute_query, test_conn   │  │
+│  │  (Translates Core MPSC channels to Tauri Channels)│  │
+│  └──────────────────────────┬────────────────────────┘  │
+└─────────────────────────────┼───────────────────────────┘
+                              │
+┌─────────────────────────────┼───────────────────────────┐
+│           Core Library (Pure Rust)                       │
+│  ┌──────────────────────────▼────────────────────────┐  │
+│  │  Core API (Connection Manager, Query Execution)   │  │
+│  └──────────┬─────────────────────────┬──────────────┘  │
+│             │                         │                 │
+│  ┌──────────▼────────┐    ┌───────────▼─────────────┐  │
+│  │  sqlx AnyPool     │    │  Config Manager (fs)    │  │
 │  │  (Postgres/MySQL/ │    │  connections.json       │  │
 │  │  SQLite)          │    │  (name, host, color)    │  │
 │  └───────────────────┘    └─────────────────────────┘  │
@@ -70,17 +79,22 @@ A Tauri 2 desktop app:
 │  │  keyring 3.3 (OS Keychain / DPAPI / libsecret)  │    │
 │  │  passwords stored per connection ID             │    │
 │  └─────────────────────────────────────────────────┘    │
+└─────────────────────────────┬───────────────────────────┘
+                              │ (Future)
+┌─────────────────────────────▼───────────────────────────┐
+│           TUI App (Ratatui)                              │
+│  Terminal Interface consuming the exact same Core API    │
 └──────────────────────────────────────────────────────────┘
 ```
 
 ### Credential Security Model
 
-> **Critical:** `tauri-plugin-store` writes **plaintext JSON** to disk. Passwords MUST go to the OS keychain.
+> **Critical:** `Core Config Manager` writes **plaintext JSON** to disk. Passwords MUST go to the OS keychain.
 
 When a user saves a connection URL (e.g., `postgres://admin:secret@host:5432/mydb`):
 
 1. Parse the URL in Rust — extract credentials, host, port, database
-2. Store non-sensitive fields in `tauri-plugin-store`: `{ id, name, color, host, port, database, username, dbType }`
+2. Store non-sensitive fields in Core Config Manager: `{ id, name, color, host, port, database, username, dbType }`
 3. Store password in OS keychain via `keyring 3.3`: key = `("sqlator", <connection-id>)`
 4. Display masked URL in UI: `postgres://admin:***@host:5432/mydb`
 5. On connect: assemble full URL in Rust only — never pass plaintext password through IPC
@@ -117,17 +131,27 @@ One active connection at a time. Pool created on selection, torn down on switch.
 
 ### Query Execution Flow
 
-For non-blocking large result sets, use `tauri::ipc::Channel` (Tauri 2 preferred pattern) for streaming:
+For non-blocking large result sets, the Core library yields results through a generic `tokio::sync::mpsc` channel. 
+The Tauri app wrapper consumes this channel and forwards it to the frontend using `tauri::ipc::Channel` for streaming:
 
 ```rust
-// Rust: stream rows back via Channel instead of buffering all in memory
+// Core (Pure Rust)
+pub async fn execute_query(
+    pool: &AnyPool,
+    sql: &str,
+    sender: tokio::sync::mpsc::Sender<QueryEvent>,
+) -> Result<(), CoreError> { ... }
+
+// Tauri Wrapper
 #[tauri::command]
 async fn execute_query(
     state: State<'_, AppState>,
     connection_id: String,
     sql: String,
     on_event: Channel<QueryEvent>,
-) -> Result<(), CommandError> { ... }
+) -> Result<(), CommandError> {
+    // Bridges the Core MPSC to the Tauri IPC Channel
+}
 ```
 
 Frontend batches row events at 50ms intervals to avoid thousands of reactive updates (use `$state.raw` + interval flush).
@@ -149,13 +173,14 @@ Result types:
 - [ ] Add `@tailwindcss/vite` plugin (before svelte plugin in `vite.config.ts`)
 - [ ] Set up `src/app.css` with `@import "tailwindcss"` + `@theme {}` tokens
 - [ ] Configure `tauri.conf.json`: `productName: "SQLator"`, min size 900×600, center on launch
-- [ ] Add `tauri-plugin-store` (both Cargo + npm): `pnpm tauri add store`
+- [ ] Implement pure-Rust file-based configuration manager in `core/` (replacing Core Config Manager)
+- [ ] Set up Cargo workspace (`core`, `tauri-app`, `tui-app`)
 - [ ] Add `keyring 3.3` to `Cargo.toml`
 - [ ] Add `sqlx 0.8` with features: `runtime-tokio, tls-rustls, postgres, mysql, sqlite, any, json`
 - [ ] Add `dashmap 6` and `futures 0.3` to `Cargo.toml`
 - [ ] Set up `src-tauri/capabilities/main.json` with store permissions
 - [ ] Add dark mode support: `@custom-variant dark (&:where(.dark, .dark *))` in CSS
-- [ ] Set up light/dark toggle that persists to `tauri-plugin-store`
+- [ ] Set up light/dark toggle that persists to Core Config Manager
 - [ ] Create basic layout: left sidebar (240px) + main content area
 
 **Success criteria:** App opens, shows a two-panel layout, dark mode toggle works.
@@ -178,7 +203,7 @@ Result types:
 **Rust commands to implement:**
 - `test_connection(url: String) -> Result<String, CommandError>` — 5-second timeout, returns `"Connected"` or error detail
 - `save_connection(config: ConnectionConfig) -> Result<String, CommandError>` — parses URL, extracts credentials, stores in keychain + plugin-store, returns generated UUID
-- `get_connections() -> Result<Vec<SavedConnection>, CommandError>` — loads from plugin-store
+- `get_connections() -> Result<Vec<SavedConnection>, CommandError>` — loads from Core Config
 - `update_connection(id: String, config: ConnectionConfig) -> Result<(), CommandError>`
 - `delete_connection(id: String) -> Result<(), CommandError>` — removes from store + keychain
 
@@ -278,7 +303,7 @@ Key extensions:
 - `oneDark` / custom light theme matching app theme
 
 **Editor state persistence:**
-- Last query text per connection persisted to `tauri-plugin-store` under key `query:<connection-id>`
+- Last query text per connection persisted to Core Config Manager under key `query:<connection-id>`
 - Restored when connection is (re-)selected
 
 **Empty editor behavior:**
@@ -464,7 +489,7 @@ async fn cancel_query(
 
 ### Interaction Graph
 
-1. User saves connection → `save_connection` command → URL parsed in Rust → non-sensitive fields → `tauri-plugin-store` → password → `keyring` → UUID returned to frontend → connection list updates via `$state`
+1. User saves connection → `save_connection` command → URL parsed in Rust → non-sensitive fields → `Core Config Manager` → password → `keyring` → UUID returned to frontend → connection list updates via `$state`
 
 2. User clicks connection → `connect_database` command → full URL assembled in Rust (keyring fetch) → `AnyPool::connect()` → pool stored in `DashMap` under connection ID → frontend reactive state updated to `connected`
 
@@ -546,7 +571,7 @@ async fn cancel_query(
 ```toml
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-store = "2"
+Core Config Manager = "2"
 sqlx = { version = "0.8", features = [
     "runtime-tokio", "tls-rustls",
     "postgres", "mysql", "sqlite", "any", "json"
@@ -606,7 +631,7 @@ tauri-build = { version = "2", features = [] }
 | `keyring` OS keychain unavailable (headless Linux) | Low | High | Graceful error: prompt user to enter password each session; log warning |
 | TanStack Virtual Svelte 5 compatibility regression | Low | Medium | Pin to `@tanstack/svelte-virtual@3.13.x`; test early in Phase 4 |
 | Tauri IPC 1MB payload limit hit for large results | Medium | High | Use `Channel` streaming from day one (Phase 4 design); never buffer full result in Rust |
-| `tauri-plugin-store` `autoSave` race condition | Low | Low | Use `LazyStore` pattern; call `.save()` explicitly after mutations |
+| `Core Config Manager` `autoSave` race condition | Low | Low | Use `LazyStore` pattern; call `.save()` explicitly after mutations |
 | CSP blocking CodeMirror assets | Low | Medium | Set `"csp": null` in `tauri.conf.json` for development; tighten for production |
 | Multi-statement SQL behavior varies by DB driver | High | Medium | Execute statement at cursor position only; detect and warn on semicolons |
 
@@ -630,21 +655,27 @@ tauri-build = { version = "2", features = [] }
 
 ```
 sqlator/
-├── src-tauri/
+├── core/                   # Pure Rust core logic
 │   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   ├── capabilities/
-│   │   └── main.json
 │   └── src/
-│       ├── lib.rs              # Tauri builder, plugin registration
-│       ├── state.rs            # AppState: DashMap<String, AnyPool>
-│       ├── commands/
-│       │   ├── mod.rs
-│       │   ├── connections.rs  # save, get, update, delete, test
-│       │   └── queries.rs      # connect_database, execute_query, cancel_query
-│       ├── models.rs           # Serde types: ConnectionConfig, SavedConnection, QueryEvent
-│       └── error.rs            # CommandError enum with Serialize
-├── src/
+│       ├── config.rs           # File-based config manager
+│       ├── db.rs               # sqlx AnyPool management
+│       ├── models.rs           # Serde types
+│       └── error.rs            # CoreError enum
+├── tauri-app/              # Desktop GUI
+│   ├── src-tauri/
+│   │   ├── Cargo.toml
+│   │   ├── tauri.conf.json
+│   │   └── src/
+│   │       ├── lib.rs          # Tauri builder, bridging Core
+│   │       ├── state.rs        # Tauri wrapper for Core state
+│   │       └── commands/       # Tauri command wrappers
+│   └── src/                    # Svelte frontend
+├── tui-app/                # Terminal UI
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs             # Ratatui TUI entry point
+├── package.json
 │   ├── app.css                 # @import "tailwindcss"; @theme {}; dark tokens
 │   ├── main.ts                 # mount App
 │   ├── App.svelte              # root layout: sidebar + main
@@ -687,13 +718,13 @@ sqlator/
 - [CodeMirror 6 SQL language](https://codemirror.net/docs/ref/#lang-sql) — `@codemirror/lang-sql`
 - [TanStack Virtual v3](https://tanstack.com/virtual/latest) — `createVirtualizer` for Svelte 5
 - [Tailwind CSS v4 Vite setup](https://tailwindcss.com/docs/installation/vite) — `@tailwindcss/vite` plugin
-- [tauri-plugin-store v2](https://v2.tauri.app/plugin/store/) — `LazyStore`, capabilities
+- [Core Config Manager v2](https://v2.tauri.app/plugin/store/) — `LazyStore`, capabilities
 
 ### Key Gotchas (from research)
 
 1. `sqlx::any::install_default_drivers()` MUST be called before any `AnyPool::connect()` — panics silently otherwise
 2. `@tailwindcss/vite` MUST be listed before `svelte()` in `vite.config.ts` plugins array
-3. `tauri-plugin-store` is **plaintext JSON** — never store passwords there
+3. `Core Config Manager` is **plaintext JSON** — never store passwords there
 4. Use `tokio::sync::Mutex` (not `std::sync::Mutex`) for state accessed across `.await` points
 5. `$state.raw` + 50ms batch flush for large streaming result sets — avoid deep proxy overhead
 6. TanStack Virtual requires `createVirtualizer` in Svelte 5 (not `useVirtualizer`)
