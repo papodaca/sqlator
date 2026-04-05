@@ -11,15 +11,28 @@
     onclose: () => void;
   } = $props();
 
-  let name = $state(editing?.name ?? "");
+  let name = $state("");
   let url = $state("");
-  let colorId = $state<ConnectionColorId>(
-    (editing?.color_id as ConnectionColorId) ?? "blue",
-  );
+  let colorId = $state<ConnectionColorId>("blue");
   let testStatus = $state<"idle" | "testing" | "success" | "error">("idle");
   let testMessage = $state("");
   let saving = $state(false);
   let saveError = $state("");
+
+  let lastEditingId: string | undefined = undefined;
+
+  $effect(() => {
+    const currentId = editing?.id;
+    if (currentId !== lastEditingId) {
+      name = editing?.name ?? "";
+      url = "";
+      colorId = (editing?.color_id as ConnectionColorId) ?? "blue";
+      testStatus = "idle";
+      testMessage = "";
+      saveError = "";
+      lastEditingId = currentId;
+    }
+  });
 
   async function handleTest() {
     if (!url.trim()) return;

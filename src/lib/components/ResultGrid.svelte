@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createVirtualizer } from "@tanstack/svelte-virtual";
+  import { get } from "svelte/store";
 
   let {
     columns,
@@ -22,8 +23,12 @@
       : null,
   );
 
-  let virtualItems = $derived(virtualizer?.getVirtualItems() ?? []);
-  let totalSize = $derived(virtualizer?.getTotalSize() ?? 0);
+  let virtualItems = $derived(
+    virtualizer ? get(virtualizer).getVirtualItems() : [],
+  );
+  let totalSize = $derived(
+    virtualizer ? get(virtualizer).getTotalSize() : 0,
+  );
 
   function formatCell(value: unknown): string {
     if (value === null || value === undefined) return "NULL";

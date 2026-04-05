@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { EditorView, basicSetup } from "codemirror";
-  import { sql, PostgreSQL, MySQL, SQLite } from "@codemirror/lang-sql";
+  import { sql, PostgreSQL, MySQL, SQLite, type SQLDialect } from "@codemirror/lang-sql";
   import { oneDark } from "@codemirror/theme-one-dark";
   import { keymap } from "@codemirror/view";
   import { Prec } from "@codemirror/state";
@@ -10,7 +10,7 @@
   import { query } from "$lib/stores/query.svelte";
   import { theme } from "$lib/stores/theme.svelte";
 
-  const dialectMap: Record<string, ReturnType<typeof PostgreSQL>> = {
+  const dialectMap: Record<string, SQLDialect> = {
     postgres: PostgreSQL,
     mysql: MySQL,
     sqlite: SQLite,

@@ -2,7 +2,7 @@ use crate::error::CoreError;
 use crate::models::QueryEvent;
 use dashmap::DashMap;
 use sqlx::any::AnyRow;
-use sqlx::{AnyPool, Column, Row};
+use sqlx::{AnyPool, Column, Row, TypeInfo};
 use std::time::Instant;
 
 /// Manages database connection pools.
@@ -130,18 +130,23 @@ impl DbManager {
                             .columns()
                             .iter()
                             .enumerate()
-                            .map(|(i, _col)| row_value_to_json(&row, i))
+                            .map(|(i, _)| row_value_to_json(&row, i))
                             .collect();
                         let _ = sender.send(QueryEvent::Row { values }).await;
                     }
                     row_count += 1;
                 }
                 Err(e) => {
-                    let _ = sender
-                        .send(QueryEvent::Error {
-                            message: e.to_string(),
-                        })
-                        .await;
+                    let msg = e.to_string();
+                    let hint = if msg.contains("Jsonb") || msg.contains("JSONB") {
+                        format!(
+                            "{}\n\nTip: Cast JSONB columns to text in your query:\n  SELECT jsonb_col::text FROM table",
+                            msg
+                        )
+                    } else {
+                        msg
+                    };
+                    let _ = sender.send(QueryEvent::Error { message: hint }).await;
                     return Ok(());
                 }
             }
@@ -194,31 +199,39 @@ impl Default for DbManager {
 
 /// Extract a value from an AnyRow at the given index, converting to serde_json::Value.
 /// Tries multiple types since AnyRow doesn't support dynamic type introspection well.
+/// For unsupported types (like JSONB), falls back to showing type name.
 fn row_value_to_json(row: &AnyRow, index: usize) -> serde_json::Value {
-    // Try string first (most types can be read as string from Any driver)
+    let type_name = row.column(index).type_info().name().to_string();
+
     if let Ok(v) = row.try_get::<Option<String>, _>(index) {
         return match v {
             Some(s) => serde_json::Value::String(s),
-            None => serde_json::Value::Null,
+            None => return serde_json::Value::Null,
         };
     }
     if let Ok(v) = row.try_get::<Option<i64>, _>(index) {
         return match v {
             Some(n) => serde_json::json!(n),
-            None => serde_json::Value::Null,
+            None => return serde_json::Value::Null,
         };
     }
     if let Ok(v) = row.try_get::<Option<f64>, _>(index) {
         return match v {
             Some(n) => serde_json::json!(n),
-            None => serde_json::Value::Null,
+            None => return serde_json::Value::Null,
         };
     }
     if let Ok(v) = row.try_get::<Option<bool>, _>(index) {
         return match v {
             Some(b) => serde_json::json!(b),
-            None => serde_json::Value::Null,
+            None => return serde_json::Value::Null,
         };
     }
-    serde_json::Value::Null
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return match v {
+            Some(bytes) => serde_json::json!(format!("<binary: {} bytes>", bytes.len())),
+            None => return serde_json::Value::Null,
+        };
+    }
+    serde_json::Value::String(format!("<{}>", type_name))
 }
