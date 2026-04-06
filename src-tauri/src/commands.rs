@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection};
+use sqlator_core::ssh::{SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::DatabaseType;
 use tauri::ipc::Channel;
 use tauri::State;
@@ -176,4 +177,112 @@ pub async fn get_theme(state: State<'_, AppState>) -> CmdResult<String> {
 #[tauri::command]
 pub async fn save_theme(state: State<'_, AppState>, theme: String) -> CmdResult<()> {
     state.config.save_theme(&theme).map_err(map_err)
+}
+
+// --- SSH Tunnels ---
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SshTunnelRequest {
+    pub profile_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub key_path: Option<String>,
+    pub key_passphrase: Option<String>,
+    pub password: Option<String>,
+    pub target_host: String,
+    pub target_port: u16,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SshTunnelInfo {
+    pub profile_id: String,
+    pub local_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+}
+
+#[tauri::command]
+pub async fn create_ssh_tunnel(
+    state: State<'_, AppState>,
+    request: SshTunnelRequest,
+) -> CmdResult<SshTunnelInfo> {
+    let auth_config = match request.auth_method.as_str() {
+        "key" => {
+            let key_path = request.key_path.clone().unwrap_or_default();
+            if let Some(passphrase) = &request.key_passphrase {
+                SshAuthConfig::with_key_and_passphrase(&request.username, key_path, passphrase)
+            } else {
+                SshAuthConfig::with_key(&request.username, key_path)
+            }
+        }
+        "password" => {
+            let password = request.password.clone().unwrap_or_default();
+            SshAuthConfig::with_password(&request.username, password)
+        }
+        "agent" => SshAuthConfig::with_agent(&request.username),
+        _ => {
+            return Err(format!(
+                "Unsupported auth method: {}",
+                request.auth_method
+            ))
+        }
+    };
+
+    let ssh_config = SshHostConfig::new(&request.host, request.port, auth_config.clone());
+
+    let tunnel = SshTunnel::create(
+        request.profile_id.clone(),
+        &ssh_config,
+        auth_config,
+        request.target_host.clone(),
+        request.target_port,
+        vec![],
+    )
+    .await
+    .map_err(map_err)?;
+
+    SshTunnel::start_forwarding(&tunnel)
+        .await
+        .map_err(map_err)?;
+
+    let info = SshTunnelInfo {
+        profile_id: tunnel.profile_id.clone(),
+        local_port: tunnel.local_port,
+        target_host: tunnel.target_host.clone(),
+        target_port: tunnel.target_port,
+    };
+
+    state.tunnels.insert(request.profile_id, tunnel);
+
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn close_ssh_tunnel(state: State<'_, AppState>, profile_id: String) -> CmdResult<()> {
+    let (_, tunnel) = state
+        .tunnels
+        .remove(&profile_id)
+        .ok_or_else(|| format!("Tunnel '{}' not found", profile_id))?;
+
+    SshTunnel::close(tunnel).await.map_err(map_err)?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_active_tunnels(state: State<'_, AppState>) -> CmdResult<Vec<SshTunnelInfo>> {
+    let tunnels: Vec<SshTunnelInfo> = state
+        .tunnels
+        .iter()
+        .map(|entry| SshTunnelInfo {
+            profile_id: entry.profile_id.clone(),
+            local_port: entry.local_port,
+            target_host: entry.target_host.clone(),
+            target_port: entry.target_port,
+        })
+        .collect();
+
+    Ok(tunnels)
 }

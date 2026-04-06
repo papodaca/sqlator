@@ -23,6 +23,9 @@ pub fn run() {
             commands::save_query,
             commands::get_theme,
             commands::save_theme,
+            commands::create_ssh_tunnel,
+            commands::close_ssh_tunnel,
+            commands::get_active_tunnels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
