@@ -1,5 +1,5 @@
 use crate::error::CoreError;
-use crate::models::SavedConnection;
+use crate::models::{SavedConnection, SshProfile};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -17,6 +17,8 @@ struct ConfigData {
     queries: HashMap<String, String>,
     /// Theme preference: "light", "dark", or "system"
     theme: Option<String>,
+    /// SSH profiles (credentials stored separately in keyring)
+    ssh_profiles: HashMap<String, SshProfile>,
 }
 
 impl ConfigManager {
@@ -102,5 +104,70 @@ impl ConfigManager {
         let mut config = self.load()?;
         config.theme = Some(theme.to_string());
         self.save(&config)
+    }
+
+    // ── SSH Profiles ──────────────────────────────────────────────────────────
+
+    pub fn get_ssh_profiles(&self) -> Result<Vec<SshProfile>, CoreError> {
+        let config = self.load()?;
+        let mut profiles: Vec<SshProfile> = config.ssh_profiles.values().cloned().collect();
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(profiles)
+    }
+
+    pub fn get_ssh_profile(&self, id: &str) -> Result<Option<SshProfile>, CoreError> {
+        let config = self.load()?;
+        Ok(config.ssh_profiles.get(id).cloned())
+    }
+
+    pub fn save_ssh_profile(&self, profile: SshProfile) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        config.ssh_profiles.insert(profile.id.clone(), profile);
+        self.save(&config)
+    }
+
+    pub fn update_ssh_profile(&self, profile: SshProfile) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        if !config.ssh_profiles.contains_key(&profile.id) {
+            return Err(CoreError {
+                message: format!("SSH profile '{}' not found", profile.id),
+                code: "NOT_FOUND".into(),
+            });
+        }
+        config.ssh_profiles.insert(profile.id.clone(), profile);
+        self.save(&config)
+    }
+
+    /// Delete a profile. Returns an error if any connection still references it
+    /// (callers must pass `in_use = true` when that is the case).
+    pub fn delete_ssh_profile(&self, id: &str) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+
+        // Warn if any connection references this profile
+        let in_use = config
+            .connections
+            .values()
+            .any(|c| c.ssh_profile_id.as_deref() == Some(id));
+
+        if in_use {
+            return Err(CoreError {
+                message: "Cannot delete SSH profile: one or more connections are using it".into(),
+                code: "PROFILE_IN_USE".into(),
+            });
+        }
+
+        config.ssh_profiles.remove(id);
+        self.save(&config)
+    }
+
+    /// Returns the IDs of all connections that reference the given SSH profile.
+    pub fn connections_using_profile(&self, profile_id: &str) -> Result<Vec<String>, CoreError> {
+        let config = self.load()?;
+        Ok(config
+            .connections
+            .values()
+            .filter(|c| c.ssh_profile_id.as_deref() == Some(profile_id))
+            .map(|c| c.id.clone())
+            .collect())
     }
 }

@@ -1,5 +1,6 @@
 use crate::state::AppState;
-use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection};
+use sqlator_core::credentials;
+use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection, SshProfile};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::DatabaseType;
 use tauri::ipc::Channel;
@@ -46,6 +47,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),
         url: config.url,
+        ssh_profile_id: None,
     };
 
     state.config.save_connection(conn.clone()).map_err(map_err)?;
@@ -83,6 +85,7 @@ pub async fn update_connection(
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),
         url: config.url,
+        ssh_profile_id: None,
     };
 
     state.config.update_connection(conn.clone()).map_err(map_err)?;
@@ -292,4 +295,146 @@ pub async fn get_active_tunnels(state: State<'_, AppState>) -> CmdResult<Vec<Ssh
         .collect();
 
     Ok(tunnels)
+}
+
+// --- SSH Profiles ---
+
+/// Frontend-facing SSH profile (no secrets).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SshProfileConfig {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub key_path: Option<String>,
+    /// Set to store/update a password in the keyring (not returned on read)
+    pub password: Option<String>,
+    /// Set to store/update a key passphrase in the keyring (not returned on read)
+    pub key_passphrase: Option<String>,
+    pub proxy_jump: Vec<sqlator_core::models::SshJumpHost>,
+    pub local_port_binding: Option<u16>,
+    pub keepalive_interval: Option<u32>,
+}
+
+#[tauri::command]
+pub async fn get_ssh_profiles(state: State<'_, AppState>) -> CmdResult<Vec<SshProfile>> {
+    state.config.get_ssh_profiles().map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn save_ssh_profile(
+    state: State<'_, AppState>,
+    config: SshProfileConfig,
+) -> CmdResult<SshProfile> {
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let auth_method = parse_auth_method(&config.auth_method)?;
+
+    let profile = SshProfile {
+        id: id.clone(),
+        name: config.name,
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        auth_method,
+        key_path: config.key_path,
+        proxy_jump: config.proxy_jump,
+        local_port_binding: config.local_port_binding,
+        keepalive_interval: config.keepalive_interval,
+    };
+
+    state.config.save_ssh_profile(profile.clone()).map_err(map_err)?;
+
+    // Store secrets in keyring if provided
+    if let Some(pw) = &config.password {
+        if !pw.is_empty() {
+            credentials::store_credential(&id, "password", pw).map_err(map_err)?;
+        }
+    }
+    if let Some(pp) = &config.key_passphrase {
+        if !pp.is_empty() {
+            credentials::store_credential(&id, "passphrase", pp).map_err(map_err)?;
+        }
+    }
+
+    Ok(profile)
+}
+
+#[tauri::command]
+pub async fn update_ssh_profile(
+    state: State<'_, AppState>,
+    id: String,
+    config: SshProfileConfig,
+) -> CmdResult<SshProfile> {
+    // Check profile exists
+    state
+        .config
+        .get_ssh_profile(&id)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{id}' not found"))?;
+
+    let auth_method = parse_auth_method(&config.auth_method)?;
+
+    let profile = SshProfile {
+        id: id.clone(),
+        name: config.name,
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        auth_method,
+        key_path: config.key_path,
+        proxy_jump: config.proxy_jump,
+        local_port_binding: config.local_port_binding,
+        keepalive_interval: config.keepalive_interval,
+    };
+
+    state.config.update_ssh_profile(profile.clone()).map_err(map_err)?;
+
+    // Update secrets if provided (empty string = leave unchanged)
+    if let Some(pw) = &config.password {
+        if !pw.is_empty() {
+            credentials::store_credential(&id, "password", pw).map_err(map_err)?;
+        }
+    }
+    if let Some(pp) = &config.key_passphrase {
+        if !pp.is_empty() {
+            credentials::store_credential(&id, "passphrase", pp).map_err(map_err)?;
+        }
+    }
+
+    Ok(profile)
+}
+
+#[tauri::command]
+pub async fn delete_ssh_profile(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<()> {
+    // This returns an error (PROFILE_IN_USE) if connections reference it
+    state.config.delete_ssh_profile(&id).map_err(map_err)?;
+    // Clean up keyring entries
+    credentials::delete_all_credentials(&id).map_err(map_err)?;
+    Ok(())
+}
+
+/// Returns connection IDs that use a given profile — used to warn before delete.
+#[tauri::command]
+pub async fn connections_using_ssh_profile(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> CmdResult<Vec<String>> {
+    state
+        .config
+        .connections_using_profile(&profile_id)
+        .map_err(map_err)
+}
+
+fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {
+    match s {
+        "key" => Ok(sqlator_core::models::SshAuthMethod::Key),
+        "password" => Ok(sqlator_core::models::SshAuthMethod::Password),
+        "agent" => Ok(sqlator_core::models::SshAuthMethod::Agent),
+        other => Err(format!("Unknown auth method: {other}")),
+    }
 }

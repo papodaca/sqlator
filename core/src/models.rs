@@ -1,5 +1,46 @@
 use serde::{Deserialize, Serialize};
 
+// ── SSH Profiles ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthMethod {
+    Key,
+    Password,
+    Agent,
+}
+
+/// A jump-host hop in a ProxyJump chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshJumpHost {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: SshAuthMethod,
+    /// Path to identity file (if auth_method = Key)
+    pub key_path: Option<String>,
+}
+
+/// Stored SSH profile — credentials (passwords/passphrases) live in the OS
+/// keyring keyed by profile id; only non-secret fields live here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshProfile {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: SshAuthMethod,
+    /// Path to identity file (if auth_method = Key)
+    pub key_path: Option<String>,
+    /// Jump host chain (empty = direct connection)
+    pub proxy_jump: Vec<SshJumpHost>,
+    /// Preferred local port for the tunnel (None = auto-assign)
+    pub local_port_binding: Option<u16>,
+    /// Keep-alive interval in seconds (None = disabled)
+    pub keepalive_interval: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub id: String,
@@ -11,6 +52,9 @@ pub struct SavedConnection {
     pub database: String,
     pub username: String,
     pub url: String, // MVP: stored as-is; TODO: migrate passwords to OS keychain
+    /// Optional link to an SshProfile for tunnelled connections
+    #[serde(default)]
+    pub ssh_profile_id: Option<String>,
 }
 
 impl SavedConnection {

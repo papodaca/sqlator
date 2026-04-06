@@ -63,3 +63,44 @@ export interface SshHostEntry {
   identity_file: string | null;
   proxy_jump: string | null;
 }
+
+export type SshAuthMethod = "key" | "password" | "agent";
+
+export interface SshJumpHost {
+  host: string;
+  port: number;
+  username: string;
+  auth_method: SshAuthMethod;
+  key_path: string | null;
+}
+
+/** Mirrors core::models::SshProfile — no secrets */
+export interface SshProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: SshAuthMethod;
+  key_path: string | null;
+  proxy_jump: SshJumpHost[];
+  local_port_binding: number | null;
+  keepalive_interval: number | null;
+}
+
+/** Payload sent to save_ssh_profile / update_ssh_profile */
+export interface SshProfileConfig {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: SshAuthMethod;
+  key_path: string | null;
+  /** Provide to store/update; omit or empty to leave unchanged */
+  password: string | null;
+  /** Provide to store/update; omit or empty to leave unchanged */
+  key_passphrase: string | null;
+  proxy_jump: SshJumpHost[];
+  local_port_binding: number | null;
+  keepalive_interval: number | null;
+}
