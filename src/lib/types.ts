@@ -64,6 +64,14 @@ export interface QueryEvent {
   data: unknown;
 }
 
+// --- Credential storage ---
+
+export type StorageMode = "keyring" | "vault";
+
+export interface VaultSettings {
+  timeout_secs: number;
+}
+
 // --- SSH ---
 
 export interface SshHostEntry {

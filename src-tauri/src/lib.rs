@@ -34,6 +34,16 @@ pub fn run() {
             commands::connections_using_ssh_profile,
             commands::parse_connection_url,
             commands::test_connection_with_ssh,
+            commands::check_keyring_available,
+            commands::get_storage_mode,
+            commands::set_storage_mode,
+            commands::vault_exists,
+            commands::is_vault_locked,
+            commands::create_vault,
+            commands::unlock_vault,
+            commands::lock_vault,
+            commands::get_vault_settings,
+            commands::save_vault_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

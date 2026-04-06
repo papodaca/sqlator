@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use sqlator_core::credentials;
+use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
 use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection, SshProfile};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::DatabaseType;
@@ -346,15 +346,15 @@ pub async fn save_ssh_profile(
 
     state.config.save_ssh_profile(profile.clone()).map_err(map_err)?;
 
-    // Store secrets in keyring if provided
+    // Store secrets in credential store if provided
     if let Some(pw) = &config.password {
         if !pw.is_empty() {
-            credentials::store_credential(&id, "password", pw).map_err(map_err)?;
+            state.credentials.store_credential(&id, "password", pw).map_err(map_err)?;
         }
     }
     if let Some(pp) = &config.key_passphrase {
         if !pp.is_empty() {
-            credentials::store_credential(&id, "passphrase", pp).map_err(map_err)?;
+            state.credentials.store_credential(&id, "passphrase", pp).map_err(map_err)?;
         }
     }
 
@@ -394,12 +394,12 @@ pub async fn update_ssh_profile(
     // Update secrets if provided (empty string = leave unchanged)
     if let Some(pw) = &config.password {
         if !pw.is_empty() {
-            credentials::store_credential(&id, "password", pw).map_err(map_err)?;
+            state.credentials.store_credential(&id, "password", pw).map_err(map_err)?;
         }
     }
     if let Some(pp) = &config.key_passphrase {
         if !pp.is_empty() {
-            credentials::store_credential(&id, "passphrase", pp).map_err(map_err)?;
+            state.credentials.store_credential(&id, "passphrase", pp).map_err(map_err)?;
         }
     }
 
@@ -413,8 +413,8 @@ pub async fn delete_ssh_profile(
 ) -> CmdResult<()> {
     // This returns an error (PROFILE_IN_USE) if connections reference it
     state.config.delete_ssh_profile(&id).map_err(map_err)?;
-    // Clean up keyring entries
-    credentials::delete_all_credentials(&id).map_err(map_err)?;
+    // Clean up credential entries
+    state.credentials.delete_all_credentials(&id).map_err(map_err)?;
     Ok(())
 }
 
@@ -489,8 +489,8 @@ pub async fn test_connection_with_ssh(
     };
     let target_port = parsed_url.port().unwrap_or(default_port);
 
-    // Build auth config from profile + keyring
-    let auth_config = build_auth_config_for_profile(&profile)?;
+    // Build auth config from profile + credential store
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
 
     // Create ephemeral tunnel (no jump hosts for now — TODO: wire up proxy_jump)
@@ -526,13 +526,13 @@ pub async fn test_connection_with_ssh(
 
 fn build_auth_config_for_profile(
     profile: &sqlator_core::models::SshProfile,
+    credentials: &CredentialStore,
 ) -> CmdResult<SshAuthConfig> {
     use sqlator_core::models::SshAuthMethod;
     match profile.auth_method {
         SshAuthMethod::Key => {
             let key_path = profile.key_path.as_deref().unwrap_or_default();
-            let passphrase = credentials::get_credential(&profile.id, "passphrase")
-                .map_err(map_err)?;
+            let passphrase = credentials.get_credential(&profile.id, "passphrase").map_err(map_err)?;
             if let Some(pp) = passphrase {
                 Ok(SshAuthConfig::with_key_and_passphrase(&profile.username, key_path, pp))
             } else {
@@ -540,13 +540,93 @@ fn build_auth_config_for_profile(
             }
         }
         SshAuthMethod::Password => {
-            let password = credentials::get_credential(&profile.id, "password")
+            let password = credentials
+                .get_credential(&profile.id, "password")
                 .map_err(map_err)?
                 .unwrap_or_default();
             Ok(SshAuthConfig::with_password(&profile.username, password))
         }
         SshAuthMethod::Agent => Ok(SshAuthConfig::with_agent(&profile.username)),
     }
+}
+
+// ── Credential storage settings ───────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn check_keyring_available() -> bool {
+    CredentialStore::keyring_available()
+}
+
+#[tauri::command]
+pub async fn get_storage_mode(state: State<'_, AppState>) -> CmdResult<String> {
+    Ok(state.credentials.mode().to_string())
+}
+
+#[tauri::command]
+pub async fn set_storage_mode(
+    state: State<'_, AppState>,
+    mode: String,
+    migrate: bool,
+) -> CmdResult<()> {
+    let new_mode: StorageMode = mode.parse().map_err(map_err)?;
+
+    if migrate {
+        let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
+        let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
+        state.credentials.migrate_to(&new_mode, &ids).map_err(map_err)?;
+    }
+
+    state.credentials.set_mode(new_mode);
+    state.config.save_storage_mode(&mode).map_err(map_err)?;
+    Ok(())
+}
+
+// ── Vault commands ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn vault_exists(state: State<'_, AppState>) -> CmdResult<bool> {
+    Ok(state.credentials.vault.is_initialized())
+}
+
+#[tauri::command]
+pub async fn is_vault_locked(state: State<'_, AppState>) -> CmdResult<bool> {
+    Ok(state.credentials.vault.is_locked())
+}
+
+#[tauri::command]
+pub async fn create_vault(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    state.credentials.vault.create(&password).map_err(map_err)?;
+    // Auto-switch mode to vault after creation
+    state.credentials.set_mode(StorageMode::Vault);
+    state.config.save_storage_mode("vault").map_err(map_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn unlock_vault(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    state.credentials.vault.unlock(&password).map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn lock_vault(state: State<'_, AppState>) -> CmdResult<()> {
+    state.credentials.vault.lock();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_vault_settings(state: State<'_, AppState>) -> CmdResult<VaultSettings> {
+    let timeout_secs = state.config.get_vault_timeout_secs().map_err(map_err)?;
+    Ok(VaultSettings { timeout_secs })
+}
+
+#[tauri::command]
+pub async fn save_vault_settings(
+    state: State<'_, AppState>,
+    settings: VaultSettings,
+) -> CmdResult<()> {
+    state.credentials.vault.set_timeout(settings.timeout_secs);
+    state.config.save_vault_timeout_secs(settings.timeout_secs).map_err(map_err)?;
+    Ok(())
 }
 
 fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {

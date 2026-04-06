@@ -20,6 +20,12 @@ struct ConfigData {
     /// SSH profiles (credentials stored separately in keyring)
     #[serde(default)]
     ssh_profiles: HashMap<String, SshProfile>,
+    /// Credential storage mode: "keyring" or "vault"
+    #[serde(default)]
+    storage_mode: Option<String>,
+    /// Vault idle timeout in seconds (0 = never)
+    #[serde(default)]
+    vault_timeout_secs: Option<u64>,
 }
 
 impl ConfigManager {
@@ -158,6 +164,30 @@ impl ConfigManager {
         }
 
         config.ssh_profiles.remove(id);
+        self.save(&config)
+    }
+
+    // ── Credential storage settings ───────────────────────────────────────────
+
+    pub fn get_storage_mode(&self) -> Result<Option<String>, CoreError> {
+        let config = self.load()?;
+        Ok(config.storage_mode)
+    }
+
+    pub fn save_storage_mode(&self, mode: &str) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        config.storage_mode = Some(mode.to_string());
+        self.save(&config)
+    }
+
+    pub fn get_vault_timeout_secs(&self) -> Result<u64, CoreError> {
+        let config = self.load()?;
+        Ok(config.vault_timeout_secs.unwrap_or(15 * 60))
+    }
+
+    pub fn save_vault_timeout_secs(&self, secs: u64) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        config.vault_timeout_secs = Some(secs);
         self.save(&config)
     }
 
