@@ -18,6 +18,7 @@ struct ConfigData {
     /// Theme preference: "light", "dark", or "system"
     theme: Option<String>,
     /// SSH profiles (credentials stored separately in keyring)
+    #[serde(default)]
     ssh_profiles: HashMap<String, SshProfile>,
 }
 
