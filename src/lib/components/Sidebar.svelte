@@ -1,18 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { connections } from "$lib/stores/connections.svelte";
+  import { groups } from "$lib/stores/groups.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import ConnectionItem from "./ConnectionItem.svelte";
+  import GroupItem from "./GroupItem.svelte";
   import ConnectionForm from "./ConnectionForm.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import type { ConnectionInfo } from "$lib/types";
 
   let showForm = $state(false);
   let editingConnection = $state<ConnectionInfo | null>(null);
+  let draggedId = $state<string | null>(null);
+  let rootDragOver = $state(false);
+  let creatingGroup = $state(false);
+  let newGroupName = $state("");
 
   onMount(async () => {
     await theme.init();
     await connections.load();
+    await groups.load();
   });
 
   function openNewForm() {
@@ -29,6 +36,62 @@
     showForm = false;
     editingConnection = null;
   }
+
+  // Connections that have no group (ungrouped)
+  const ungrouped = $derived(
+    connections.list.filter((c) => !c.group_id),
+  );
+
+  // Root groups (no parent)
+  const rootGroups = $derived(groups.roots);
+
+  function onDragStart(id: string) {
+    draggedId = id;
+  }
+
+  function onDragEnd() {
+    draggedId = null;
+    rootDragOver = false;
+  }
+
+  function handleRootDragOver(e: DragEvent) {
+    if (!draggedId) return;
+    e.preventDefault();
+    rootDragOver = true;
+  }
+
+  function handleRootDragLeave() {
+    rootDragOver = false;
+  }
+
+  async function handleRootDrop(e: DragEvent) {
+    e.preventDefault();
+    rootDragOver = false;
+    if (!draggedId) return;
+    const id = draggedId;
+    draggedId = null;
+    const info = await groups.moveConnection(id, null);
+    connections.applyMove(info);
+  }
+
+  async function handleCreateGroup() {
+    const name = newGroupName.trim();
+    if (!name) {
+      creatingGroup = false;
+      return;
+    }
+    await groups.create(name);
+    newGroupName = "";
+    creatingGroup = false;
+  }
+
+  function handleGroupNameKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") handleCreateGroup();
+    if (e.key === "Escape") {
+      newGroupName = "";
+      creatingGroup = false;
+    }
+  }
 </script>
 
 <aside class="sidebar">
@@ -36,7 +99,18 @@
     <span class="sidebar-title">Connections</span>
     <div class="sidebar-actions">
       <ThemeToggle />
-      <button class="add-btn" onclick={openNewForm} title="Add connection">
+      <button
+        class="icon-btn"
+        onclick={() => (creatingGroup = true)}
+        title="New group"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          <line x1="12" y1="11" x2="12" y2="17"></line>
+          <line x1="9" y1="14" x2="15" y2="14"></line>
+        </svg>
+      </button>
+      <button class="icon-btn" onclick={openNewForm} title="Add connection">
         <svg
           xmlns="http://www.w3.org/2000/svg"
           width="16"
@@ -55,8 +129,27 @@
     </div>
   </div>
 
-  <div class="connection-list">
-    {#if connections.list.length === 0}
+  <!-- New group input -->
+  {#if creatingGroup}
+    <div class="new-group-row">
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="new-group-input"
+        bind:value={newGroupName}
+        placeholder="Group name…"
+        onkeydown={handleGroupNameKeydown}
+        onblur={handleCreateGroup}
+        autofocus
+      />
+    </div>
+  {/if}
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="connection-list"
+    ondragend={onDragEnd}
+  >
+    {#if connections.list.length === 0 && groups.list.length === 0}
       <div class="empty-list">
         <p>No connections yet</p>
         <button class="add-first-btn" onclick={openNewForm}>
@@ -64,8 +157,35 @@
         </button>
       </div>
     {:else}
-      {#each connections.list as conn (conn.id)}
-        <ConnectionItem connection={conn} onedit={openEditForm} />
+      <!-- Ungrouped connections (drop zone to remove from group) -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="ungrouped-zone"
+        class:drag-over={rootDragOver}
+        ondragover={handleRootDragOver}
+        ondragleave={handleRootDragLeave}
+        ondrop={handleRootDrop}
+      >
+        {#each ungrouped as conn (conn.id)}
+          <div
+            class="draggable-conn"
+            draggable="true"
+            ondragstart={() => onDragStart(conn.id)}
+          >
+            <ConnectionItem connection={conn} onedit={openEditForm} />
+          </div>
+        {/each}
+      </div>
+
+      <!-- Root groups -->
+      {#each rootGroups as group (group.id)}
+        <GroupItem
+          {group}
+          depth={0}
+          {draggedId}
+          onedit={openEditForm}
+          ondragstart={onDragStart}
+        />
       {/each}
     {/if}
   </div>
@@ -107,7 +227,7 @@
     gap: 4px;
   }
 
-  .add-btn {
+  .icon-btn {
     background: none;
     border: 1px solid var(--color-border);
     color: var(--color-text-muted);
@@ -120,9 +240,27 @@
     transition: background-color 0.15s, color 0.15s;
   }
 
-  .add-btn:hover {
+  .icon-btn:hover {
     background: var(--color-surface-2);
     color: var(--color-text);
+  }
+
+  .new-group-row {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .new-group-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px 8px;
+    border: 1px solid var(--color-accent);
+    border-radius: 5px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 12px;
+    font-weight: 600;
+    outline: none;
   }
 
   .connection-list {
@@ -132,6 +270,20 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .ungrouped-zone {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    border-radius: 6px;
+    transition: background-color 0.1s;
+  }
+
+  .ungrouped-zone.drag-over {
+    background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+    outline: 1px dashed var(--color-accent);
+    padding: 4px;
   }
 
   .empty-list {
@@ -160,5 +312,14 @@
 
   .add-first-btn:hover {
     text-decoration: underline;
+  }
+
+  .draggable-conn {
+    cursor: grab;
+  }
+
+  .draggable-conn:active {
+    cursor: grabbing;
+    opacity: 0.6;
   }
 </style>

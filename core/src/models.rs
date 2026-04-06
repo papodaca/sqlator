@@ -1,5 +1,23 @@
 use serde::{Deserialize, Serialize};
 
+// ── Connection Groups ─────────────────────────────────────────────────────────
+
+/// A folder for organizing connections. Max nesting depth: 3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionGroup {
+    pub id: String,
+    pub name: String,
+    /// Optional hex color string (e.g. "#ef4444")
+    pub color: Option<String>,
+    /// Parent group id; None = root level
+    #[serde(default)]
+    pub parent_group_id: Option<String>,
+    /// Sort order within parent
+    pub order: u32,
+    /// Whether this group is collapsed in the sidebar
+    pub collapsed: bool,
+}
+
 // ── SSH Profiles ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,6 +73,9 @@ pub struct SavedConnection {
     /// Optional link to an SshProfile for tunnelled connections
     #[serde(default)]
     pub ssh_profile_id: Option<String>,
+    /// Optional connection group id
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 impl SavedConnection {
@@ -77,6 +98,8 @@ pub struct ConnectionConfig {
     pub url: String,
     #[serde(default)]
     pub ssh_profile_id: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +126,9 @@ pub struct ConnectionInfo {
     pub masked_url: String,
     #[serde(default)]
     pub ssh_profile_id: Option<String>,
+    /// Optional connection group id
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 impl From<&SavedConnection> for ConnectionInfo {
@@ -118,6 +144,7 @@ impl From<&SavedConnection> for ConnectionInfo {
             username: conn.username.clone(),
             masked_url: conn.masked_url(),
             ssh_profile_id: conn.ssh_profile_id.clone(),
+            group_id: conn.group_id.clone(),
         }
     }
 }

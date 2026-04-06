@@ -3,6 +3,7 @@
   import ColorPicker from "./ColorPicker.svelte";
   import SshProfileSelector from "./SshProfileSelector.svelte";
   import { connections } from "$lib/stores/connections.svelte";
+  import { groups } from "$lib/stores/groups.svelte";
   import type { ConnectionColorId, ConnectionInfo, ParsedConnectionUrl } from "$lib/types";
 
   let {
@@ -20,6 +21,7 @@
   let name = $state("");
   let colorId = $state<ConnectionColorId>("blue");
   let sshProfileId = $state<string | null>(null);
+  let groupId = $state<string | null>(null);
   let activeTab = $state<Tab>("url");
   let saving = $state(false);
   let saveError = $state("");
@@ -46,6 +48,7 @@
       name = editing?.name ?? "";
       colorId = (editing?.color_id as ConnectionColorId) ?? "blue";
       sshProfileId = editing?.ssh_profile_id ?? null;
+      groupId = editing?.group_id ?? null;
       url = "";
       testStatus = "idle";
       testMessage = "";
@@ -199,6 +202,7 @@
         color_id: colorId,
         url: effectiveUrl,
         ssh_profile_id: sshProfileId ?? null,
+        group_id: groupId ?? null,
       };
       if (editing) {
         await connections.update(editing.id, config);
@@ -359,6 +363,19 @@
       <span class="label">Color</span>
       <ColorPicker bind:value={colorId} />
     </div>
+
+    <!-- Group -->
+    {#if groups.list.length > 0}
+      <label class="field">
+        <span class="label">Group</span>
+        <select class="input select" bind:value={groupId}>
+          <option value={null}>— No group —</option>
+          {#each groups.list as g (g.id)}
+            <option value={g.id}>{g.name}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
 
     <!-- SSH profile -->
     <div class="field">

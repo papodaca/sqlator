@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
-use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection, SshProfile};
+use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SshProfile};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::DatabaseType;
 use tauri::ipc::Channel;
@@ -48,6 +48,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         username: parsed.username().to_string(),
         url: config.url,
         ssh_profile_id: config.ssh_profile_id,
+        group_id: config.group_id,
     };
 
     state.config.save_connection(conn.clone()).map_err(map_err)?;
@@ -86,6 +87,7 @@ pub async fn update_connection(
         username: parsed.username().to_string(),
         url: config.url,
         ssh_profile_id: config.ssh_profile_id,
+        group_id: config.group_id,
     };
 
     state.config.update_connection(conn.clone()).map_err(map_err)?;
@@ -627,6 +629,75 @@ pub async fn save_vault_settings(
     state.credentials.vault.set_timeout(settings.timeout_secs);
     state.config.save_vault_timeout_secs(settings.timeout_secs).map_err(map_err)?;
     Ok(())
+}
+
+// ── Connection Groups ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_groups(state: State<'_, AppState>) -> CmdResult<Vec<ConnectionGroup>> {
+    state.config.get_groups().map_err(map_err)
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SaveGroupPayload {
+    pub name: String,
+    pub color: Option<String>,
+    pub parent_group_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn save_group(
+    state: State<'_, AppState>,
+    payload: SaveGroupPayload,
+) -> CmdResult<ConnectionGroup> {
+    let groups = state.config.get_groups().map_err(map_err)?;
+    let order = groups.len() as u32;
+
+    let group = ConnectionGroup {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: payload.name,
+        color: payload.color,
+        parent_group_id: payload.parent_group_id,
+        order,
+        collapsed: false,
+    };
+
+    state.config.save_group(group.clone()).map_err(map_err)?;
+    Ok(group)
+}
+
+#[tauri::command]
+pub async fn update_group(
+    state: State<'_, AppState>,
+    group: ConnectionGroup,
+) -> CmdResult<ConnectionGroup> {
+    state.config.update_group(group.clone()).map_err(map_err)?;
+    Ok(group)
+}
+
+#[tauri::command]
+pub async fn delete_group(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.config.delete_group(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn move_connection_to_group(
+    state: State<'_, AppState>,
+    connection_id: String,
+    group_id: Option<String>,
+) -> CmdResult<ConnectionInfo> {
+    state
+        .config
+        .move_connection_to_group(&connection_id, group_id.as_deref())
+        .map_err(map_err)?;
+
+    let connections = state.config.get_connections().map_err(map_err)?;
+    let conn = connections
+        .iter()
+        .find(|c| c.id == connection_id)
+        .ok_or_else(|| format!("Connection '{connection_id}' not found"))?;
+
+    Ok(ConnectionInfo::from(conn))
 }
 
 fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {

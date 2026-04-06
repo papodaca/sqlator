@@ -44,6 +44,11 @@ pub fn run() {
             commands::lock_vault,
             commands::get_vault_settings,
             commands::save_vault_settings,
+            commands::get_groups,
+            commands::save_group,
+            commands::update_group,
+            commands::delete_group,
+            commands::move_connection_to_group,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

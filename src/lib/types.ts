@@ -21,6 +21,7 @@ export interface ConnectionInfo {
   username: string;
   masked_url: string;
   ssh_profile_id?: string | null;
+  group_id?: string | null;
 }
 
 export interface ConnectionConfig {
@@ -28,6 +29,16 @@ export interface ConnectionConfig {
   color_id: ConnectionColorId;
   url: string;
   ssh_profile_id?: string | null;
+  group_id?: string | null;
+}
+
+export interface ConnectionGroup {
+  id: string;
+  name: string;
+  color: string | null;
+  parent_group_id: string | null;
+  order: number;
+  collapsed: boolean;
 }
 
 export interface ParsedConnectionUrl {

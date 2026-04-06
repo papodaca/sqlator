@@ -87,4 +87,9 @@ export const connections = {
       await this.select(activeId);
     }
   },
+
+  /** Apply an updated ConnectionInfo (e.g. after a group move) without a full reload. */
+  applyMove(info: ConnectionInfo) {
+    connectionList = connectionList.map((c) => (c.id === info.id ? info : c));
+  },
 };

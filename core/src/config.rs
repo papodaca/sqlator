@@ -1,5 +1,5 @@
 use crate::error::CoreError;
-use crate::models::{SavedConnection, SshProfile};
+use crate::models::{ConnectionGroup, SavedConnection, SshProfile};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -26,6 +26,9 @@ struct ConfigData {
     /// Vault idle timeout in seconds (0 = never)
     #[serde(default)]
     vault_timeout_secs: Option<u64>,
+    /// Connection groups
+    #[serde(default)]
+    groups: HashMap<String, ConnectionGroup>,
 }
 
 impl ConfigManager {
@@ -200,5 +203,75 @@ impl ConfigManager {
             .filter(|c| c.ssh_profile_id.as_deref() == Some(profile_id))
             .map(|c| c.id.clone())
             .collect())
+    }
+
+    // ── Connection Groups ──────────────────────────────────────────────────────
+
+    pub fn get_groups(&self) -> Result<Vec<ConnectionGroup>, CoreError> {
+        let config = self.load()?;
+        let mut groups: Vec<ConnectionGroup> = config.groups.values().cloned().collect();
+        groups.sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
+        Ok(groups)
+    }
+
+    pub fn save_group(&self, group: ConnectionGroup) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        config.groups.insert(group.id.clone(), group);
+        self.save(&config)
+    }
+
+    pub fn update_group(&self, group: ConnectionGroup) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        if !config.groups.contains_key(&group.id) {
+            return Err(CoreError {
+                message: format!("Group '{}' not found", group.id),
+                code: "NOT_FOUND".into(),
+            });
+        }
+        config.groups.insert(group.id.clone(), group);
+        self.save(&config)
+    }
+
+    /// Delete a group, reassigning its children to the group's parent (or root).
+    /// Child sub-groups are also re-parented to the deleted group's parent.
+    pub fn delete_group(&self, id: &str) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+
+        let parent_id = config
+            .groups
+            .get(id)
+            .and_then(|g| g.parent_group_id.clone());
+
+        // Re-parent child groups
+        for group in config.groups.values_mut() {
+            if group.parent_group_id.as_deref() == Some(id) {
+                group.parent_group_id = parent_id.clone();
+            }
+        }
+
+        // Re-parent connections
+        for conn in config.connections.values_mut() {
+            if conn.group_id.as_deref() == Some(id) {
+                conn.group_id = parent_id.clone();
+            }
+        }
+
+        config.groups.remove(id);
+        self.save(&config)
+    }
+
+    /// Move a connection to a different group (or remove from any group if group_id is None).
+    pub fn move_connection_to_group(
+        &self,
+        connection_id: &str,
+        group_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        let conn = config.connections.get_mut(connection_id).ok_or_else(|| CoreError {
+            message: format!("Connection '{}' not found", connection_id),
+            code: "NOT_FOUND".into(),
+        })?;
+        conn.group_id = group_id.map(|s| s.to_string());
+        self.save(&config)
     }
 }
