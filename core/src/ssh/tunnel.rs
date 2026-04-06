@@ -1,7 +1,7 @@
 use crate::ssh::auth::{AuthMethod, SshAuthConfig, SshHostConfig};
 use crate::ssh::error::{SshError, SshResult};
 use russh::*;
-use russh_keys::*;
+use russh::keys::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;

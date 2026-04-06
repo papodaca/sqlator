@@ -20,10 +20,8 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 dirs = "6"
 
-russh = "0.50"
-russh-keys = "0.50.0-beta.7"
+russh = "0.60"
 tokio-util = { version = "0.7", features = ["codec"] }
-async-trait = "0.1"
 zeroize = "1"
 thiserror = "2"
 tracing = "0.1"
