@@ -23,6 +23,7 @@ pub fn run() {
             commands::save_query,
             commands::get_theme,
             commands::save_theme,
+            commands::list_ssh_hosts,
             commands::create_ssh_tunnel,
             commands::close_ssh_tunnel,
             commands::get_active_tunnels,

@@ -21,6 +21,7 @@ url = "2"
 dirs = "6"
 
 russh = "0.60"
+russh-config = "0.58"
 tokio-util = { version = "0.7", features = ["codec"] }
 zeroize = "1"
 thiserror = "2"

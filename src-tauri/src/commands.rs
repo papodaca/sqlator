@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use sqlator_core::models::{ConnectionConfig, ConnectionInfo, QueryEvent, SavedConnection};
-use sqlator_core::ssh::{SshAuthConfig, SshHostConfig, SshTunnel};
+use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::DatabaseType;
 use tauri::ipc::Channel;
 use tauri::State;
@@ -177,6 +177,13 @@ pub async fn get_theme(state: State<'_, AppState>) -> CmdResult<String> {
 #[tauri::command]
 pub async fn save_theme(state: State<'_, AppState>, theme: String) -> CmdResult<()> {
     state.config.save_theme(&theme).map_err(map_err)
+}
+
+// --- SSH Config ---
+
+#[tauri::command]
+pub async fn list_ssh_hosts() -> CmdResult<Vec<HostEntry>> {
+    config_parser::load_ssh_config().map_err(map_err)
 }
 
 // --- SSH Tunnels ---

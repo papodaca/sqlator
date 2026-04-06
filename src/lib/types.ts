@@ -52,3 +52,14 @@ export interface QueryEvent {
   event: "columns" | "row" | "done" | "rowsAffected" | "error";
   data: unknown;
 }
+
+// --- SSH ---
+
+export interface SshHostEntry {
+  alias: string;
+  hostname: string;
+  port: number;
+  user: string | null;
+  identity_file: string | null;
+  proxy_jump: string | null;
+}

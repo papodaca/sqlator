@@ -6,6 +6,6 @@ pub mod ssh;
 
 pub use db::{detect_database_type, DatabaseType, DbManager};
 pub use ssh::{
-    AuthMethod, JumpHost, SshAuthConfig, SshAuthConfigData, SshError, SshHostConfig, SshResult,
-    SshTunnel, TunnelHandle,
+    AuthMethod, HostEntry, JumpHost, SshAuthConfig, SshAuthConfigData, SshError, SshHostConfig,
+    SshResult, SshTunnel, TunnelHandle,
 };
