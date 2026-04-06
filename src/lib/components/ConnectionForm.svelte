@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import ColorPicker from "./ColorPicker.svelte";
+  import SshProfileSelector from "./SshProfileSelector.svelte";
   import { connections } from "$lib/stores/connections.svelte";
-  import type { ConnectionColorId, ConnectionInfo } from "$lib/types";
+  import type { ConnectionColorId, ConnectionInfo, ParsedConnectionUrl } from "$lib/types";
 
   let {
     editing = null,
@@ -11,35 +13,175 @@
     onclose: () => void;
   } = $props();
 
+  type DbType = "postgres" | "mysql" | "mariadb" | "sqlite";
+  type Tab = "url" | "manual";
+
+  // ── Form-level state ─────────────────────────────────────────────────────────
   let name = $state("");
-  let url = $state("");
   let colorId = $state<ConnectionColorId>("blue");
-  let testStatus = $state<"idle" | "testing" | "success" | "error">("idle");
-  let testMessage = $state("");
+  let sshProfileId = $state<string | null>(null);
+  let activeTab = $state<Tab>("url");
   let saving = $state(false);
   let saveError = $state("");
+  let testStatus = $state<"idle" | "testing" | "success" | "error">("idle");
+  let testMessage = $state("");
 
+  // ── URL tab state ─────────────────────────────────────────────────────────────
+  let url = $state("");
+
+  // ── Manual tab state ──────────────────────────────────────────────────────────
+  let dbType = $state<DbType>("postgres");
+  let host = $state("");
+  let port = $state(5432);
+  let database = $state("");
+  let username = $state("");
+  let password = $state("");
+
+  // Track which editing ID is currently loaded
   let lastEditingId: string | undefined = undefined;
 
   $effect(() => {
     const currentId = editing?.id;
     if (currentId !== lastEditingId) {
       name = editing?.name ?? "";
-      url = "";
       colorId = (editing?.color_id as ConnectionColorId) ?? "blue";
+      sshProfileId = editing?.ssh_profile_id ?? null;
+      url = "";
       testStatus = "idle";
       testMessage = "";
       saveError = "";
       lastEditingId = currentId;
+
+      // Pre-populate manual fields from ConnectionInfo (no password — must re-enter)
+      if (editing) {
+        dbType = (editing.db_type as DbType) ?? "postgres";
+        host = editing.host ?? "";
+        port = editing.port ?? defaultPortFor(dbType);
+        database = editing.database ?? "";
+        username = editing.username ?? "";
+        password = "";
+      } else {
+        dbType = "postgres";
+        host = "";
+        port = 5432;
+        database = "";
+        username = "";
+        password = "";
+      }
     }
   });
 
+  // ── Helpers ───────────────────────────────────────────────────────────────────
+
+  function defaultPortFor(dt: DbType): number {
+    return dt === "postgres" ? 5432 : dt === "mysql" || dt === "mariadb" ? 3306 : 0;
+  }
+
+  /** Build a postgres/mysql/sqlite URL from the manual fields */
+  function buildUrlFromFields(): string {
+    if (!host && dbType !== "sqlite") return "";
+    const scheme = dbType;
+    const userPart = username
+      ? password
+        ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+        : `${encodeURIComponent(username)}@`
+      : "";
+    const portPart = port && port !== defaultPortFor(dbType) ? `:${port}` : `:${port}`;
+    const hostPart = dbType === "sqlite" ? "" : `${host}${portPart}`;
+    const dbPart = database ? `/${database}` : "";
+    return `${scheme}://${userPart}${hostPart}${dbPart}`;
+  }
+
+  /** Parse a connection URL into manual fields. Returns false on failure. */
+  function applyUrlToFields(rawUrl: string): boolean {
+    try {
+      const u = new URL(rawUrl);
+      const scheme = u.protocol.replace(":", "");
+      const dt: DbType =
+        scheme === "postgresql" || scheme === "postgres"
+          ? "postgres"
+          : scheme === "mysql"
+            ? "mysql"
+            : scheme === "mariadb"
+              ? "mariadb"
+              : scheme === "sqlite"
+                ? "sqlite"
+                : "postgres";
+
+      dbType = dt;
+      host = u.hostname;
+      port = u.port ? parseInt(u.port) : defaultPortFor(dt);
+      database = u.pathname.replace(/^\//, "");
+      username = decodeURIComponent(u.username);
+      password = decodeURIComponent(u.password);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────────
+
+  function switchTab(tab: Tab) {
+    if (tab === activeTab) return;
+    if (tab === "manual" && url.trim()) {
+      applyUrlToFields(url.trim());
+    }
+    activeTab = tab;
+  }
+
+  // ── URL tab handlers ──────────────────────────────────────────────────────────
+
+  function onUrlBlur() {
+    if (url.trim()) applyUrlToFields(url.trim());
+  }
+
+  function onUrlPaste(e: ClipboardEvent) {
+    const pasted = e.clipboardData?.getData("text") ?? "";
+    if (pasted.includes("://")) {
+      // Let the paste land in the input, then sync after the next tick
+      setTimeout(() => {
+        const trimmed = url.trim();
+        if (trimmed) applyUrlToFields(trimmed);
+      }, 0);
+    }
+  }
+
+  // ── Manual tab handlers ───────────────────────────────────────────────────────
+
+  function onFieldChange() {
+    url = buildUrlFromFields();
+  }
+
+  function onDbTypeChange() {
+    port = defaultPortFor(dbType);
+    onFieldChange();
+  }
+
+  // ── Effective URL (what gets submitted) ───────────────────────────────────────
+
+  const effectiveUrl = $derived(
+    activeTab === "url" ? url.trim() : buildUrlFromFields(),
+  );
+
+  const canSave = $derived(name.trim() !== "" && effectiveUrl !== "");
+  const canTest = $derived(effectiveUrl !== "" && testStatus !== "testing");
+
+  // ── Actions ───────────────────────────────────────────────────────────────────
+
   async function handleTest() {
-    if (!url.trim()) return;
+    if (!effectiveUrl) return;
     testStatus = "testing";
     testMessage = "";
     try {
-      testMessage = await connections.test(url);
+      if (sshProfileId) {
+        testMessage = await invoke<string>("test_connection_with_ssh", {
+          url: effectiveUrl,
+          sshProfileId,
+        });
+      } else {
+        testMessage = await connections.test(effectiveUrl);
+      }
       testStatus = "success";
     } catch (e) {
       testMessage = String(e);
@@ -48,11 +190,16 @@
   }
 
   async function handleSave() {
-    if (!name.trim() || !url.trim()) return;
+    if (!canSave) return;
     saving = true;
     saveError = "";
     try {
-      const config = { name: name.trim(), color_id: colorId, url: url.trim() };
+      const config = {
+        name: name.trim(),
+        color_id: colorId,
+        url: effectiveUrl,
+        ssh_profile_id: sshProfileId ?? null,
+      };
       if (editing) {
         await connections.update(editing.id, config);
       } else {
@@ -79,6 +226,7 @@
   <div class="form-dialog" onclick={(e: MouseEvent) => e.stopPropagation()}>
     <h2 class="form-title">{editing ? "Edit" : "New"} Connection</h2>
 
+    <!-- Name -->
     <label class="field">
       <span class="label">Name</span>
       <input
@@ -90,21 +238,134 @@
       />
     </label>
 
-    <label class="field">
-      <span class="label">Connection URL</span>
-      <input
-        type="text"
-        bind:value={url}
-        placeholder="postgres://user:pass@host:5432/dbname"
-        class="input font-mono text-sm"
-      />
-    </label>
+    <!-- Tabs -->
+    <div class="tabs">
+      <button
+        class="tab-btn"
+        class:active={activeTab === "url"}
+        type="button"
+        onclick={() => switchTab("url")}
+      >
+        Quick (URL)
+      </button>
+      <button
+        class="tab-btn"
+        class:active={activeTab === "manual"}
+        type="button"
+        onclick={() => switchTab("manual")}
+      >
+        Advanced (Fields)
+      </button>
+    </div>
 
+    <!-- URL tab -->
+    {#if activeTab === "url"}
+      <label class="field">
+        <span class="label">Connection URL</span>
+        <input
+          type="text"
+          bind:value={url}
+          onblur={onUrlBlur}
+          onpaste={onUrlPaste}
+          placeholder="postgres://user:pass@host:5432/dbname"
+          class="input font-mono text-sm"
+        />
+      </label>
+      {#if editing}
+        <p class="hint">Re-enter the full URL to test or change the connection. Previous URL: <code class="masked">{editing.masked_url}</code></p>
+      {/if}
+
+    <!-- Manual tab -->
+    {:else}
+      <div class="manual-grid">
+        <label class="field">
+          <span class="label">Database type</span>
+          <select
+            bind:value={dbType}
+            onchange={onDbTypeChange}
+            class="input select"
+          >
+            <option value="postgres">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="mariadb">MariaDB</option>
+            <option value="sqlite">SQLite</option>
+          </select>
+        </label>
+
+        {#if dbType !== "sqlite"}
+          <label class="field">
+            <span class="label">Host</span>
+            <input
+              type="text"
+              bind:value={host}
+              oninput={onFieldChange}
+              placeholder="localhost"
+              class="input"
+            />
+          </label>
+
+          <label class="field field-port">
+            <span class="label">Port</span>
+            <input
+              type="number"
+              bind:value={port}
+              oninput={onFieldChange}
+              min="1"
+              max="65535"
+              class="input"
+            />
+          </label>
+        {/if}
+
+        <label class="field field-wide">
+          <span class="label">{dbType === "sqlite" ? "File path" : "Database"}</span>
+          <input
+            type="text"
+            bind:value={database}
+            oninput={onFieldChange}
+            placeholder={dbType === "sqlite" ? "/path/to/db.sqlite" : "myapp"}
+            class="input"
+          />
+        </label>
+
+        {#if dbType !== "sqlite"}
+          <label class="field">
+            <span class="label">Username</span>
+            <input
+              type="text"
+              bind:value={username}
+              oninput={onFieldChange}
+              placeholder="admin"
+              class="input"
+            />
+          </label>
+
+          <label class="field">
+            <span class="label">Password</span>
+            <input
+              type="password"
+              bind:value={password}
+              oninput={onFieldChange}
+              placeholder={editing ? "(unchanged)" : ""}
+              class="input"
+            />
+          </label>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Color -->
     <div class="field">
       <span class="label">Color</span>
       <ColorPicker bind:value={colorId} />
     </div>
 
+    <!-- SSH profile -->
+    <div class="field">
+      <SshProfileSelector bind:value={sshProfileId} />
+    </div>
+
+    <!-- Test result -->
     {#if testStatus !== "idle"}
       <div
         class="test-result"
@@ -112,7 +373,7 @@
         class:error={testStatus === "error"}
       >
         {#if testStatus === "testing"}
-          Testing connection...
+          {sshProfileId ? "Establishing SSH tunnel…" : "Testing connection…"}
         {:else}
           {testMessage}
         {/if}
@@ -123,21 +384,26 @@
       <div class="test-result error">{saveError}</div>
     {/if}
 
+    <!-- Actions -->
     <div class="actions">
-      <button class="btn btn-secondary" onclick={onclose}>Cancel</button>
+      <button class="btn btn-secondary" type="button" onclick={onclose}>
+        Cancel
+      </button>
       <button
         class="btn btn-secondary"
+        type="button"
         onclick={handleTest}
-        disabled={!url.trim() || testStatus === "testing"}
+        disabled={!canTest}
       >
         Test Connection
       </button>
       <button
         class="btn btn-primary"
+        type="button"
         onclick={handleSave}
-        disabled={!name.trim() || !url.trim() || saving}
+        disabled={!canSave || saving}
       >
-        {saving ? "Saving..." : "Save"}
+        {saving ? "Saving…" : "Save"}
       </button>
     </div>
   </div>
@@ -159,8 +425,10 @@
     border: 1px solid var(--color-border);
     border-radius: 12px;
     padding: 24px;
-    width: 480px;
+    width: 520px;
     max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -173,6 +441,42 @@
     color: var(--color-text);
   }
 
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .tab-btn {
+    flex: 1;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    transition: background-color 0.15s, color 0.15s;
+  }
+
+  .tab-btn:not(:last-child) {
+    border-right: 1px solid var(--color-border);
+  }
+
+  .tab-btn:hover:not(.active) {
+    background: var(--color-surface-2);
+    color: var(--color-text);
+  }
+
+  .tab-btn.active {
+    background: var(--color-accent);
+    color: white;
+  }
+
+  /* Fields */
   .field {
     display: flex;
     flex-direction: column;
@@ -194,12 +498,44 @@
     font-size: 14px;
     outline: none;
     transition: border-color 0.15s;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .input:focus {
     border-color: var(--color-accent);
   }
 
+  .select {
+    appearance: none;
+    cursor: pointer;
+  }
+
+  /* Manual grid */
+  .manual-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .field-wide {
+    grid-column: 1 / -1;
+  }
+
+  /* Hint text */
+  .hint {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .masked {
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  /* Test result */
   .test-result {
     padding: 8px 12px;
     border-radius: 6px;
@@ -226,11 +562,12 @@
     color: oklch(0.75 0.12 25);
   }
 
+  /* Actions */
   .actions {
     display: flex;
     gap: 8px;
     justify-content: flex-end;
-    margin-top: 8px;
+    margin-top: 4px;
   }
 
   .btn {
@@ -264,5 +601,13 @@
 
   .btn-secondary:hover:not(:disabled) {
     background: var(--color-border);
+  }
+
+  .font-mono {
+    font-family: monospace;
+  }
+
+  .text-sm {
+    font-size: 13px;
   }
 </style>

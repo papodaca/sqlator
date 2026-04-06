@@ -47,7 +47,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),
         url: config.url,
-        ssh_profile_id: None,
+        ssh_profile_id: config.ssh_profile_id,
     };
 
     state.config.save_connection(conn.clone()).map_err(map_err)?;
@@ -85,7 +85,7 @@ pub async fn update_connection(
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),
         url: config.url,
-        ssh_profile_id: None,
+        ssh_profile_id: config.ssh_profile_id,
     };
 
     state.config.update_connection(conn.clone()).map_err(map_err)?;
@@ -428,6 +428,125 @@ pub async fn connections_using_ssh_profile(
         .config
         .connections_using_profile(&profile_id)
         .map_err(map_err)
+}
+
+// --- Connection URL parsing ---
+
+#[derive(Debug, serde::Serialize)]
+pub struct ParsedConnectionUrl {
+    pub db_type: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub password: Option<String>,
+}
+
+#[tauri::command]
+pub async fn parse_connection_url(url: String) -> CmdResult<ParsedConnectionUrl> {
+    let parsed = url::Url::parse(&url).map_err(map_err)?;
+
+    let (db_type, default_port) = match parsed.scheme() {
+        "postgres" | "postgresql" => ("postgres", 5432u16),
+        "mysql" => ("mysql", 3306),
+        "mariadb" => ("mariadb", 3306),
+        "sqlite" => ("sqlite", 0),
+        s => return Err(format!("Unsupported scheme: {s}")),
+    };
+
+    Ok(ParsedConnectionUrl {
+        db_type: db_type.to_string(),
+        host: parsed.host_str().unwrap_or("localhost").to_string(),
+        port: parsed.port().unwrap_or(default_port),
+        database: parsed.path().trim_start_matches('/').to_string(),
+        username: parsed.username().to_string(),
+        password: parsed.password().map(|p| p.to_string()),
+    })
+}
+
+// --- SSH-tunneled connection test ---
+
+#[tauri::command]
+pub async fn test_connection_with_ssh(
+    state: State<'_, AppState>,
+    url: String,
+    ssh_profile_id: String,
+) -> CmdResult<String> {
+    // Look up SSH profile
+    let profile = state
+        .config
+        .get_ssh_profile(&ssh_profile_id)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{ssh_profile_id}' not found"))?;
+
+    // Parse DB URL to get target host/port
+    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
+    let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
+    let default_port = match parsed_url.scheme() {
+        "postgres" | "postgresql" => 5432u16,
+        "mysql" | "mariadb" => 3306,
+        _ => 0,
+    };
+    let target_port = parsed_url.port().unwrap_or(default_port);
+
+    // Build auth config from profile + keyring
+    let auth_config = build_auth_config_for_profile(&profile)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+
+    // Create ephemeral tunnel (no jump hosts for now — TODO: wire up proxy_jump)
+    let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
+    let tunnel = SshTunnel::create(
+        tunnel_id,
+        &ssh_config,
+        auth_config,
+        target_host,
+        target_port,
+        vec![],
+    )
+    .await
+    .map_err(map_err)?;
+
+    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    let local_port = tunnel.local_port;
+
+    // Rewrite DB URL to point at the local tunnel endpoint
+    let mut test_url = parsed_url.clone();
+    let _ = test_url.set_host(Some("127.0.0.1"));
+    let _ = test_url.set_port(Some(local_port));
+    let test_url_str = test_url.to_string();
+
+    // Test the connection through the tunnel
+    let result = sqlator_core::db::DbManager::test_connection(&test_url_str).await;
+
+    // Always close the ephemeral tunnel, even on error
+    SshTunnel::close(tunnel).await.ok();
+
+    result.map_err(map_err)
+}
+
+fn build_auth_config_for_profile(
+    profile: &sqlator_core::models::SshProfile,
+) -> CmdResult<SshAuthConfig> {
+    use sqlator_core::models::SshAuthMethod;
+    match profile.auth_method {
+        SshAuthMethod::Key => {
+            let key_path = profile.key_path.as_deref().unwrap_or_default();
+            let passphrase = credentials::get_credential(&profile.id, "passphrase")
+                .map_err(map_err)?;
+            if let Some(pp) = passphrase {
+                Ok(SshAuthConfig::with_key_and_passphrase(&profile.username, key_path, pp))
+            } else {
+                Ok(SshAuthConfig::with_key(&profile.username, key_path))
+            }
+        }
+        SshAuthMethod::Password => {
+            let password = credentials::get_credential(&profile.id, "password")
+                .map_err(map_err)?
+                .unwrap_or_default();
+            Ok(SshAuthConfig::with_password(&profile.username, password))
+        }
+        SshAuthMethod::Agent => Ok(SshAuthConfig::with_agent(&profile.username)),
+    }
 }
 
 fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {

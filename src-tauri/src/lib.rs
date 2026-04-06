@@ -32,6 +32,8 @@ pub fn run() {
             commands::update_ssh_profile,
             commands::delete_ssh_profile,
             commands::connections_using_ssh_profile,
+            commands::parse_connection_url,
+            commands::test_connection_with_ssh,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

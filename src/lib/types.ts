@@ -14,18 +14,29 @@ export interface ConnectionInfo {
   id: string;
   name: string;
   color_id: ConnectionColorId;
-  db_type: "postgres" | "mysql" | "sqlite";
+  db_type: "postgres" | "mysql" | "mariadb" | "sqlite";
   host: string;
   port: number;
   database: string;
   username: string;
   masked_url: string;
+  ssh_profile_id?: string | null;
 }
 
 export interface ConnectionConfig {
   name: string;
   color_id: ConnectionColorId;
   url: string;
+  ssh_profile_id?: string | null;
+}
+
+export interface ParsedConnectionUrl {
+  db_type: "postgres" | "mysql" | "mariadb" | "sqlite";
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string | null;
 }
 
 export type ConnectionStatus =

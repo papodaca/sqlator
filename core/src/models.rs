@@ -75,6 +75,8 @@ pub struct ConnectionConfig {
     pub name: String,
     pub color_id: String,
     pub url: String,
+    #[serde(default)]
+    pub ssh_profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +101,8 @@ pub struct ConnectionInfo {
     pub database: String,
     pub username: String,
     pub masked_url: String,
+    #[serde(default)]
+    pub ssh_profile_id: Option<String>,
 }
 
 impl From<&SavedConnection> for ConnectionInfo {
@@ -113,6 +117,7 @@ impl From<&SavedConnection> for ConnectionInfo {
             database: conn.database.clone(),
             username: conn.username.clone(),
             masked_url: conn.masked_url(),
+            ssh_profile_id: conn.ssh_profile_id.clone(),
         }
     }
 }
