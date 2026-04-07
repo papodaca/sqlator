@@ -1,43 +1,51 @@
 <script lang="ts">
-  import { query } from "$lib/stores/query.svelte";
+  import type { ResultPaneState } from "$lib/types";
   import ResultGrid from "./ResultGrid.svelte";
   import ErrorDisplay from "./ErrorDisplay.svelte";
+
+  let {
+    result,
+    isExecuting = false,
+  }: {
+    result: ResultPaneState;
+    isExecuting?: boolean;
+  } = $props();
 </script>
 
 <div class="result-pane">
-  {#if query.result.kind === "idle"}
+  {#if result.kind === "idle"}
     <div class="result-empty">
       <span class="text-[--color-text-muted] text-sm">
         Results will appear here
       </span>
     </div>
-  {:else if query.result.kind === "loading"}
+  {:else if result.kind === "loading" || isExecuting}
     <div class="result-loading">
       <div class="spinner"></div>
       <span>Running query...</span>
     </div>
-  {:else if query.result.kind === "results"}
-    {#if query.result.rowCount > 1000}
+  {:else if result.kind === "results"}
+    {#if result.rowCount > 1000}
       <div class="row-limit-notice">
-        Showing first 1,000 of {query.result.rowCount.toLocaleString()} rows
+        Showing first 1,000 of {result.rowCount.toLocaleString()} rows
       </div>
     {/if}
     <ResultGrid
-      columns={query.result.columns}
-      rows={query.result.rows}
+      columns={result.columns}
+      rows={result.rows}
     />
-  {:else if query.result.kind === "empty"}
+  {:else if result.kind === "empty"}
     <div class="result-message">
-      <span>Query returned 0 rows ({query.result.durationMs}ms)</span>
+      <span>Query returned 0 rows ({result.durationMs}ms)</span>
     </div>
-  {:else if query.result.kind === "rowsAffected"}
+  {:else if result.kind === "rowsAffected"}
     <div class="result-message success">
       <span>
-        Query OK, {query.result.count} row{query.result.count !== 1 ? "s" : ""} affected ({query.result.durationMs}ms)
+        Query OK, {result.count} row{result.count !== 1 ? "s" : ""} affected ({result.durationMs}ms)
       </span>
     </div>
-  {:else if query.result.kind === "error"}
-    <ErrorDisplay message={query.result.message} />
+  {:else if result.kind === "error"}
+    <ErrorDisplay message={result.message} />
   {/if}
 </div>
 

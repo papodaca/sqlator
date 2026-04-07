@@ -1,23 +1,36 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
   import { EditorView, basicSetup } from "codemirror";
   import { sql, PostgreSQL, MySQL, SQLite, type SQLDialect } from "@codemirror/lang-sql";
   import { oneDark } from "@codemirror/theme-one-dark";
   import { keymap } from "@codemirror/view";
   import { Prec } from "@codemirror/state";
-  import { connections } from "$lib/stores/connections.svelte";
-  import { query } from "$lib/stores/query.svelte";
+  import { tabs } from "$lib/stores/tabs.svelte";
   import { theme } from "$lib/stores/theme.svelte";
+
+  let {
+    connectionId,
+    queryTabId,
+    sql: initialSql = "",
+    dbType = "postgres",
+  }: {
+    connectionId: string;
+    queryTabId: string;
+    sql?: string;
+    dbType: string;
+  } = $props();
 
   const dialectMap: Record<string, SQLDialect> = {
     postgres: PostgreSQL,
     mysql: MySQL,
+    mariadb: MySQL,
     sqlite: SQLite,
   };
 
   let editorEl = $state<HTMLDivElement | null>(null);
   let view: EditorView | null = null;
+  // Track which tab+connection the editor is currently showing
+  let currentKey = "";
 
   function getEditorSql(): string {
     return view?.state.doc.toString() ?? "";
@@ -25,31 +38,19 @@
 
   async function executeCurrentQuery() {
     const sqlText = getEditorSql();
-    if (!sqlText.trim() || !connections.activeId) return;
-
-    // Persist query
-    try {
-      await invoke("save_query", {
-        connectionId: connections.activeId,
-        query: sqlText,
-      });
-    } catch {
-      // Non-critical
-    }
-
-    await query.execute(connections.activeId, sqlText);
-    return true;
+    if (!sqlText.trim()) return;
+    await tabs.executeQuery(connectionId, queryTabId, sqlText);
   }
 
   function createEditor(
     parent: HTMLElement,
-    dbType: string,
+    dialect: SQLDialect,
     isDark: boolean,
-    initialDoc: string,
+    doc: string,
   ): EditorView {
     const extensions = [
       basicSetup,
-      sql({ dialect: dialectMap[dbType] ?? PostgreSQL }),
+      sql({ dialect }),
       Prec.highest(
         keymap.of([
           {
@@ -62,6 +63,12 @@
         ]),
       ),
       EditorView.lineWrapping,
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          const newSql = update.state.doc.toString();
+          tabs.updateSql(connectionId, queryTabId, newSql);
+        }
+      }),
       EditorView.theme({
         "&": {
           fontSize: "14px",
@@ -85,37 +92,20 @@
       extensions.push(oneDark);
     }
 
-    return new EditorView({
-      doc: initialDoc,
-      extensions,
-      parent,
-    });
+    return new EditorView({ doc, extensions, parent });
   }
 
-  // Rebuild editor when connection or theme changes
-  let lastConnectionId: string | null = null;
-  let lastIsDark: boolean | null = null;
-
   $effect(() => {
-    const active = connections.active;
+    // Key: rebuild editor when tab, connection, or theme changes
+    const key = `${connectionId}:${queryTabId}:${theme.isDark}`;
     const isDark = theme.isDark;
+    const dialect = dialectMap[dbType] ?? PostgreSQL;
 
-    if (!editorEl || !active) return;
+    if (!editorEl) return;
 
-    const connectionChanged = active.id !== lastConnectionId;
-    const themeChanged = isDark !== lastIsDark;
-
-    if (!connectionChanged && !themeChanged && view) return;
-
-    // Save current query before switching
-    if (view && lastConnectionId && connectionChanged) {
-      const currentSql = getEditorSql();
-      if (currentSql.trim()) {
-        invoke("save_query", {
-          connectionId: lastConnectionId,
-          query: currentSql,
-        }).catch(() => {});
-      }
+    if (key === currentKey && view) {
+      // Only theme changed — handled by key change which rebuilds
+      return;
     }
 
     // Destroy old editor
@@ -124,26 +114,10 @@
       view = null;
     }
 
-    // Load saved query for this connection
-    (async () => {
-      let initialDoc = "";
-      try {
-        const saved = await invoke<string | null>("get_query", {
-          connectionId: active.id,
-        });
-        if (saved) initialDoc = saved;
-      } catch {
-        // No saved query
-      }
-
-      if (editorEl) {
-        view = createEditor(editorEl, active.db_type, isDark, initialDoc);
-        view.focus();
-      }
-    })();
-
-    lastConnectionId = active.id;
-    lastIsDark = isDark;
+    // Create new editor with the current tab's SQL
+    view = createEditor(editorEl, dialect, isDark, initialSql);
+    view.focus();
+    currentKey = key;
 
     return () => {
       if (view) {

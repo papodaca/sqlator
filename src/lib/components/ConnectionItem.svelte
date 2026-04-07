@@ -6,6 +6,7 @@
 <script lang="ts">
   import { getColorHex } from "$lib/constants/colors";
   import { connections } from "$lib/stores/connections.svelte";
+  import { tabs } from "$lib/stores/tabs.svelte";
   import type { ConnectionInfo } from "$lib/types";
 
   let {
@@ -20,8 +21,9 @@
   } = $props();
 
   const showMenu = $derived(openMenuId === connection.id);
-  const isActive = $derived(connections.activeId === connection.id);
-  const connectionStatus = $derived(isActive ? connections.status : "disconnected");
+  const connectionTab = $derived(tabs.connectionTabs.find((t) => t.connectionId === connection.id));
+  const isActive = $derived(tabs.activeConnectionId === connection.id);
+  const connectionStatus = $derived(connectionTab?.status ?? "disconnected");
   let confirmDelete = $state(false);
 
   function handleContextMenu(e: MouseEvent) {
@@ -29,8 +31,17 @@
     openMenuId = connection.id;
   }
 
-  function handleClick() {
-    connections.select(connection.id);
+  async function handleClick() {
+    const isNew = tabs.openConnection(connection.id);
+    if (isNew) {
+      tabs.setConnectionStatus(connection.id, "connecting");
+      try {
+        await connections.connectRaw(connection.id);
+        tabs.setConnectionStatus(connection.id, "connected");
+      } catch (e) {
+        tabs.setConnectionStatus(connection.id, "error", String(e));
+      }
+    }
   }
 
   async function handleClone() {
@@ -79,7 +90,7 @@
     {#if isActive && connectionStatus !== "disconnected"}
       <span
         class="status-dot status-{connectionStatus}"
-        title={connectionStatus === "error" ? (connections.error ?? "Connection error") : connectionStatus}
+        title={connectionStatus === "error" ? (connectionTab?.error ?? "Connection error") : connectionStatus}
       ></span>
     {/if}
   </button>

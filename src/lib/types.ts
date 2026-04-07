@@ -75,6 +75,25 @@ export interface QueryEvent {
   data: unknown;
 }
 
+// --- Tabs ---
+
+export interface QueryTab {
+  id: string;
+  label: string;
+  sql: string;
+  isDirty: boolean;
+  result: ResultPaneState;
+  isExecuting: boolean;
+}
+
+export interface ConnectionTab {
+  connectionId: string;
+  queryTabs: QueryTab[];
+  activeQueryTabId: string | null;
+  status: ConnectionStatus;
+  error: string | null;
+}
+
 // --- Import / Export ---
 
 export interface ImportResult {

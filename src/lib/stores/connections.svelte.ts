@@ -94,6 +94,11 @@ export const connections = {
     }
   },
 
+  /** Connect to a database by ID without touching activeId/status (used by tabs). */
+  async connectRaw(id: string) {
+    await invoke("connect_database", { id });
+  },
+
   /** Apply an updated ConnectionInfo (e.g. after a group move) without a full reload. */
   applyMove(info: ConnectionInfo) {
     connectionList = connectionList.map((c) => (c.id === info.id ? info : c));

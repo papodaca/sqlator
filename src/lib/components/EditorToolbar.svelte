@@ -1,29 +1,35 @@
 <script lang="ts">
-  import { connections } from "$lib/stores/connections.svelte";
-  import { query } from "$lib/stores/query.svelte";
+  import type { ConnectionTab, QueryTab } from "$lib/types";
 
-  let statusColor = $derived(
-    connections.status === "connected"
+  let {
+    connectionTab,
+    queryTab,
+  }: {
+    connectionTab: ConnectionTab;
+    queryTab: QueryTab;
+  } = $props();
+
+  const statusColor = $derived(
+    connectionTab.status === "connected"
       ? "var(--color-success)"
-      : connections.status === "error"
+      : connectionTab.status === "error"
         ? "var(--color-error)"
         : "var(--color-text-muted)",
   );
 
-  let statusLabel = $derived(
-    connections.status === "connected"
+  const statusLabel = $derived(
+    connectionTab.status === "connected"
       ? "Connected"
-      : connections.status === "connecting"
+      : connectionTab.status === "connecting"
         ? "Connecting..."
-        : connections.status === "error"
+        : connectionTab.status === "error"
           ? "Error"
           : "Disconnected",
   );
 
-  let durationText = $derived(() => {
-    const r = query.result;
-    if (r.kind === "results" || r.kind === "empty")
-      return `${r.durationMs}ms`;
+  const durationText = $derived(() => {
+    const r = queryTab.result;
+    if (r.kind === "results" || r.kind === "empty") return `${r.durationMs}ms`;
     if (r.kind === "rowsAffected") return `${r.durationMs}ms`;
     return "";
   });
@@ -33,21 +39,15 @@
   <div class="toolbar-left">
     <div class="status-badge" title={statusLabel}>
       <span class="status-dot" style="background-color: {statusColor}"></span>
-      <span class="status-text">{connections.active?.name ?? "—"}</span>
+      <span class="status-text">{statusLabel}</span>
     </div>
-
-    {#if connections.status === "error" && connections.error}
-      <button class="retry-btn" onclick={() => connections.retry()}>
-        Retry
-      </button>
-    {/if}
   </div>
 
   <div class="toolbar-right">
     {#if durationText()}
       <span class="duration">{durationText()}</span>
     {/if}
-    {#if query.isExecuting}
+    {#if queryTab.isExecuting}
       <span class="executing-label">Running...</span>
     {:else}
       <span class="shortcut-hint">Ctrl+Enter to run</span>
@@ -89,21 +89,6 @@
   .status-text {
     font-weight: 500;
     color: var(--color-text);
-  }
-
-  .retry-btn {
-    font-size: 11px;
-    padding: 2px 8px;
-    border: 1px solid var(--color-error);
-    border-radius: 4px;
-    background: transparent;
-    color: var(--color-error);
-    cursor: pointer;
-  }
-
-  .retry-btn:hover {
-    background: var(--color-error);
-    color: white;
   }
 
   .duration {

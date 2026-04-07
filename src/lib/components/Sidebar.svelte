@@ -32,10 +32,15 @@
     }
   }
 
-  onMount(async () => {
-    await theme.init();
-    await connections.load();
-    await groups.load();
+  onMount(() => {
+    theme.init();
+    connections.load();
+    groups.load();
+
+    // Allow TabbedEditor's "+" button to open this form
+    function handleOpenForm() { openNewForm(); }
+    window.addEventListener("sqlator:open-connection-form", handleOpenForm);
+    return () => window.removeEventListener("sqlator:open-connection-form", handleOpenForm);
   });
 
   function openNewForm() {

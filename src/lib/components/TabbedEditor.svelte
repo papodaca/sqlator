@@ -1,0 +1,185 @@
+<script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
+  import { tabs } from "$lib/stores/tabs.svelte";
+  import { connections } from "$lib/stores/connections.svelte";
+  import ConnectionTabBar from "./ConnectionTabBar.svelte";
+  import QueryTabBar from "./QueryTabBar.svelte";
+  import SqlEditor from "./SqlEditor.svelte";
+  import ResultPane from "./ResultPane.svelte";
+  import EditorToolbar from "./EditorToolbar.svelte";
+
+  // Expose a way for the sidebar to open the connection form
+  let { onopenconnectionform }: { onopenconnectionform: () => void } = $props();
+
+  async function handleSelectConnection(connectionId: string) {
+    tabs.setActiveConnection(connectionId);
+  }
+
+  async function handleCloseConnection(connectionId: string) {
+    tabs.closeConnection(connectionId);
+    await invoke("disconnect_database", { id: connectionId }).catch(() => {});
+  }
+
+  function handleNewConnectionTab() {
+    onopenconnectionform();
+  }
+
+  function handleNewQueryTab() {
+    const id = tabs.activeConnectionId;
+    if (id) tabs.createQueryTab(id);
+  }
+
+  function handleSelectQueryTab(queryTabId: string) {
+    const id = tabs.activeConnectionId;
+    if (id) tabs.setActiveQueryTab(id, queryTabId);
+  }
+
+  function handleCloseQueryTab(queryTabId: string) {
+    const id = tabs.activeConnectionId;
+    if (id) tabs.closeQueryTab(id, queryTabId);
+  }
+
+  const activeConnectionTab = $derived(tabs.activeConnectionTab);
+  const activeQueryTab = $derived(tabs.activeQueryTab);
+</script>
+
+<div class="tabbed-editor">
+  {#if tabs.connectionTabs.length > 0}
+    <ConnectionTabBar
+      connectionTabs={tabs.connectionTabs}
+      activeConnectionId={tabs.activeConnectionId}
+      onselect={handleSelectConnection}
+      onclose={handleCloseConnection}
+      onnew={handleNewConnectionTab}
+    />
+
+    {#if activeConnectionTab}
+      <QueryTabBar
+        tabs={activeConnectionTab.queryTabs}
+        activeId={activeConnectionTab.activeQueryTabId}
+        onselect={handleSelectQueryTab}
+        onclose={handleCloseQueryTab}
+        onnew={handleNewQueryTab}
+      />
+
+      <div class="editor-area" role="tabpanel" id="query-panel-{activeQueryTab?.id}">
+        {#if activeConnectionTab.status === "error"}
+          <div class="connection-error">
+            <span class="error-msg">{activeConnectionTab.error ?? "Connection failed"}</span>
+            <button
+              class="retry-btn"
+              onclick={async () => {
+                const id = activeConnectionTab.connectionId;
+                tabs.setConnectionStatus(id, "connecting");
+                try {
+                  await connections.connectRaw(id);
+                  tabs.setConnectionStatus(id, "connected");
+                } catch (e) {
+                  tabs.setConnectionStatus(id, "error", String(e));
+                }
+              }}
+            >Retry</button>
+          </div>
+        {:else if activeConnectionTab.status === "connecting"}
+          <div class="connection-loading">
+            <div class="spinner"></div>
+            <span>Connecting…</span>
+          </div>
+        {:else if activeConnectionTab.status === "connected" && activeQueryTab}
+          <EditorToolbar
+            connectionTab={activeConnectionTab}
+            queryTab={activeQueryTab}
+          />
+          <SqlEditor
+            connectionId={activeConnectionTab.connectionId}
+            queryTabId={activeQueryTab.id}
+            sql={activeQueryTab.sql}
+            dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
+          />
+          <ResultPane result={activeQueryTab.result} isExecuting={activeQueryTab.isExecuting} />
+        {:else}
+          <div class="empty-state">
+            <p>Select a connection to start querying</p>
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {:else}
+    <div class="welcome">
+      <p>Open a connection from the sidebar to start</p>
+    </div>
+  {/if}
+</div>
+
+<style>
+  .tabbed-editor {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .editor-area {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .welcome,
+  .empty-state,
+  .connection-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 12px;
+    color: var(--color-text-muted);
+    font-size: 14px;
+  }
+
+  .connection-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 12px;
+  }
+
+  .error-msg {
+    font-size: 13px;
+    color: var(--color-error);
+    max-width: 400px;
+    text-align: center;
+  }
+
+  .retry-btn {
+    font-size: 12px;
+    padding: 5px 14px;
+    border: 1px solid var(--color-error);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--color-error);
+    cursor: pointer;
+  }
+
+  .retry-btn:hover {
+    background: var(--color-error);
+    color: white;
+  }
+
+  .spinner {
+    width: 22px;
+    height: 22px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+</style>
