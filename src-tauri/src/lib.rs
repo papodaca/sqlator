@@ -15,6 +15,7 @@ pub fn run() {
             commands::save_connection,
             commands::update_connection,
             commands::delete_connection,
+            commands::clone_connection,
             commands::test_connection,
             commands::connect_database,
             commands::disconnect_database,

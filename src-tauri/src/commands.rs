@@ -101,6 +101,20 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> CmdRes
 }
 
 #[tauri::command]
+pub async fn clone_connection(state: State<'_, AppState>, id: String) -> CmdResult<ConnectionInfo> {
+    let connections = state.config.get_connections().map_err(map_err)?;
+    let original = connections
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("Connection '{}' not found", id))?;
+    let mut cloned = original.clone();
+    cloned.id = uuid::Uuid::new_v4().to_string();
+    cloned.name = format!("{} (Copy)", original.name);
+    state.config.save_connection(cloned.clone()).map_err(map_err)?;
+    Ok(ConnectionInfo::from(&cloned))
+}
+
+#[tauri::command]
 pub async fn test_connection(url: String) -> CmdResult<String> {
     sqlator_core::db::DbManager::test_connection(&url)
         .await

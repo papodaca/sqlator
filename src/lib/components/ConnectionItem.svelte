@@ -20,6 +20,8 @@
   } = $props();
 
   const showMenu = $derived(openMenuId === connection.id);
+  const isActive = $derived(connections.activeId === connection.id);
+  const connectionStatus = $derived(isActive ? connections.status : "disconnected");
   let confirmDelete = $state(false);
 
   function handleContextMenu(e: MouseEvent) {
@@ -29,6 +31,11 @@
 
   function handleClick() {
     connections.select(connection.id);
+  }
+
+  async function handleClone() {
+    closeMenu();
+    await connections.clone(connection.id);
   }
 
   async function handleDelete() {
@@ -69,6 +76,12 @@
         >{connection.db_type} &middot; {connection.host}</span
       >
     </div>
+    {#if isActive && connectionStatus !== "disconnected"}
+      <span
+        class="status-dot status-{connectionStatus}"
+        title={connectionStatus === "error" ? (connections.error ?? "Connection error") : connectionStatus}
+      ></span>
+    {/if}
   </button>
 
   {#if showMenu}
@@ -83,6 +96,16 @@
         }}
       >
         Edit
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        onclick={(e: MouseEvent) => {
+          e.stopPropagation();
+          handleClone();
+        }}
+      >
+        Clone
       </button>
       <button
         class="menu-item danger"
@@ -149,6 +172,32 @@
     gap: 1px;
     overflow: hidden;
     min-width: 0;
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .status-dot.status-connecting {
+    background: #f59e0b;
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  .status-dot.status-connected {
+    background: #22c55e;
+  }
+
+  .status-dot.status-error {
+    background: var(--color-error);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
   }
 
   .connection-name {

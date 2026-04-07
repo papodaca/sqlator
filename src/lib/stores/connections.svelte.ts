@@ -53,6 +53,12 @@ export const connections = {
     return info;
   },
 
+  async clone(id: string): Promise<ConnectionInfo> {
+    const info = await invoke<ConnectionInfo>("clone_connection", { id });
+    connectionList = [...connectionList, info];
+    return info;
+  },
+
   async remove(id: string) {
     await invoke("delete_connection", { id });
     connectionList = connectionList.filter((c) => c.id !== id);
