@@ -11,7 +11,6 @@
 
   let showForm = $state(false);
   let editingConnection = $state<ConnectionInfo | null>(null);
-  let draggedId = $state<string | null>(null);
   let rootDragOver = $state(false);
   let creatingGroup = $state(false);
   let newGroupName = $state("");
@@ -45,32 +44,24 @@
   // Root groups (no parent)
   const rootGroups = $derived(groups.roots);
 
-  function onDragStart(id: string) {
-    draggedId = id;
-  }
-
-  function onDragEnd() {
-    draggedId = null;
-    rootDragOver = false;
-  }
-
   function handleRootDragOver(e: DragEvent) {
-    if (!draggedId) return;
     e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
     rootDragOver = true;
   }
 
-  function handleRootDragLeave() {
-    rootDragOver = false;
+  function handleRootDragLeave(e: DragEvent) {
+    if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) {
+      rootDragOver = false;
+    }
   }
 
   async function handleRootDrop(e: DragEvent) {
     e.preventDefault();
     rootDragOver = false;
-    if (!draggedId) return;
-    const id = draggedId;
-    draggedId = null;
-    const info = await groups.moveConnection(id, null);
+    const connId = e.dataTransfer?.getData("text/plain");
+    if (!connId) return;
+    const info = await groups.moveConnection(connId, null);
     connections.applyMove(info);
   }
 
@@ -145,10 +136,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="connection-list"
-    ondragend={onDragEnd}
-  >
+  <div class="connection-list">
     {#if connections.list.length === 0 && groups.list.length === 0}
       <div class="empty-list">
         <p>No connections yet</p>
@@ -170,7 +158,10 @@
           <div
             class="draggable-conn"
             draggable="true"
-            ondragstart={() => onDragStart(conn.id)}
+            ondragstart={(e) => {
+              e.dataTransfer?.setData("text/plain", conn.id);
+              if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+            }}
           >
             <ConnectionItem connection={conn} onedit={openEditForm} />
           </div>
@@ -182,9 +173,7 @@
         <GroupItem
           {group}
           depth={0}
-          {draggedId}
           onedit={openEditForm}
-          ondragstart={onDragStart}
         />
       {/each}
     {/if}

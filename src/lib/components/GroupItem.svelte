@@ -8,15 +8,11 @@
   let {
     group,
     depth = 0,
-    draggedId,
     onedit,
-    ondragstart,
   }: {
     group: ConnectionGroup;
     depth?: number;
-    draggedId: string | null;
     onedit: (conn: ConnectionInfo) => void;
-    ondragstart: (id: string) => void;
   } = $props();
 
   let showMenu = $state(false);
@@ -42,21 +38,24 @@
   }
 
   function handleDragOver(e: DragEvent) {
-    if (!draggedId) return;
     e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
     dragOver = true;
   }
 
-  function handleDragLeave() {
-    dragOver = false;
+  function handleDragLeave(e: DragEvent) {
+    // Only clear if we're leaving the header itself (not entering a child)
+    if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) {
+      dragOver = false;
+    }
   }
 
   async function handleDrop(e: DragEvent) {
     e.preventDefault();
     dragOver = false;
-    if (!draggedId) return;
-    const info = await groups.moveConnection(draggedId, group.id);
-    // Update the connections store in place
+    const connId = e.dataTransfer?.getData("text/plain");
+    if (!connId) return;
+    const info = await groups.moveConnection(connId, group.id);
     connections.applyMove(info);
   }
 
@@ -220,8 +219,8 @@
           class="draggable-conn"
           draggable="true"
           ondragstart={(e) => {
-            e.stopPropagation();
-            ondragstart(conn.id);
+            e.dataTransfer?.setData("text/plain", conn.id);
+            if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
           }}
         >
           <ConnectionItem connection={conn} onedit={onedit} />
@@ -233,9 +232,7 @@
           <GroupItem
             group={child}
             depth={depth + 1}
-            {draggedId}
             {onedit}
-            {ondragstart}
           />
         {/each}
       {/if}
