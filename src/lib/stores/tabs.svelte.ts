@@ -1,6 +1,25 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus } from "$lib/types";
 
+// ── Persistence types ─────────────────────────────────────────────────────────
+
+interface PersistedQueryTab {
+  id: string;
+  label: string;
+  sql: string;
+}
+
+interface PersistedConnectionTab {
+  connectionId: string;
+  queryTabs: PersistedQueryTab[];
+  activeQueryTabId: string | null;
+}
+
+interface PersistedTabState {
+  connectionTabs: PersistedConnectionTab[];
+  activeConnectionId: string | null;
+}
+
 let connectionTabs = $state<ConnectionTab[]>([]);
 let activeConnectionId = $state<string | null>(null);
 
@@ -235,5 +254,65 @@ export const tabs = {
           }
         : ct
     );
+  },
+
+  // ── Persistence ──────────────────────────────────────────────────────────────
+
+  async saveState() {
+    const state: PersistedTabState = {
+      activeConnectionId,
+      connectionTabs: connectionTabs.map((ct) => ({
+        connectionId: ct.connectionId,
+        activeQueryTabId: ct.activeQueryTabId,
+        queryTabs: ct.queryTabs.map((qt) => ({
+          id: qt.id,
+          label: qt.label,
+          sql: qt.sql,
+        })),
+      })),
+    };
+    try {
+      await invoke("save_tab_state", { tabState: state });
+    } catch (e) {
+      console.warn("Failed to save tab state:", e);
+    }
+  },
+
+  async restoreState(connectRaw: (id: string) => Promise<void>) {
+    let persisted: PersistedTabState | null = null;
+    try {
+      persisted = await invoke<PersistedTabState | null>("get_tab_state");
+    } catch {
+      return;
+    }
+    if (!persisted || persisted.connectionTabs.length === 0) return;
+
+    // Restore tabs in "connecting" state, then connect each async
+    connectionTabs = persisted.connectionTabs.map((ct) => ({
+      connectionId: ct.connectionId,
+      activeQueryTabId: ct.activeQueryTabId,
+      status: "connecting" as ConnectionStatus,
+      error: null,
+      queryTabs: ct.queryTabs.map((qt) => ({
+        id: qt.id,
+        label: qt.label,
+        sql: qt.sql,
+        isDirty: false,
+        result: { kind: "idle" as const },
+        isExecuting: false,
+      })),
+    }));
+    activeConnectionId = persisted.activeConnectionId ?? persisted.connectionTabs[0]?.connectionId ?? null;
+
+    // Connect each in background — non-blocking
+    for (const ct of persisted.connectionTabs) {
+      connectRaw(ct.connectionId)
+        .then(() => {
+          this.setConnectionStatus(ct.connectionId, "connected");
+        })
+        .catch((e: unknown) => {
+          this.setConnectionStatus(ct.connectionId, "error", String(e));
+        });
+    }
   },
 };

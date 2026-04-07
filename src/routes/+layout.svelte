@@ -5,12 +5,27 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import VaultUnlockPrompt from "$lib/components/VaultUnlockPrompt.svelte";
   import { credentialStorage } from "$lib/stores/credentials.svelte";
+  import { connections } from "$lib/stores/connections.svelte";
   import { tabs } from "$lib/stores/tabs.svelte";
 
   let { children }: { children: Snippet } = $props();
 
   onMount(async () => {
     await credentialStorage.load();
+    // Restore previous session (connects each tab in background)
+    await tabs.restoreState((id) => connections.connectRaw(id));
+  });
+
+  // Debounced auto-save: persist tab layout 500ms after any state change.
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    // Read reactive state to subscribe; JSON.stringify ensures deep tracking.
+    JSON.stringify(tabs.connectionTabs);
+    JSON.stringify(tabs.activeConnectionId);
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      tabs.saveState();
+    }, 500);
   });
 
   function handleKeydown(e: KeyboardEvent) {

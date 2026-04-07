@@ -29,6 +29,9 @@ struct ConfigData {
     /// Connection groups
     #[serde(default)]
     groups: HashMap<String, ConnectionGroup>,
+    /// Persisted tab layout (open connections + query tabs + SQL text)
+    #[serde(default)]
+    tab_state: Option<serde_json::Value>,
 }
 
 impl ConfigManager {
@@ -257,6 +260,19 @@ impl ConfigManager {
         }
 
         config.groups.remove(id);
+        self.save(&config)
+    }
+
+    // ── Tab state ─────────────────────────────────────────────────────────────
+
+    pub fn get_tab_state(&self) -> Result<Option<serde_json::Value>, CoreError> {
+        let config = self.load()?;
+        Ok(config.tab_state)
+    }
+
+    pub fn save_tab_state(&self, state: serde_json::Value) -> Result<(), CoreError> {
+        let mut config = self.load()?;
+        config.tab_state = Some(state);
         self.save(&config)
     }
 

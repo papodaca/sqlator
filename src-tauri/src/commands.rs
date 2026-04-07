@@ -186,6 +186,18 @@ pub async fn save_query(state: State<'_, AppState>, connection_id: String, query
     state.config.save_query(&connection_id, &query).map_err(map_err)
 }
 
+// --- Tab state ---
+
+#[tauri::command]
+pub async fn get_tab_state(state: State<'_, AppState>) -> CmdResult<Option<serde_json::Value>> {
+    state.config.get_tab_state().map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn save_tab_state(state: State<'_, AppState>, tab_state: serde_json::Value) -> CmdResult<()> {
+    state.config.save_tab_state(tab_state).map_err(map_err)
+}
+
 // --- Theme ---
 
 #[tauri::command]
