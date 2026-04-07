@@ -15,7 +15,6 @@
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let localValue = $state(value === null ? "" : String(value));
-  let isNull = $state(value === null);
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") {
@@ -28,11 +27,7 @@
   }
 
   function commit() {
-    if (isNull) {
-      onSave(null);
-    } else {
-      onSave(localValue === "" ? null : localValue);
-    }
+    onSave(localValue === "" ? null : localValue);
   }
 
   $effect(() => {
@@ -41,30 +36,17 @@
   });
 </script>
 
-<div class="text-editor">
-  {#if isNull}
-    <span class="null-placeholder">NULL</span>
-  {/if}
-  <input
-    bind:this={inputEl}
-    type="text"
-    bind:value={localValue}
-    onkeydown={handleKeydown}
-    onblur={commit}
-    {readonly}
-    class:hidden={isNull}
-  />
-</div>
+<input
+  bind:this={inputEl}
+  type="text"
+  bind:value={localValue}
+  onkeydown={handleKeydown}
+  onblur={commit}
+  placeholder="NULL"
+  {readonly}
+/>
 
 <style>
-  .text-editor {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 100%;
-    height: 100%;
-  }
-
   input {
     width: 100%;
     height: 100%;
@@ -78,15 +60,9 @@
     font-size: 13px;
   }
 
-  input.hidden {
-    display: none;
-  }
-
-  .null-placeholder {
-    padding: 0 8px;
+  input::placeholder {
     color: var(--color-text-muted);
     font-style: italic;
-    font-size: 13px;
-    font-family: var(--font-mono);
+    opacity: 0.7;
   }
 </style>

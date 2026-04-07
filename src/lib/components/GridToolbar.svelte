@@ -4,9 +4,15 @@
   let {
     onAddRow,
     onSave,
+    selectedCount = 0,
+    onDeleteSelected,
+    onDeselectAll,
   }: {
     onAddRow: () => void;
     onSave: () => void;
+    selectedCount?: number;
+    onDeleteSelected?: () => void;
+    onDeselectAll?: () => void;
   } = $props();
 </script>
 
@@ -21,6 +27,16 @@
         <button class="toolbar-btn" onclick={onAddRow} title="Add row (Ctrl/Cmd+N)">
           + Add Row
         </button>
+        {#if selectedCount > 1}
+          <span class="separator"></span>
+          <span class="selection-label">{selectedCount} selected</span>
+          <button class="toolbar-btn danger" onclick={onDeleteSelected}>
+            Delete
+          </button>
+          <button class="toolbar-btn" onclick={onDeselectAll}>
+            Deselect
+          </button>
+        {/if}
       {/if}
     </div>
 
@@ -104,5 +120,26 @@
     border-radius: 4px;
     padding: 2px 8px;
     cursor: help;
+  }
+
+  .separator {
+    width: 1px;
+    height: 16px;
+    background: var(--color-border);
+  }
+
+  .selection-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .toolbar-btn.danger {
+    color: var(--color-error);
+    border-color: var(--color-error);
+  }
+
+  .toolbar-btn.danger:hover {
+    background: var(--color-error);
+    color: white;
   }
 </style>

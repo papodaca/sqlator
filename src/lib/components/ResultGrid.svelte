@@ -143,6 +143,7 @@
     y: number;
     items: ContextMenuItem[];
     targetKey: string;
+    targetCol: string;
   } | null>(null);
 
   function handleContextMenu(e: MouseEvent, row: DisplayRow, colName: string) {
@@ -170,7 +171,7 @@
       items.push({ label: "Delete Row", action: "delete-row", danger: true, disabled: !editStore.isEditable });
     }
 
-    contextMenu = { x: e.clientX, y: e.clientY, items, targetKey: row.__rowKey };
+    contextMenu = { x: e.clientX, y: e.clientY, items, targetKey: row.__rowKey, targetCol: colName };
   }
 
   function handleContextMenuSelect(action: string) {
@@ -180,16 +181,13 @@
     switch (action) {
       case "edit":
         if (targetRow) {
-          const isNewRow = !!targetRow.__isAdded;
-          const firstCol = columns.find((c) => isColumnEditable(c, isNewRow));
-          if (firstCol) startEdit(targetRow.__rowKey, firstCol);
+          startEdit(targetRow.__rowKey, contextMenu.targetCol);
         }
         break;
       case "set-null":
-        // Set the cell to NULL directly (no editor needed)
-        if (targetRow && editingCell?.rowKey === contextMenu.targetKey) {
+        if (targetRow) {
           const isNewRow = !!targetRow.__isAdded;
-          saveCellEdit(targetRow, editingCell.colName, null, isNewRow);
+          saveCellEdit(targetRow, contextMenu.targetCol, null, isNewRow);
         }
         break;
       case "add-row":
@@ -337,22 +335,13 @@
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-<GridToolbar onAddRow={handleAddRow} {onSave} />
-
-<!-- Multi-row action bar -->
-{#if selectedKeys.size > 1}
-  <div class="multi-action-bar">
-    <span class="selected-count">{selectedKeys.size} rows selected</span>
-    {#if editStore.isEditable}
-      <button class="action-btn danger" onclick={deleteSelected}>
-        Delete {selectedKeys.size} rows
-      </button>
-    {/if}
-    <button class="action-btn" onclick={() => { selectedKeys = new Set(); lastSelectedKey = null; }}>
-      Deselect
-    </button>
-  </div>
-{/if}
+<GridToolbar
+  onAddRow={handleAddRow}
+  {onSave}
+  selectedCount={selectedKeys.size}
+  onDeleteSelected={deleteSelected}
+  onDeselectAll={() => { selectedKeys = new Set(); lastSelectedKey = null; }}
+/>
 
 <div class="grid-wrapper" bind:this={scrollEl}>
   <table>
@@ -625,47 +614,4 @@
     background: oklch(0.22 0.03 250) !important;
   }
 
-  /* Multi-action bar */
-  .multi-action-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 5px 10px;
-    background: color-mix(in oklch, var(--color-accent) 12%, var(--color-surface-2));
-    border-bottom: 1px solid color-mix(in oklch, var(--color-accent) 30%, var(--color-border));
-    flex-shrink: 0;
-    font-size: 12px;
-  }
-
-  .selected-count {
-    color: var(--color-text-muted);
-    font-size: 12px;
-    font-family: var(--font-sans, inherit);
-  }
-
-  .action-btn {
-    padding: 3px 10px;
-    font-size: 12px;
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    background: var(--color-surface);
-    color: var(--color-text);
-    cursor: pointer;
-    font-family: var(--font-sans, inherit);
-    transition: background 0.1s;
-  }
-
-  .action-btn:hover {
-    background: var(--color-surface-2);
-  }
-
-  .action-btn.danger {
-    color: var(--color-error);
-    border-color: var(--color-error);
-  }
-
-  .action-btn.danger:hover {
-    background: var(--color-error);
-    color: white;
-  }
 </style>
