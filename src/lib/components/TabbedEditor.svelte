@@ -55,7 +55,8 @@
 
     {#if activeConnectionTab}
       <QueryTabBar
-        tabs={activeConnectionTab.queryTabs}
+        connectionId={activeConnectionTab.connectionId}
+        queryTabs={activeConnectionTab.queryTabs}
         activeId={activeConnectionTab.activeQueryTabId}
         onselect={handleSelectQueryTab}
         onclose={handleCloseQueryTab}

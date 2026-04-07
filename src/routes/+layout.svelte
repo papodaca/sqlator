@@ -8,12 +8,24 @@
   import { connections } from "$lib/stores/connections.svelte";
   import { tabs } from "$lib/stores/tabs.svelte";
 
+  // aria-live announcement text
+  let announcement = $state("");
+
   let { children }: { children: Snippet } = $props();
 
   onMount(async () => {
     await credentialStorage.load();
     // Restore previous session (connects each tab in background)
     await tabs.restoreState((id) => connections.connectRaw(id));
+  });
+
+  // Announce active tab changes for screen readers
+  $effect(() => {
+    const queryTab = tabs.activeQueryTab;
+    const connTab = tabs.activeConnectionTab;
+    if (!queryTab || !connTab) return;
+    const connName = connections.list.find((c) => c.id === connTab.connectionId)?.name ?? connTab.connectionId;
+    announcement = `${queryTab.label}, ${connName}`;
   });
 
   // Debounced auto-save: persist tab layout 500ms after any state change.
@@ -83,6 +95,31 @@
       tabs.cycleQueryTab(-1);
       return;
     }
+
+    // Ctrl+Shift+] — next query tab (VS Code style)
+    if (e.key === "]" && e.shiftKey) {
+      e.preventDefault();
+      tabs.cycleQueryTab(1);
+      return;
+    }
+
+    // Ctrl+Shift+[ — previous query tab (VS Code style)
+    if (e.key === "[" && e.shiftKey) {
+      e.preventDefault();
+      tabs.cycleQueryTab(-1);
+      return;
+    }
+
+    // Ctrl+1-9 — jump to nth connection tab
+    const digit = parseInt(e.key);
+    if (!e.shiftKey && digit >= 1 && digit <= 9) {
+      const target = tabs.connectionTabs[digit - 1];
+      if (target) {
+        e.preventDefault();
+        tabs.setActiveConnection(target.connectionId);
+      }
+      return;
+    }
   }
 
   const needsUnlock = $derived(
@@ -93,6 +130,9 @@
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
+
+<!-- Screen reader live region -->
+<div aria-live="polite" aria-atomic="true" class="sr-only">{announcement}</div>
 
 <div class="app-layout">
   <Sidebar />
@@ -119,5 +159,17 @@
     flex-direction: column;
     overflow: hidden;
     background-color: var(--color-bg);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

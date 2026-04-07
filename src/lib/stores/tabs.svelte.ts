@@ -118,6 +118,52 @@ export const tabs = {
     );
   },
 
+  closeOtherQueryTabs(connectionId: string, keepTabId: string) {
+    connectionTabs = connectionTabs.map((ct) =>
+      ct.connectionId === connectionId
+        ? {
+            ...ct,
+            queryTabs: ct.queryTabs.filter((qt) => qt.id === keepTabId),
+            activeQueryTabId: keepTabId,
+          }
+        : ct
+    );
+  },
+
+  closeAllQueryTabs(connectionId: string) {
+    // Always keep at least one tab — reset to a fresh one
+    const newTab = makeQueryTab(1);
+    connectionTabs = connectionTabs.map((ct) =>
+      ct.connectionId === connectionId
+        ? { ...ct, queryTabs: [newTab], activeQueryTabId: newTab.id }
+        : ct
+    );
+  },
+
+  closeOtherConnectionTabs(keepConnectionId: string) {
+    connectionTabs = connectionTabs.filter((t) => t.connectionId === keepConnectionId);
+    activeConnectionId = keepConnectionId;
+  },
+
+  closeAllConnectionTabs() {
+    connectionTabs = [];
+    activeConnectionId = null;
+  },
+
+  renameQueryTab(connectionId: string, queryTabId: string, label: string) {
+    if (!label.trim()) return;
+    connectionTabs = connectionTabs.map((ct) =>
+      ct.connectionId === connectionId
+        ? {
+            ...ct,
+            queryTabs: ct.queryTabs.map((qt) =>
+              qt.id === queryTabId ? { ...qt, label: label.trim() } : qt
+            ),
+          }
+        : ct
+    );
+  },
+
   setActiveQueryTab(connectionId: string, queryTabId: string) {
     connectionTabs = connectionTabs.map((t) =>
       t.connectionId === connectionId ? { ...t, activeQueryTabId: queryTabId } : t
