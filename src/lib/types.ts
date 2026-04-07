@@ -75,6 +75,15 @@ export interface QueryEvent {
   data: unknown;
 }
 
+// --- Import / Export ---
+
+export interface ImportResult {
+  groups_added: number;
+  profiles_added: number;
+  connections_added: number;
+  connections_skipped: number;
+}
+
 // --- Credential storage ---
 
 export type StorageMode = "keyring" | "vault";

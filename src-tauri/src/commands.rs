@@ -700,6 +700,323 @@ pub async fn move_connection_to_group(
     Ok(ConnectionInfo::from(conn))
 }
 
+// ── Import / Export ───────────────────────────────────────────────────────────
+
+/// Portable representation of a connection (no secrets).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExportedConnection {
+    pub name: String,
+    pub color_id: String,
+    pub db_type: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    /// Name of the linked SSH profile (resolved by name on import)
+    pub ssh_profile_name: Option<String>,
+    /// Name of the group (resolved by name on import)
+    pub group_name: Option<String>,
+}
+
+/// Portable SSH profile — no password or passphrase.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExportedSshProfile {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub key_path: Option<String>,
+    pub proxy_jump: Vec<ExportedJumpHost>,
+    pub local_port_binding: Option<u16>,
+    pub keepalive_interval: Option<u32>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExportedJumpHost {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub key_path: Option<String>,
+}
+
+/// Portable group (parent resolved by name).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExportedGroup {
+    pub name: String,
+    pub color: Option<String>,
+    pub parent_group_name: Option<String>,
+    pub order: u32,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExportFile {
+    pub version: String,
+    pub exported_at: String,
+    pub connections: Vec<ExportedConnection>,
+    pub ssh_profiles: Vec<ExportedSshProfile>,
+    pub groups: Vec<ExportedGroup>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ImportResult {
+    pub groups_added: usize,
+    pub profiles_added: usize,
+    pub connections_added: usize,
+    pub connections_skipped: usize,
+}
+
+/// Build the export JSON without writing to disk. Used internally and by import validation.
+fn build_export_json(state: &AppState) -> Result<String, String> {
+    let connections = state.config.get_connections().map_err(map_err)?;
+    let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
+    let groups = state.config.get_groups().map_err(map_err)?;
+
+    let profile_names: std::collections::HashMap<String, String> =
+        profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+    let group_names: std::collections::HashMap<String, String> =
+        groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
+
+    let exported_connections: Vec<ExportedConnection> = connections
+        .iter()
+        .map(|c| ExportedConnection {
+            name: c.name.clone(),
+            color_id: c.color_id.clone(),
+            db_type: c.db_type.clone(),
+            host: c.host.clone(),
+            port: c.port,
+            database: c.database.clone(),
+            username: c.username.clone(),
+            ssh_profile_name: c.ssh_profile_id.as_ref().and_then(|id| profile_names.get(id)).cloned(),
+            group_name: c.group_id.as_ref().and_then(|id| group_names.get(id)).cloned(),
+        })
+        .collect();
+
+    let exported_profiles: Vec<ExportedSshProfile> = profiles
+        .iter()
+        .map(|p| ExportedSshProfile {
+            name: p.name.clone(),
+            host: p.host.clone(),
+            port: p.port,
+            username: p.username.clone(),
+            auth_method: format!("{:?}", p.auth_method).to_lowercase(),
+            key_path: p.key_path.clone(),
+            proxy_jump: p.proxy_jump.iter().map(|j| ExportedJumpHost {
+                host: j.host.clone(),
+                port: j.port,
+                username: j.username.clone(),
+                auth_method: format!("{:?}", j.auth_method).to_lowercase(),
+                key_path: j.key_path.clone(),
+            }).collect(),
+            local_port_binding: p.local_port_binding,
+            keepalive_interval: p.keepalive_interval,
+        })
+        .collect();
+
+    let exported_groups: Vec<ExportedGroup> = groups
+        .iter()
+        .map(|g| ExportedGroup {
+            name: g.name.clone(),
+            color: g.color.clone(),
+            parent_group_name: g.parent_group_id.as_ref().and_then(|id| group_names.get(id)).cloned(),
+            order: g.order,
+        })
+        .collect();
+
+    let export_file = ExportFile {
+        version: "1.0".to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        connections: exported_connections,
+        ssh_profiles: exported_profiles,
+        groups: exported_groups,
+    };
+
+    serde_json::to_string_pretty(&export_file).map_err(map_err)
+}
+
+/// Write the export JSON to ~/Downloads (or home dir) and return the file path.
+/// Blob-URL downloads don't work in Tauri's webview, so we write from Rust.
+#[tauri::command]
+pub async fn export_connections(state: State<'_, AppState>) -> CmdResult<String> {
+    let json = build_export_json(&state)?;
+
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let filename = format!("sqlator-export-{date}.json");
+
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or("Could not determine export directory")?;
+
+    let path = dir.join(&filename);
+    std::fs::write(&path, json).map_err(map_err)?;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn import_connections(
+    state: State<'_, AppState>,
+    json: String,
+    duplicate_mode: String, // "skip" or "rename"
+) -> CmdResult<ImportResult> {
+    let file: ExportFile = serde_json::from_str(&json).map_err(map_err)?;
+
+    let rename = duplicate_mode == "rename";
+
+    // ── 1. Import groups (roots first, then children) ─────────────────────────
+    let existing_groups = state.config.get_groups().map_err(map_err)?;
+    let existing_group_names: std::collections::HashSet<String> =
+        existing_groups.iter().map(|g| g.name.clone()).collect();
+
+    // name → new id
+    let mut group_id_map: std::collections::HashMap<String, String> =
+        existing_groups.iter().map(|g| (g.name.clone(), g.id.clone())).collect();
+
+    let mut groups_added = 0usize;
+
+    // Up to 3 passes to handle nesting depth
+    let mut remaining: Vec<&ExportedGroup> = file.groups.iter().collect();
+    for _ in 0..3 {
+        let mut next_remaining = Vec::new();
+        for eg in remaining {
+            // If it has a parent, the parent must already be in group_id_map
+            if let Some(ref parent_name) = eg.parent_group_name {
+                if !group_id_map.contains_key(parent_name.as_str()) {
+                    next_remaining.push(eg);
+                    continue;
+                }
+            }
+            // Skip if already exists (by name)
+            if existing_group_names.contains(&eg.name) {
+                continue;
+            }
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let group = sqlator_core::models::ConnectionGroup {
+                id: new_id.clone(),
+                name: eg.name.clone(),
+                color: eg.color.clone(),
+                parent_group_id: eg.parent_group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+                order: eg.order,
+                collapsed: false,
+            };
+            state.config.save_group(group).map_err(map_err)?;
+            group_id_map.insert(eg.name.clone(), new_id);
+            groups_added += 1;
+        }
+        remaining = next_remaining;
+        if remaining.is_empty() { break; }
+    }
+
+    // ── 2. Import SSH profiles ────────────────────────────────────────────────
+    let existing_profiles = state.config.get_ssh_profiles().map_err(map_err)?;
+    let existing_profile_names: std::collections::HashSet<String> =
+        existing_profiles.iter().map(|p| p.name.clone()).collect();
+
+    // name → new id
+    let mut profile_id_map: std::collections::HashMap<String, String> =
+        existing_profiles.iter().map(|p| (p.name.clone(), p.id.clone())).collect();
+
+    let mut profiles_added = 0usize;
+
+    for ep in &file.ssh_profiles {
+        let final_name = if existing_profile_names.contains(&ep.name) {
+            if !rename { continue; }
+            unique_name(&ep.name, &profile_id_map.keys().cloned().collect())
+        } else {
+            ep.name.clone()
+        };
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let auth_method = parse_auth_method(&ep.auth_method)?;
+        let profile = SshProfile {
+            id: new_id.clone(),
+            name: final_name.clone(),
+            host: ep.host.clone(),
+            port: ep.port,
+            username: ep.username.clone(),
+            auth_method,
+            key_path: ep.key_path.clone(),
+            proxy_jump: ep.proxy_jump.iter().map(|j| sqlator_core::models::SshJumpHost {
+                host: j.host.clone(),
+                port: j.port,
+                username: j.username.clone(),
+                auth_method: parse_auth_method(&j.auth_method).unwrap_or(sqlator_core::models::SshAuthMethod::Key),
+                key_path: j.key_path.clone(),
+            }).collect(),
+            local_port_binding: ep.local_port_binding,
+            keepalive_interval: ep.keepalive_interval,
+        };
+        state.config.save_ssh_profile(profile).map_err(map_err)?;
+        profile_id_map.insert(ep.name.clone(), new_id);
+        profiles_added += 1;
+    }
+
+    // ── 3. Import connections ─────────────────────────────────────────────────
+    let existing_connections = state.config.get_connections().map_err(map_err)?;
+    let existing_conn_names: std::collections::HashSet<String> =
+        existing_connections.iter().map(|c| c.name.clone()).collect();
+
+    let mut all_conn_names: std::collections::HashSet<String> = existing_conn_names.clone();
+    let mut connections_added = 0usize;
+    let mut connections_skipped = 0usize;
+
+    for ec in &file.connections {
+        let final_name = if existing_conn_names.contains(&ec.name) {
+            if !rename {
+                connections_skipped += 1;
+                continue;
+            }
+            unique_name(&ec.name, &all_conn_names)
+        } else {
+            ec.name.clone()
+        };
+
+        // Reconstruct a URL without a password
+        let url = build_url_no_password(&ec.db_type, &ec.host, ec.port, &ec.database, &ec.username);
+
+        let conn = sqlator_core::models::SavedConnection {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: final_name.clone(),
+            color_id: ec.color_id.clone(),
+            db_type: ec.db_type.clone(),
+            host: ec.host.clone(),
+            port: ec.port,
+            database: ec.database.clone(),
+            username: ec.username.clone(),
+            url,
+            ssh_profile_id: ec.ssh_profile_name.as_ref().and_then(|n| profile_id_map.get(n)).cloned(),
+            group_id: ec.group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+        };
+        state.config.save_connection(conn).map_err(map_err)?;
+        all_conn_names.insert(final_name);
+        connections_added += 1;
+    }
+
+    Ok(ImportResult { groups_added, profiles_added, connections_added, connections_skipped })
+}
+
+fn unique_name(base: &str, existing: &std::collections::HashSet<String>) -> String {
+    let mut i = 1u32;
+    loop {
+        let candidate = format!("{base} ({i})");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+fn build_url_no_password(db_type: &str, host: &str, port: u16, database: &str, username: &str) -> String {
+    match db_type {
+        "sqlite" => format!("sqlite://{database}"),
+        _ => {
+            let user = if !username.is_empty() { format!("{username}@") } else { String::new() };
+            format!("{db_type}://{user}{host}:{port}/{database}")
+        }
+    }
+}
+
 fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {
     match s {
         "key" => Ok(sqlator_core::models::SshAuthMethod::Key),
