@@ -1,8 +1,8 @@
 use crate::state::AppState;
 use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
-use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SshProfile};
+use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
-use sqlator_core::DatabaseType;
+use sqlator_core::{BatchResult, DatabaseType};
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -1050,4 +1050,159 @@ fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> 
         "agent" => Ok(sqlator_core::models::SshAuthMethod::Agent),
         other => Err(format!("Unknown auth method: {other}")),
     }
+}
+
+// ── Schema Metadata ───────────────────────────────────────────────────────────
+
+/// Extract the single source table from a simple SELECT query.
+/// Returns None if the query is a multi-table join, CTE, or subquery.
+fn extract_single_table(sql: &str) -> Option<(String, Option<String>)> {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+    use sqlparser::ast::{Statement, SetExpr, TableFactor};
+
+    let dialect = GenericDialect {};
+    let stmts = match Parser::parse_sql(&dialect, sql) {
+        Ok(s) => s,
+        Err(_) => {
+            // Fall back to simple regex extraction
+            return extract_table_regex(sql);
+        }
+    };
+
+    let stmt = stmts.into_iter().next()?;
+    let query = match stmt {
+        Statement::Query(q) => q,
+        _ => return None,
+    };
+
+    // Unwrap CTEs — if there's a WITH clause, mark as not-single-table
+    if query.with.is_some() {
+        return None;
+    }
+
+    let body = match *query.body {
+        SetExpr::Select(sel) => sel,
+        _ => return None,
+    };
+
+    // Must have exactly one FROM table with no joins
+    if body.from.len() != 1 {
+        return None;
+    }
+    let table_with_joins = &body.from[0];
+    if !table_with_joins.joins.is_empty() {
+        return None;
+    }
+
+    match &table_with_joins.relation {
+        TableFactor::Table { name, .. } => {
+            let idents: Vec<String> = name.0.iter().map(|i| i.value.clone()).collect();
+            match idents.len() {
+                1 => Some((idents[0].clone(), None)),
+                2 => Some((idents[1].clone(), Some(idents[0].clone()))),
+                _ => None,
+            }
+        }
+        // Subquery or function — not directly editable
+        _ => None,
+    }
+}
+
+fn extract_table_regex(sql: &str) -> Option<(String, Option<String>)> {
+    // Simple regex fallback: FROM tablename (no joins)
+    let upper = sql.to_uppercase();
+    let from_idx = upper.find(" FROM ")?;
+    let after_from = sql[from_idx + 6..].trim_start();
+
+    // Take first token (no spaces, stops at whitespace/semicolon)
+    let table_token: String = after_from
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ';')
+        .collect();
+
+    if table_token.is_empty() || table_token.contains(',') {
+        return None;
+    }
+
+    // Check for JOIN anywhere in the SQL (rough check)
+    let upper2 = sql.to_uppercase();
+    if upper2.contains(" JOIN ") || upper2.contains(",") {
+        return None;
+    }
+
+    // Handle schema.table notation
+    let parts: Vec<&str> = table_token.splitn(2, '.').collect();
+    match parts.len() {
+        1 => Some((parts[0].trim_matches('"').trim_matches('`').to_string(), None)),
+        2 => Some((
+            parts[1].trim_matches('"').trim_matches('`').to_string(),
+            Some(parts[0].trim_matches('"').trim_matches('`').to_string()),
+        )),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_schema_metadata(
+    state: State<'_, AppState>,
+    connection_id: String,
+    sql: String,
+) -> CmdResult<Option<TableMeta>> {
+    let is_select = {
+        let trimmed = sql.trim().to_uppercase();
+        trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
+    };
+    if !is_select {
+        return Ok(None);
+    }
+
+    // Parse table reference
+    let (table_name, schema_name) = match extract_single_table(&sql) {
+        Some(t) => t,
+        None => {
+            // Multi-table or unsupported — return non-editable meta
+            return Ok(Some(TableMeta {
+                table_name: String::new(),
+                schema: None,
+                columns: vec![],
+                primary_key: sqlator_core::PrimaryKeyMeta { columns: vec![], exists: false },
+                is_editable: false,
+                editability_reason: Some("Cannot edit: query joins multiple tables or uses a subquery".into()),
+            }));
+        }
+    };
+
+    // Check cache
+    let cache_key = format!("{connection_id}:{schema_name:?}:{table_name}");
+    if let Some(cached) = state.schema_cache.get(&cache_key) {
+        let (meta, expires_at) = cached.clone();
+        if std::time::Instant::now() < expires_at {
+            return Ok(Some(meta));
+        }
+        drop(cached);
+        state.schema_cache.remove(&cache_key);
+    }
+
+    let meta = state.db
+        .fetch_schema_metadata(&connection_id, &table_name, schema_name.as_deref())
+        .await
+        .map_err(map_err)?;
+
+    // Cache for 5 minutes
+    let expires = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    state.schema_cache.insert(cache_key, (meta.clone(), expires));
+
+    Ok(Some(meta))
+}
+
+// ── Batch Execute ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn execute_batch(
+    state: State<'_, AppState>,
+    connection_id: String,
+    batch: SqlBatch,
+) -> CmdResult<BatchResult> {
+    state.db.execute_batch(&connection_id, &batch).await.map_err(map_err)
 }

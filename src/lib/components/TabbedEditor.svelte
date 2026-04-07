@@ -97,7 +97,17 @@
             sql={activeQueryTab.sql}
             dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
           />
-          <ResultPane result={activeQueryTab.result} isExecuting={activeQueryTab.isExecuting} />
+          <ResultPane
+            result={activeQueryTab.result}
+            isExecuting={activeQueryTab.isExecuting}
+            connectionId={activeConnectionTab.connectionId}
+            queryTabId={activeQueryTab.id}
+            dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
+            onReExecute={() => {
+              const dbT = connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres";
+              tabs.executeQuery(activeConnectionTab.connectionId, activeQueryTab.id, activeQueryTab.sql, dbT);
+            }}
+          />
         {:else}
           <div class="empty-state">
             <p>Select a connection to start querying</p>

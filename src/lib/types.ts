@@ -94,6 +94,99 @@ export interface ConnectionTab {
   error: string | null;
 }
 
+// --- Editable Grid: Schema Metadata ---
+
+export type ColumnType =
+  | 'integer' | 'bigint' | 'smallint'
+  | 'decimal' | 'numeric' | 'float' | 'double'
+  | 'varchar' | 'text' | 'char'
+  | 'boolean'
+  | 'date' | 'time' | 'datetime' | 'timestamp'
+  | 'json' | 'jsonb'
+  | 'uuid'
+  | 'enum'
+  | 'unknown';
+
+export interface ColumnMeta {
+  name: string;
+  type: ColumnType;
+  nullable: boolean;
+  isAutoIncrement: boolean;
+  isGenerated: boolean;
+  isUpdatable: boolean;
+  defaultValue?: string;
+  enumValues?: string[];
+}
+
+export interface PrimaryKeyMeta {
+  columns: string[];
+  exists: boolean;
+}
+
+export interface TableMeta {
+  tableName: string;
+  schema?: string;
+  columns: ColumnMeta[];
+  primaryKey: PrimaryKeyMeta;
+  isEditable: boolean;
+  editabilityReason?: string;
+}
+
+// --- Editable Grid: Change Tracking ---
+
+export type CellValue = string | number | boolean | null;
+export type PkValue = CellValue | CellValue[];
+export type TempRowId = `temp_${number}`;
+export type ColumnName = string;
+
+export interface CellChange {
+  oldValue: CellValue;
+  newValue: CellValue;
+}
+
+export interface AddedRow {
+  tempId: TempRowId;
+  data: Record<string, CellValue>;
+}
+
+export interface ModifiedRow {
+  primaryKey: PkValue;
+  changes: Map<ColumnName, CellChange>;
+}
+
+export interface ChangeSet {
+  added: Map<TempRowId, AddedRow>;
+  modified: Map<string, ModifiedRow>; // stringified PkValue as key
+  deleted: Set<string>; // stringified PkValue
+}
+
+// --- Editable Grid: SQL Generation ---
+
+export interface ParameterizedSql {
+  sql: string;
+  params: CellValue[];
+  tempId?: TempRowId; // For INSERT statements, links result back to added row
+}
+
+export interface SqlBatch {
+  statements: ParameterizedSql[];
+  useTransaction: boolean;
+}
+
+export interface BatchError {
+  statementIndex: number;
+  message: string;
+  code?: string;
+}
+
+export interface BatchResult {
+  success: boolean;
+  executedCount: number;
+  totalStatements: number;
+  error?: BatchError;
+  insertedIds?: Record<string, CellValue>;
+}
+
 // --- Import / Export ---
 
 export interface ImportResult {

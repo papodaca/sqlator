@@ -112,6 +112,73 @@ pub enum QueryEvent {
     Error { message: String },
 }
 
+// ── Schema Metadata ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnMeta {
+    pub name: String,
+    pub column_type: String,
+    pub nullable: bool,
+    pub is_auto_increment: bool,
+    pub is_generated: bool,
+    pub is_updatable: bool,
+    pub default_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimaryKeyMeta {
+    pub columns: Vec<String>,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableMeta {
+    pub table_name: String,
+    pub schema: Option<String>,
+    pub columns: Vec<ColumnMeta>,
+    pub primary_key: PrimaryKeyMeta,
+    pub is_editable: bool,
+    pub editability_reason: Option<String>,
+}
+
+// ── Batch Execution ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterizedStatement {
+    pub sql: String,
+    pub params: Vec<serde_json::Value>,
+    pub temp_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlBatch {
+    pub statements: Vec<ParameterizedStatement>,
+    pub use_transaction: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchError {
+    pub statement_index: usize,
+    pub message: String,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchResult {
+    pub success: bool,
+    pub executed_count: usize,
+    pub total_statements: usize,
+    pub error: Option<BatchError>,
+    pub inserted_ids: std::collections::HashMap<String, serde_json::Value>,
+}
+
 /// Data sent to the frontend representing a saved connection (with masked password)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInfo {
