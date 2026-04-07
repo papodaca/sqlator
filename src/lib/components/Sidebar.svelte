@@ -155,16 +155,14 @@
         ondrop={handleRootDrop}
       >
         {#each ungrouped as conn (conn.id)}
-          <div
-            class="draggable-conn"
-            draggable="true"
-            ondragstart={(e) => {
+          <ConnectionItem
+            connection={conn}
+            onedit={openEditForm}
+            dragstart={(e) => {
               e.dataTransfer?.setData("text/plain", conn.id);
               if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
             }}
-          >
-            <ConnectionItem connection={conn} onedit={openEditForm} />
-          </div>
+          />
         {/each}
       </div>
 
@@ -303,12 +301,4 @@
     text-decoration: underline;
   }
 
-  .draggable-conn {
-    cursor: grab;
-  }
-
-  .draggable-conn:active {
-    cursor: grabbing;
-    opacity: 0.6;
-  }
 </style>

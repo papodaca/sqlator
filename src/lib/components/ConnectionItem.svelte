@@ -1,3 +1,8 @@
+<script module lang="ts">
+  // Shared across all ConnectionItem instances — only one menu open at a time.
+  let openMenuId = $state<string | null>(null);
+</script>
+
 <script lang="ts">
   import { getColorHex } from "$lib/constants/colors";
   import { connections } from "$lib/stores/connections.svelte";
@@ -6,17 +11,20 @@
   let {
     connection,
     onedit,
+    dragstart = undefined,
   }: {
     connection: ConnectionInfo;
     onedit: (conn: ConnectionInfo) => void;
+    /** If provided, the item becomes draggable. Use dataTransfer in the handler. */
+    dragstart?: (e: DragEvent) => void;
   } = $props();
 
-  let showMenu = $state(false);
+  const showMenu = $derived(openMenuId === connection.id);
   let confirmDelete = $state(false);
 
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
-    showMenu = true;
+    openMenuId = connection.id;
   }
 
   function handleClick() {
@@ -35,7 +43,7 @@
   }
 
   function closeMenu() {
-    showMenu = false;
+    openMenuId = null;
   }
 </script>
 
@@ -46,8 +54,10 @@
   <button
     class="connection-item"
     class:active={connections.activeId === connection.id}
+    draggable={dragstart !== undefined}
     onclick={handleClick}
     oncontextmenu={handleContextMenu}
+    ondragstart={dragstart}
   >
     <span
       class="color-dot"
@@ -110,6 +120,15 @@
 
   .connection-item:hover {
     background: var(--color-surface-2);
+  }
+
+  .connection-item[draggable="true"] {
+    cursor: grab;
+  }
+
+  .connection-item[draggable="true"]:active {
+    cursor: grabbing;
+    opacity: 0.7;
   }
 
   .connection-item.active {

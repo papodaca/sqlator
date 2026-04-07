@@ -215,16 +215,14 @@
   {#if !group.collapsed}
     <div class="group-content">
       {#each groupConnections as conn (conn.id)}
-        <div
-          class="draggable-conn"
-          draggable="true"
-          ondragstart={(e) => {
+        <ConnectionItem
+          connection={conn}
+          onedit={onedit}
+          dragstart={(e) => {
             e.dataTransfer?.setData("text/plain", conn.id);
             if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
           }}
-        >
-          <ConnectionItem connection={conn} onedit={onedit} />
-        </div>
+        />
       {/each}
 
       {#if depth < 2}
@@ -430,15 +428,6 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
-  }
-
-  .draggable-conn {
-    cursor: grab;
-  }
-
-  .draggable-conn:active {
-    cursor: grabbing;
-    opacity: 0.6;
   }
 
   .empty-group {
