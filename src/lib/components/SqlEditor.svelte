@@ -39,7 +39,7 @@
   async function executeCurrentQuery() {
     const sqlText = getEditorSql();
     if (!sqlText.trim()) return;
-    await tabs.executeQuery(connectionId, queryTabId, sqlText);
+    await tabs.executeQuery(connectionId, queryTabId, sqlText, dbType);
   }
 
   function createEditor(

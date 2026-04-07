@@ -54,6 +54,8 @@ pub fn run() {
             commands::import_connections,
             commands::get_tab_state,
             commands::save_tab_state,
+            commands::fetch_schema_metadata,
+            commands::execute_batch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

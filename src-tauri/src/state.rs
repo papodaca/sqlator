@@ -2,14 +2,18 @@ use dashmap::DashMap;
 use sqlator_core::config::ConfigManager;
 use sqlator_core::credentials::{CredentialStore, StorageMode};
 use sqlator_core::db::DbManager;
+use sqlator_core::models::TableMeta;
 use sqlator_core::ssh::TunnelHandle;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct AppState {
     pub config: ConfigManager,
     pub db: DbManager,
     pub tunnels: DashMap<String, TunnelHandle>,
     pub credentials: Arc<CredentialStore>,
+    /// Cache: key = "connection_id:schema:table_name" → (TableMeta, expiry)
+    pub schema_cache: DashMap<String, (TableMeta, Instant)>,
 }
 
 impl AppState {
@@ -48,6 +52,7 @@ impl AppState {
             db: DbManager::new(),
             tunnels: DashMap::new(),
             credentials,
+            schema_cache: DashMap::new(),
         })
     }
 }

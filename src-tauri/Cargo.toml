@@ -24,3 +24,4 @@ uuid = { version = "1", features = ["v4"] }
 dashmap = "6"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
+sqlparser = "0.54"

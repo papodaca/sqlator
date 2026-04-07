@@ -1,5 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus } from "$lib/types";
+import { editStore } from "$lib/stores/edit.svelte";
+import { fetchSchemaMetadata } from "$lib/services/schema-fetcher";
 
 // ── Persistence types ─────────────────────────────────────────────────────────
 
@@ -200,8 +202,11 @@ export const tabs = {
     this.setActiveQueryTab(ct.connectionId, ct.queryTabs[next].id);
   },
 
-  async executeQuery(connectionId: string, queryTabId: string, sql: string) {
+  async executeQuery(connectionId: string, queryTabId: string, sql: string, dbType = "postgres") {
     if (!sql.trim()) return;
+
+    // Reset edit store for this new query
+    editStore.reset(connectionId, dbType, sql, queryTabId);
 
     // Mark tab as executing
     this._setTabExecuting(connectionId, queryTabId, true, { kind: "loading" });
@@ -247,6 +252,16 @@ export const tabs = {
               ? { kind: "empty", durationMs: duration_ms }
               : { kind: "results", columns, rows, rowCount: row_count, durationMs: duration_ms };
           this._setTabExecuting(connectionId, queryTabId, false, result);
+
+          // After a successful SELECT, fetch schema metadata for the edit store
+          if (rows.length > 0) {
+            fetchSchemaMetadata(connectionId, sql).then((meta) => {
+              // Only update if this query tab is still the active one
+              if (editStore.queryTabId === queryTabId) {
+                editStore.setTableMeta(meta);
+              }
+            });
+          }
           break;
         }
 

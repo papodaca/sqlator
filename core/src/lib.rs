@@ -6,7 +6,7 @@ pub mod models;
 pub mod ssh;
 
 pub use credentials::{CredentialStore, StorageMode, VaultSettings};
-pub use models::ConnectionGroup;
+pub use models::{BatchResult, BatchError, ColumnMeta, ConnectionGroup, PrimaryKeyMeta, SqlBatch, TableMeta};
 
 pub use db::{detect_database_type, DatabaseType, DbManager};
 pub use ssh::{

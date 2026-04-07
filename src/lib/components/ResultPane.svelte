@@ -1,15 +1,61 @@
 <script lang="ts">
-  import type { ResultPaneState } from "$lib/types";
+  import type { ResultPaneState, SqlBatch } from "$lib/types";
+  import { editStore } from "$lib/stores/edit.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import ErrorDisplay from "./ErrorDisplay.svelte";
+  import SqlPreviewModal from "./SqlPreviewModal.svelte";
 
   let {
     result,
     isExecuting = false,
+    connectionId,
+    queryTabId,
+    dbType,
+    onReExecute,
   }: {
     result: ResultPaneState;
     isExecuting?: boolean;
+    connectionId?: string;
+    queryTabId?: string;
+    dbType?: string;
+    onReExecute?: () => void;
   } = $props();
+
+  // SQL preview modal state
+  let previewBatch = $state<SqlBatch | null>(null);
+  let isSaving = $state(false);
+  let saveError = $state<string | null>(null);
+
+  function openPreview() {
+    const batch = editStore.generateBatch();
+    if (!batch || batch.statements.length === 0) return;
+    previewBatch = batch;
+    saveError = null;
+  }
+
+  async function handleExecute() {
+    if (!previewBatch) return;
+    isSaving = true;
+    saveError = null;
+
+    try {
+      const result = await editStore.executeBatch(previewBatch);
+      if (result.success) {
+        previewBatch = null;
+        // Re-execute the original query to refresh the grid
+        onReExecute?.();
+      } else {
+        saveError = result.error?.message ?? "Execution failed";
+        // Keep previewBatch open so user can see the error and retry
+        previewBatch = null;
+      }
+    } catch (e) {
+      saveError = String(e);
+      previewBatch = null;
+    } finally {
+      isSaving = false;
+    }
+  }
 </script>
 
 <div class="result-pane">
@@ -30,9 +76,16 @@
         Showing first 1,000 of {result.rowCount.toLocaleString()} rows
       </div>
     {/if}
+    {#if saveError}
+      <div class="save-error">
+        <strong>Save failed:</strong> {saveError}
+        <button onclick={() => (saveError = null)}>✕</button>
+      </div>
+    {/if}
     <ResultGrid
       columns={result.columns}
       rows={result.rows}
+      onSave={openPreview}
     />
   {:else if result.kind === "empty"}
     <div class="result-message">
@@ -48,6 +101,15 @@
     <ErrorDisplay message={result.message} />
   {/if}
 </div>
+
+{#if previewBatch}
+  <SqlPreviewModal
+    batch={previewBatch}
+    isExecuting={isSaving}
+    onExecute={handleExecute}
+    onCancel={() => (previewBatch = null)}
+  />
+{/if}
 
 <style>
   .result-pane {
@@ -86,6 +148,30 @@
   :global(.dark) .row-limit-notice {
     background: oklch(0.22 0.05 80);
     color: oklch(0.75 0.1 80);
+  }
+
+  .save-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: oklch(0.95 0.04 25);
+    color: var(--color-error);
+    font-size: 12px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  :global(.dark) .save-error {
+    background: oklch(0.2 0.04 25);
+  }
+
+  .save-error button {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--color-error);
+    cursor: pointer;
+    font-size: 12px;
   }
 
   .spinner {
