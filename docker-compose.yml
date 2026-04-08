@@ -38,3 +38,40 @@ volumes:
   pgdata:
   mysqldata:
   mariadbdata:
+
+
+  # - PostgreSQL: postgresql://sqlator:sqlator@localhost:5454/sqlator
+  # - MySQL: mysql://sqlator:sqlator@localhost:3336/sqlator
+  # - MariaDB: mysql://sqlator:sqlator@localhost:3337/sqlator
+
+# select * from Persons;
+
+# CREATE TABLE Persons (
+#   PersonID int PRIMARY KEY,
+#   LastName varchar(255) NOT NULL,
+#   FirstName varchar(255),
+#   Address varchar(255),
+#   City varchar(255)
+# );
+
+# INSERT INTO Persons (PersonID, LastName, FirstName, Address, City)
+# VALUES 
+#   (1, 'Smith', 'John', '123 Maple St', 'New York'),
+#   (2, 'Garcia', 'Maria', '456 Oak Ave', 'Los Angeles'),
+#   (3, 'Chen', 'Kevin', '789 Pine Rd', 'Chicago'),
+#   (4, 'Wilson', 'Sarah', '101 Cedar Ln', 'Houston'),
+#   (5, 'Brown', 'David', '202 Birch Blvd', 'Phoenix');
+
+# CREATE TABLE Orders (
+#     OrderID int PRIMARY KEY,
+#     OrderNumber int NOT NULL,
+#     PersonID int,
+#     OrderDate date DEFAULT CURRENT_DATE,
+#     TotalAmount decimal(10, 2),
+#     FOREIGN KEY (PersonID) REFERENCES Persons(PersonID)
+# );
+
+# INSERT INTO Orders (OrderID, OrderNumber, PersonID, TotalAmount)
+# VALUES 
+#   (101, 55001, 1, 150.75),
+#   (102, 55002, 2, 45.00);

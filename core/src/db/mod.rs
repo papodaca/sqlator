@@ -416,8 +416,10 @@ async fn get_schemas_postgres(pool: &PgPool) -> Result<Vec<SchemaInfo>, CoreErro
 }
 
 async fn get_schemas_mysql(pool: &MySqlPool) -> Result<Vec<SchemaInfo>, CoreError> {
+    // MySQL 8 returns information_schema strings as VARBINARY via prepared statements;
+    // CAST to CHAR so SQLx can decode them as String.
     let rows = sqlx::query(
-        r#"SELECT SCHEMA_NAME,
+        r#"SELECT CAST(SCHEMA_NAME AS CHAR) AS schema_name,
             (SCHEMA_NAME = DATABASE()) AS is_default
         FROM information_schema.SCHEMATA
         WHERE SCHEMA_NAME NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
@@ -428,7 +430,7 @@ async fn get_schemas_mysql(pool: &MySqlPool) -> Result<Vec<SchemaInfo>, CoreErro
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
     Ok(rows.iter().map(|r| SchemaInfo {
-        name: r.get("SCHEMA_NAME"),
+        name: r.get("schema_name"),
         is_default: r.try_get::<i64, _>("is_default").map(|v| v != 0).unwrap_or(false),
     }).collect())
 }
@@ -461,9 +463,12 @@ async fn get_tables_postgres(pool: &PgPool, schema: Option<&str>) -> Result<Vec<
 }
 
 async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<TableInfo>, CoreError> {
+    // CAST to CHAR: MySQL 8 returns information_schema strings as VARBINARY via prepared stmts.
     let (sql, schema_val) = if let Some(s) = schema {
         (
-            r#"SELECT TABLE_NAME, TABLE_TYPE, TABLE_SCHEMA
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS table_name,
+                CAST(TABLE_TYPE AS CHAR) AS table_type,
+                CAST(TABLE_SCHEMA AS CHAR) AS table_schema
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
             ORDER BY TABLE_NAME"#,
@@ -471,7 +476,9 @@ async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<
         )
     } else {
         (
-            r#"SELECT TABLE_NAME, TABLE_TYPE, TABLE_SCHEMA
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS table_name,
+                CAST(TABLE_TYPE AS CHAR) AS table_type,
+                CAST(TABLE_SCHEMA AS CHAR) AS table_schema
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
             ORDER BY TABLE_NAME"#,
@@ -487,9 +494,9 @@ async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
     Ok(rows.iter().map(|r| {
-        let name: String = r.get("TABLE_NAME");
-        let raw_type: String = r.get("TABLE_TYPE");
-        let schema_name: String = r.get("TABLE_SCHEMA");
+        let name: String = r.get("table_name");
+        let raw_type: String = r.get("table_type");
+        let schema_name: String = r.get("table_schema");
         let table_type = if raw_type == "VIEW" { "view".into() } else { "table".into() };
         TableInfo {
             full_name: format!("`{}`.`{}`", schema_name, name),
@@ -585,9 +592,14 @@ async fn get_columns_postgres(
 }
 
 async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<SchemaColumnInfo>, CoreError> {
+    // CAST to CHAR: MySQL 8 returns information_schema strings as VARBINARY via prepared stmts.
     let col_rows = sqlx::query(
         r#"SELECT
-            c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.ORDINAL_POSITION,
+            CAST(c.COLUMN_NAME AS CHAR) AS col_name,
+            CAST(c.DATA_TYPE AS CHAR) AS data_type,
+            CAST(c.IS_NULLABLE AS CHAR) AS is_nullable,
+            CAST(c.COLUMN_DEFAULT AS CHAR) AS col_default,
+            c.ORDINAL_POSITION AS ordinal_pos,
             (c.COLUMN_KEY = 'PRI') AS is_primary_key,
             (c.COLUMN_KEY = 'MUL') AS is_foreign_key
         FROM information_schema.COLUMNS c
@@ -601,7 +613,9 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
 
     // Fetch FK references
     let fk_rows = sqlx::query(
-        r#"SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+        r#"SELECT CAST(COLUMN_NAME AS CHAR) AS col_name,
+            CAST(REFERENCED_TABLE_NAME AS CHAR) AS ref_table,
+            CAST(REFERENCED_COLUMN_NAME AS CHAR) AS ref_col
         FROM information_schema.KEY_COLUMN_USAGE
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
             AND REFERENCED_TABLE_NAME IS NOT NULL"#,
@@ -612,9 +626,9 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
     let fk_map: HashMap<String, (String, String)> = fk_rows.iter().filter_map(|r| {
-        let col: String = r.get("COLUMN_NAME");
-        let ref_table: Option<String> = r.get("REFERENCED_TABLE_NAME");
-        let ref_col: Option<String> = r.get("REFERENCED_COLUMN_NAME");
+        let col: String = r.get("col_name");
+        let ref_table: Option<String> = r.get("ref_table");
+        let ref_col: Option<String> = r.get("ref_col");
         if let (Some(t), Some(c)) = (ref_table, ref_col) {
             Some((col, (t, c)))
         } else {
@@ -623,18 +637,18 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
     }).collect();
 
     Ok(col_rows.iter().map(|r| {
-        let col_name: String = r.get("COLUMN_NAME");
+        let col_name: String = r.get("col_name");
         let fk = fk_map.get(&col_name);
         SchemaColumnInfo {
             name: col_name.clone(),
-            data_type: map_mysql_type(&r.get::<String, _>("DATA_TYPE")),
-            nullable: r.get::<&str, _>("IS_NULLABLE") == "YES",
-            default_value: r.get("COLUMN_DEFAULT"),
+            data_type: map_mysql_type(&r.get::<String, _>("data_type")),
+            nullable: r.get::<String, _>("is_nullable") == "YES",
+            default_value: r.get("col_default"),
             is_primary_key: r.try_get::<i64, _>("is_primary_key").map(|v| v != 0).unwrap_or(false),
             is_foreign_key: fk.is_some(),
             foreign_table: fk.map(|(t, _)| t.clone()),
             foreign_column: fk.map(|(_, c)| c.clone()),
-            ordinal_position: r.get::<i32, _>("ORDINAL_POSITION"),
+            ordinal_position: r.try_get::<i64, _>("ordinal_pos").unwrap_or(0) as i32,
         }
     }).collect())
 }
