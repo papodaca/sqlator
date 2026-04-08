@@ -417,19 +417,19 @@ async fn get_schemas_postgres(pool: &PgPool) -> Result<Vec<SchemaInfo>, CoreErro
 
 async fn get_schemas_mysql(pool: &MySqlPool) -> Result<Vec<SchemaInfo>, CoreError> {
     let rows = sqlx::query(
-        r#"SELECT schema_name,
-            (schema_name = DATABASE()) AS is_default
-        FROM information_schema.schemata
-        WHERE schema_name NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
-        ORDER BY is_default DESC, schema_name"#,
+        r#"SELECT SCHEMA_NAME,
+            (SCHEMA_NAME = DATABASE()) AS is_default
+        FROM information_schema.SCHEMATA
+        WHERE SCHEMA_NAME NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+        ORDER BY is_default DESC, SCHEMA_NAME"#,
     )
     .fetch_all(pool)
     .await
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
     Ok(rows.iter().map(|r| SchemaInfo {
-        name: r.get("schema_name"),
-        is_default: r.try_get::<bool, _>("is_default").unwrap_or(false),
+        name: r.get("SCHEMA_NAME"),
+        is_default: r.try_get::<i64, _>("is_default").map(|v| v != 0).unwrap_or(false),
     }).collect())
 }
 
@@ -463,18 +463,18 @@ async fn get_tables_postgres(pool: &PgPool, schema: Option<&str>) -> Result<Vec<
 async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<TableInfo>, CoreError> {
     let (sql, schema_val) = if let Some(s) = schema {
         (
-            r#"SELECT table_name, table_type, table_schema
-            FROM information_schema.tables
-            WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')
-            ORDER BY table_name"#,
+            r#"SELECT TABLE_NAME, TABLE_TYPE, TABLE_SCHEMA
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+            ORDER BY TABLE_NAME"#,
             s.to_string(),
         )
     } else {
         (
-            r#"SELECT table_name, table_type, table_schema
-            FROM information_schema.tables
-            WHERE table_schema = DATABASE() AND table_type IN ('BASE TABLE', 'VIEW')
-            ORDER BY table_name"#,
+            r#"SELECT TABLE_NAME, TABLE_TYPE, TABLE_SCHEMA
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+            ORDER BY TABLE_NAME"#,
             String::new(),
         )
     };
@@ -487,9 +487,9 @@ async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
     Ok(rows.iter().map(|r| {
-        let name: String = r.get("table_name");
-        let raw_type: String = r.get("table_type");
-        let schema_name: String = r.get("table_schema");
+        let name: String = r.get("TABLE_NAME");
+        let raw_type: String = r.get("TABLE_TYPE");
+        let schema_name: String = r.get("TABLE_SCHEMA");
         let table_type = if raw_type == "VIEW" { "view".into() } else { "table".into() };
         TableInfo {
             full_name: format!("`{}`.`{}`", schema_name, name),
@@ -630,7 +630,7 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
             data_type: map_mysql_type(&r.get::<String, _>("DATA_TYPE")),
             nullable: r.get::<&str, _>("IS_NULLABLE") == "YES",
             default_value: r.get("COLUMN_DEFAULT"),
-            is_primary_key: r.try_get("is_primary_key").unwrap_or(false),
+            is_primary_key: r.try_get::<i64, _>("is_primary_key").map(|v| v != 0).unwrap_or(false),
             is_foreign_key: fk.is_some(),
             foreign_table: fk.map(|(t, _)| t.clone()),
             foreign_column: fk.map(|(_, c)| c.clone()),

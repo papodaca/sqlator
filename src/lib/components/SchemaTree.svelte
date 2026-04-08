@@ -33,7 +33,7 @@
     }
     expandedTables.add(key);
     expandedTables = new Set(expandedTables);
-    if (!schemaState.columns.has(key)) {
+    if (!(key in schemaState.columns)) {
       await schemaStore.loadColumns(connectionId, table.name, schemaState.activeSchema ?? undefined);
     }
   }
@@ -72,9 +72,9 @@
         <li role="treeitem" aria-expanded={expandedTables.has(table.name)}>
           <SchemaNode
             {table}
-            columns={schemaState.columns.get(table.name) ?? null}
+            columns={schemaState.columns[table.name] ?? null}
             isExpanded={expandedTables.has(table.name)}
-            isLoadingColumns={schemaState.loadingColumns.has(table.name)}
+            isLoadingColumns={schemaState.loadingColumns.includes(table.name)}
             onexpand={handleExpand}
             onopen={onopen}
           />

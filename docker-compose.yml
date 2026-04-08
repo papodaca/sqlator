@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - 5454:5432
+    environment:
+      POSTGRES_USER: sqlator
+      POSTGRES_PASSWORD: sqlator
+      POSTGRES_DB: sqlator
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mysql:
+    image: mysql:8.4
+    ports:
+      - 3336:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: sqlator
+      MYSQL_USER: sqlator
+      MYSQL_PASSWORD: sqlator
+      MYSQL_DATABASE: sqlator
+    volumes:
+      - mysqldata:/var/lib/mysql
+
+  mariadb:
+    image: mariadb:11
+    ports:
+      - 3337:3306
+    environment:
+      MARIADB_ROOT_PASSWORD: sqlator
+      MARIADB_USER: sqlator
+      MARIADB_PASSWORD: sqlator
+      MARIADB_DATABASE: sqlator
+    volumes:
+      - mariadbdata:/var/lib/mysql
+
+volumes:
+  pgdata:
+  mysqldata:
+  mariadbdata:

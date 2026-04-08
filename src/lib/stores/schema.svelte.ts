@@ -6,38 +6,50 @@ interface ConnectionSchemaState {
   schemas: SchemaInfo[];
   activeSchema: string | null;
   tables: TableInfo[];
-  columns: Map<string, SchemaColumnInfo[]>; // tableName -> columns
+  columns: Record<string, SchemaColumnInfo[]>; // tableName -> columns
   isLoadingSchemas: boolean;
   isLoadingTables: boolean;
-  loadingColumns: Set<string>;
+  loadingColumns: string[];
   error: string | null;
 }
 
-let schemaState = $state<Map<string, ConnectionSchemaState>>(new Map());
+let schemaState = $state<Record<string, ConnectionSchemaState>>({});
 
-function getOrInit(connectionId: string): ConnectionSchemaState {
-  if (!schemaState.has(connectionId)) {
-    schemaState.set(connectionId, {
+const emptyState: ConnectionSchemaState = {
+  schemas: [],
+  activeSchema: null,
+  tables: [],
+  columns: {},
+  isLoadingSchemas: false,
+  isLoadingTables: false,
+  loadingColumns: [],
+  error: null,
+};
+
+function ensureInit(connectionId: string): ConnectionSchemaState {
+  if (!schemaState[connectionId]) {
+    schemaState[connectionId] = {
       schemas: [],
       activeSchema: null,
       tables: [],
-      columns: new Map(),
+      columns: {},
       isLoadingSchemas: false,
       isLoadingTables: false,
-      loadingColumns: new Set(),
+      loadingColumns: [],
       error: null,
-    });
+    };
   }
-  return schemaState.get(connectionId)!;
+  return schemaState[connectionId];
 }
 
 export const schemaStore = {
+  /** Read-only access — safe to call from $derived */
   getState(connectionId: string): ConnectionSchemaState {
-    return getOrInit(connectionId);
+    return schemaState[connectionId] ?? emptyState;
   },
 
   async loadSchemas(connectionId: string) {
-    const state = getOrInit(connectionId);
+    const state = ensureInit(connectionId);
     if (state.isLoadingSchemas) return;
     state.isLoadingSchemas = true;
     state.error = null;
@@ -61,7 +73,7 @@ export const schemaStore = {
   },
 
   async loadTables(connectionId: string, schema?: string) {
-    const state = getOrInit(connectionId);
+    const state = ensureInit(connectionId);
     if (state.isLoadingTables) return;
     state.isLoadingTables = true;
     state.error = null;
@@ -71,7 +83,7 @@ export const schemaStore = {
         schema: schema ?? state.activeSchema ?? undefined,
       });
       state.tables = tables;
-      state.columns = new Map(); // clear cached columns on table reload
+      state.columns = {}; // clear cached columns on table reload
     } catch (e) {
       state.error = String(e);
     } finally {
@@ -80,39 +92,39 @@ export const schemaStore = {
   },
 
   async loadColumns(connectionId: string, tableName: string, schema?: string) {
-    const state = getOrInit(connectionId);
-    if (state.loadingColumns.has(tableName)) return;
-    if (state.columns.has(tableName)) return; // already cached
+    const state = ensureInit(connectionId);
+    if (state.loadingColumns.includes(tableName)) return;
+    if (tableName in state.columns) return; // already cached
 
-    state.loadingColumns.add(tableName);
+    state.loadingColumns = [...state.loadingColumns, tableName];
     try {
       const cols = await invoke<SchemaColumnInfo[]>("get_columns", {
         connectionId,
         tableName,
         schema: schema ?? state.activeSchema ?? undefined,
       });
-      state.columns.set(tableName, cols);
+      state.columns = { ...state.columns, [tableName]: cols };
     } catch (e) {
       state.error = String(e);
     } finally {
-      state.loadingColumns.delete(tableName);
+      state.loadingColumns = state.loadingColumns.filter((n) => n !== tableName);
     }
   },
 
   async setSchema(connectionId: string, schema: string) {
-    const state = getOrInit(connectionId);
+    const state = ensureInit(connectionId);
     state.activeSchema = schema;
     await schemaStore.loadTables(connectionId, schema);
   },
 
   async refresh(connectionId: string) {
-    const state = getOrInit(connectionId);
-    state.columns = new Map(); // clear column cache
+    const state = ensureInit(connectionId);
+    state.columns = {}; // clear column cache
     state.activeSchema = null; // reset so loadSchemas picks the default
     await schemaStore.loadSchemas(connectionId);
   },
 
   clearConnection(connectionId: string) {
-    schemaState.delete(connectionId);
+    delete schemaState[connectionId];
   },
 };
