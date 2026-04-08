@@ -27,6 +27,7 @@ tiberius = { version = "0.12", default-features = false, features = ["rustls", "
 oracle-rs = "0.1"
 deadpool-oracle = "0.1"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 zeroize = "1"
 thiserror = "2"
 tracing = "0.1"

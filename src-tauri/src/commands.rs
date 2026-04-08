@@ -32,6 +32,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         Some(DatabaseType::Sqlite) => "sqlite",
         Some(DatabaseType::Mssql) => "mssql",
         Some(DatabaseType::Oracle) => "oracle",
+        Some(DatabaseType::ClickHouse) => "clickhouse",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -46,6 +47,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
             "mysql" | "mariadb" => 3306,
             "mssql" => 1433,
             "oracle" => 1521,
+            "clickhouse" => 8123,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -75,6 +77,7 @@ pub async fn update_connection(
         Some(DatabaseType::Sqlite) => "sqlite",
         Some(DatabaseType::Mssql) => "mssql",
         Some(DatabaseType::Oracle) => "oracle",
+        Some(DatabaseType::ClickHouse) => "clickhouse",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -89,6 +92,7 @@ pub async fn update_connection(
             "mysql" | "mariadb" => 3306,
             "mssql" => 1433,
             "oracle" => 1521,
+            "clickhouse" => 8123,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -489,6 +493,7 @@ pub async fn parse_connection_url(url: String) -> CmdResult<ParsedConnectionUrl>
         "sqlite" => ("sqlite", 0),
         "mssql" | "sqlserver" | "tds" => ("mssql", 1433),
         "oracle" => ("oracle", 1521),
+        "clickhouse" => ("clickhouse", 8123u16),
         s => return Err(format!("Unsupported scheme: {s}")),
     };
 
