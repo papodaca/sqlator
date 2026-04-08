@@ -58,7 +58,7 @@ pub async fn execute_select(
     Ok(())
 }
 
-fn sqlite_row_to_json(row: &SqliteRow, index: usize) -> serde_json::Value {
+pub(super) fn sqlite_row_to_json(row: &SqliteRow, index: usize) -> serde_json::Value {
     if let Ok(v) = row.try_get::<Option<String>, _>(index) {
         return match v {
             Some(s) => serde_json::Value::String(s),

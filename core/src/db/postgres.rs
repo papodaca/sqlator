@@ -58,7 +58,7 @@ pub async fn execute_select(
     Ok(())
 }
 
-fn pg_row_to_json(row: &PgRow, index: usize) -> serde_json::Value {
+pub(super) fn pg_row_to_json(row: &PgRow, index: usize) -> serde_json::Value {
     if let Ok(v) = row.try_get::<Option<sqlx::types::Json<serde_json::Value>>, _>(index) {
         return v.map(|j| j.0).unwrap_or(serde_json::Value::Null);
     }

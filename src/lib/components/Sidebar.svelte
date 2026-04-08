@@ -10,7 +10,9 @@
   import ThemeToggle from "./ThemeToggle.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { openPath } from "@tauri-apps/plugin-opener";
-  import type { ConnectionInfo } from "$lib/types";
+  import type { ConnectionInfo, TableInfo } from "$lib/types";
+  import { tabs } from "$lib/stores/tabs.svelte";
+  import SchemaBrowser from "./SchemaBrowser.svelte";
 
   let showForm = $state(false);
   let editingConnection = $state<ConnectionInfo | null>(null);
@@ -105,6 +107,15 @@
       creatingGroup = false;
     }
   }
+
+  const activeConnectionId = $derived(tabs.activeConnectionId);
+  const activeConnectionTab = $derived(tabs.activeConnectionTab);
+  const isConnected = $derived(activeConnectionTab?.status === "connected");
+
+  function handleTableOpen(table: TableInfo) {
+    if (!activeConnectionId) return;
+    tabs.openTableBrowse(activeConnectionId, table);
+  }
 </script>
 
 <svelte:window onclick={closeHeaderMenu} />
@@ -185,7 +196,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="connection-list">
+  <div class="connection-list" class:has-schema={isConnected}>
     {#if connections.list.length === 0 && groups.list.length === 0}
       <div class="empty-list">
         <p>No connections yet</p>
@@ -225,6 +236,14 @@
       {/each}
     {/if}
   </div>
+
+  {#if activeConnectionId}
+    <SchemaBrowser
+      connectionId={activeConnectionId}
+      {isConnected}
+      onopen={handleTableOpen}
+    />
+  {/if}
 </aside>
 
 {#if showForm}
@@ -310,6 +329,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-height: 60px;
+  }
+
+  .connection-list.has-schema {
+    flex: 0 0 auto;
+    max-height: 40%;
   }
 
   .ungrouped-zone {

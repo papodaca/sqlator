@@ -84,6 +84,7 @@ export interface QueryTab {
   isDirty: boolean;
   result: ResultPaneState;
   isExecuting: boolean;
+  tableBrowse?: TableBrowseState;
 }
 
 export interface ConnectionTab {
@@ -185,6 +186,86 @@ export interface BatchResult {
   totalStatements: number;
   error?: BatchError;
   insertedIds?: Record<string, CellValue>;
+}
+
+// --- Schema Browser ---
+
+export interface SchemaInfo {
+  name: string;
+  isDefault: boolean;
+}
+
+export interface TableInfo {
+  name: string;
+  schema?: string;
+  tableType: 'table' | 'view';
+  fullName: string;
+}
+
+export interface SchemaColumnInfo {
+  name: string;
+  dataType: string;
+  nullable: boolean;
+  defaultValue?: string;
+  isPrimaryKey: boolean;
+  isForeignKey: boolean;
+  foreignTable?: string;
+  foreignColumn?: string;
+  ordinalPosition: number;
+}
+
+export interface SortSpec {
+  column: string;
+  desc: boolean;
+}
+
+export type FilterOperator =
+  | 'contains'
+  | 'equals'
+  | 'startsWith'
+  | 'endsWith'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'isNull'
+  | 'isNotNull';
+
+export interface FilterSpec {
+  column: string;
+  operator: FilterOperator;
+  value?: string | number;
+}
+
+export interface TableQueryParams {
+  connectionId: string;
+  tableName: string;
+  schema?: string;
+  sort: SortSpec[];
+  filters: FilterSpec[];
+  limit: number;
+  offset: number;
+}
+
+export interface TableQueryResult {
+  columns: string[];
+  columnTypes: string[];
+  rows: Record<string, unknown>[];
+  hasMore: boolean;
+  totalReturned: number;
+}
+
+// Table browse tab state
+export interface TableBrowseState {
+  tableName: string;
+  schema?: string;
+  connectionId: string;
+  result: TableQueryResult | null;
+  isLoading: boolean;
+  sort: SortSpec[];
+  filters: FilterSpec[];
+  offset: number;
+  error: string | null;
 }
 
 // --- Import / Export ---

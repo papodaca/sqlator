@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
-use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta};
+use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta, SchemaInfo, TableInfo, SchemaColumnInfo, TableQueryParams, TableQueryResult};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::{BatchResult, DatabaseType};
 use tauri::ipc::Channel;
@@ -1194,6 +1194,44 @@ pub async fn fetch_schema_metadata(
     state.schema_cache.insert(cache_key, (meta.clone(), expires));
 
     Ok(Some(meta))
+}
+
+// ── Schema Browser ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_schemas(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> CmdResult<Vec<SchemaInfo>> {
+    state.db.get_schemas(&connection_id).await.map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn get_tables(
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema: Option<String>,
+) -> CmdResult<Vec<TableInfo>> {
+    state.db.get_tables(&connection_id, schema.as_deref()).await.map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn get_columns(
+    state: State<'_, AppState>,
+    connection_id: String,
+    table_name: String,
+    schema: Option<String>,
+) -> CmdResult<Vec<SchemaColumnInfo>> {
+    state.db.get_columns(&connection_id, &table_name, schema.as_deref()).await.map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn query_table(
+    state: State<'_, AppState>,
+    params: TableQueryParams,
+) -> CmdResult<TableQueryResult> {
+    let connection_id = params.connection_id.clone();
+    state.db.query_table(&connection_id, &params).await.map_err(map_err)
 }
 
 // ── Batch Execute ─────────────────────────────────────────────────────────────

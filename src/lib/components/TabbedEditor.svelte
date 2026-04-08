@@ -7,6 +7,8 @@
   import SqlEditor from "./SqlEditor.svelte";
   import ResultPane from "./ResultPane.svelte";
   import EditorToolbar from "./EditorToolbar.svelte";
+  import EnhancedGrid from "./EnhancedGrid.svelte";
+  import type { TableBrowseState } from "$lib/types";
 
   // Expose a way for the sidebar to open the connection form
   let { onopenconnectionform }: { onopenconnectionform: () => void } = $props();
@@ -87,27 +89,47 @@
             <span>Connecting…</span>
           </div>
         {:else if activeConnectionTab.status === "connected" && activeQueryTab}
-          <EditorToolbar
-            connectionTab={activeConnectionTab}
-            queryTab={activeQueryTab}
-          />
-          <SqlEditor
-            connectionId={activeConnectionTab.connectionId}
-            queryTabId={activeQueryTab.id}
-            sql={activeQueryTab.sql}
-            dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
-          />
-          <ResultPane
-            result={activeQueryTab.result}
-            isExecuting={activeQueryTab.isExecuting}
-            connectionId={activeConnectionTab.connectionId}
-            queryTabId={activeQueryTab.id}
-            dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
-            onReExecute={() => {
-              const dbT = connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres";
-              tabs.executeQuery(activeConnectionTab.connectionId, activeQueryTab.id, activeQueryTab.sql, dbT);
-            }}
-          />
+          {#if activeQueryTab.tableBrowse}
+            <!-- Table browse mode: EnhancedGrid with server-side sort/filter -->
+            <div class="table-browse-header">
+              <span class="table-browse-title">
+                📋 {activeQueryTab.label}
+              </span>
+            </div>
+            <EnhancedGrid
+              browseState={activeQueryTab.tableBrowse}
+              onStateChange={(patch) => {
+                tabs.updateTableBrowseState(
+                  activeConnectionTab.connectionId,
+                  activeQueryTab.id,
+                  patch
+                );
+              }}
+            />
+          {:else}
+            <!-- SQL editor mode -->
+            <EditorToolbar
+              connectionTab={activeConnectionTab}
+              queryTab={activeQueryTab}
+            />
+            <SqlEditor
+              connectionId={activeConnectionTab.connectionId}
+              queryTabId={activeQueryTab.id}
+              sql={activeQueryTab.sql}
+              dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
+            />
+            <ResultPane
+              result={activeQueryTab.result}
+              isExecuting={activeQueryTab.isExecuting}
+              connectionId={activeConnectionTab.connectionId}
+              queryTabId={activeQueryTab.id}
+              dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
+              onReExecute={() => {
+                const dbT = connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres";
+                tabs.executeQuery(activeConnectionTab.connectionId, activeQueryTab.id, activeQueryTab.sql, dbT);
+              }}
+            />
+          {/if}
         {:else}
           <div class="empty-state">
             <p>Select a connection to start querying</p>
@@ -135,6 +157,21 @@
     flex-direction: column;
     flex: 1;
     overflow: hidden;
+  }
+
+  .table-browse-header {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    flex-shrink: 0;
+  }
+
+  .table-browse-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text);
   }
 
   .welcome,

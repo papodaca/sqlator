@@ -112,6 +112,75 @@ pub enum QueryEvent {
     Error { message: String },
 }
 
+// ── Schema Browser ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableInfo {
+    pub name: String,
+    pub schema: Option<String>,
+    pub table_type: String, // "table" | "view"
+    pub full_name: String,  // "schema.table" or just "table"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub default_value: Option<String>,
+    pub is_primary_key: bool,
+    pub is_foreign_key: bool,
+    pub foreign_table: Option<String>,
+    pub foreign_column: Option<String>,
+    pub ordinal_position: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortSpec {
+    pub column: String,
+    pub desc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterSpec {
+    pub column: String,
+    pub operator: String, // "contains"|"equals"|"startsWith"|"endsWith"|"gt"|"gte"|"lt"|"lte"|"isNull"|"isNotNull"
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableQueryParams {
+    pub connection_id: String,
+    pub table_name: String,
+    pub schema: Option<String>,
+    pub sort: Vec<SortSpec>,
+    pub filters: Vec<FilterSpec>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableQueryResult {
+    pub columns: Vec<String>,
+    pub column_types: Vec<String>,
+    pub rows: Vec<serde_json::Value>, // Vec of objects {col -> value}
+    pub has_more: bool,
+    pub total_returned: usize,
+}
+
 // ── Schema Metadata ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

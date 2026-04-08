@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus } from "$lib/types";
+import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus, TableBrowseState, TableInfo } from "$lib/types";
 import { editStore } from "$lib/stores/edit.svelte";
 import { fetchSchemaMetadata } from "$lib/services/schema-fetcher";
 
@@ -91,6 +91,65 @@ export const tabs = {
   setConnectionStatus(connectionId: string, status: ConnectionStatus, error?: string | null) {
     connectionTabs = connectionTabs.map((t) =>
       t.connectionId === connectionId ? { ...t, status, error: error ?? null } : t
+    );
+  },
+
+  openTableBrowse(connectionId: string, table: TableInfo) {
+    const ct = connectionTabs.find((t) => t.connectionId === connectionId);
+    if (!ct) return;
+
+    // Reuse existing table browse tab for the same table if it exists
+    const existing = ct.queryTabs.find(
+      (t) => t.tableBrowse?.tableName === table.name && t.tableBrowse?.schema === table.schema
+    );
+    if (existing) {
+      connectionTabs = connectionTabs.map((t) =>
+        t.connectionId === connectionId ? { ...t, activeQueryTabId: existing.id } : t
+      );
+      return;
+    }
+
+    const browseState: TableBrowseState = {
+      tableName: table.name,
+      schema: table.schema,
+      connectionId,
+      result: null,
+      isLoading: true,
+      sort: [],
+      filters: [],
+      offset: 0,
+      error: null,
+    };
+
+    const newTab: QueryTab = {
+      id: crypto.randomUUID(),
+      label: table.schema ? `${table.schema}.${table.name}` : table.name,
+      sql: "",
+      isDirty: false,
+      result: { kind: "idle" },
+      isExecuting: false,
+      tableBrowse: browseState,
+    };
+
+    connectionTabs = connectionTabs.map((t) =>
+      t.connectionId === connectionId
+        ? { ...t, queryTabs: [...t.queryTabs, newTab], activeQueryTabId: newTab.id }
+        : t
+    );
+  },
+
+  updateTableBrowseState(connectionId: string, queryTabId: string, patch: Partial<TableBrowseState>) {
+    connectionTabs = connectionTabs.map((ct) =>
+      ct.connectionId === connectionId
+        ? {
+            ...ct,
+            queryTabs: ct.queryTabs.map((qt) =>
+              qt.id === queryTabId && qt.tableBrowse
+                ? { ...qt, tableBrowse: { ...qt.tableBrowse, ...patch } }
+                : qt
+            ),
+          }
+        : ct
     );
   },
 
