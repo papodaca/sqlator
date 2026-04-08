@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { EditorView, basicSetup } from "codemirror";
   import { sql, PostgreSQL, MySQL, SQLite, type SQLDialect } from "@codemirror/lang-sql";
   import { oneDark } from "@codemirror/theme-one-dark";
@@ -95,36 +95,40 @@
     return new EditorView({ doc, extensions, parent });
   }
 
-  $effect(() => {
-    // Key: rebuild editor when tab, connection, or theme changes
-    const key = `${connectionId}:${queryTabId}:${theme.isDark}`;
-    const isDark = theme.isDark;
-    const dialect = dialectMap[dbType] ?? PostgreSQL;
-
-    if (!editorEl) return;
-
-    if (key === currentKey && view) {
-      // Only theme changed — handled by key change which rebuilds
-      return;
-    }
-
-    // Destroy old editor
-    if (view) {
-      view.destroy();
-      view = null;
-    }
-
-    // Create new editor with the current tab's SQL
-    view = createEditor(editorEl, dialect, isDark, initialSql);
-    view.focus();
-    currentKey = key;
-
+  // Clean up the editor when the component is destroyed
+  onMount(() => {
     return () => {
       if (view) {
         view.destroy();
         view = null;
       }
     };
+  });
+
+  $effect(() => {
+    // These are the ONLY reactive dependencies we want to track:
+    const key = `${connectionId}:${queryTabId}:${theme.isDark}`;
+    const isDark = theme.isDark;
+    const dialect = dialectMap[dbType] ?? PostgreSQL;
+    const el = editorEl;
+
+    // Everything else runs untracked so that createEditor's closures
+    // (which reference reactive props like connectionId) don't become
+    // additional dependencies that re-fire this effect on every keystroke.
+    untrack(() => {
+      if (!el) return;
+
+      if (key === currentKey && view) return;
+
+      if (view) {
+        view.destroy();
+        view = null;
+      }
+
+      view = createEditor(el, dialect, isDark, initialSql);
+      view.focus();
+      currentKey = key;
+    });
   });
 </script>
 
