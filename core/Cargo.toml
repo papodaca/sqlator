@@ -24,6 +24,8 @@ russh = "0.60"
 russh-config = "0.58"
 keyring = "3"
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }
+oracle-rs = "0.1"
+deadpool-oracle = "0.1"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 zeroize = "1"
 thiserror = "2"

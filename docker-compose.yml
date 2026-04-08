@@ -45,17 +45,28 @@ services:
     volumes:
       - mssqldata:/var/opt/mssql
 
+  oracle:
+    image: gvenzl/oracle-free:latest-faststart
+    ports:
+      - 1522:1521
+    environment:
+      ORACLE_PASSWORD: Sqlator123!
+    volumes:
+      - oracledata:/opt/oracle/oradata
+
 volumes:
   pgdata:
   mysqldata:
   mariadbdata:
   mssqldata:
+  oracledata:
 
 
   # - PostgreSQL: postgresql://sqlator:sqlator@localhost:5454/sqlator
   # - MySQL: mysql://sqlator:sqlator@localhost:3336/sqlator
   # - MariaDB: mysql://sqlator:sqlator@localhost:3337/sqlator
   # - MSSQL: mssql://sa:Sqlator123!@localhost:1444/master
+  # - Oracle (experimental): oracle://system:Sqlator123!@localhost:1522/FREEPDB1
 
 # select * from Persons;
 

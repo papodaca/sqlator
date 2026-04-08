@@ -31,6 +31,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         }
         Some(DatabaseType::Sqlite) => "sqlite",
         Some(DatabaseType::Mssql) => "mssql",
+        Some(DatabaseType::Oracle) => "oracle",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -44,6 +45,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
             "postgres" => 5432,
             "mysql" | "mariadb" => 3306,
             "mssql" => 1433,
+            "oracle" => 1521,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -72,6 +74,7 @@ pub async fn update_connection(
         }
         Some(DatabaseType::Sqlite) => "sqlite",
         Some(DatabaseType::Mssql) => "mssql",
+        Some(DatabaseType::Oracle) => "oracle",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -85,6 +88,7 @@ pub async fn update_connection(
             "postgres" => 5432,
             "mysql" | "mariadb" => 3306,
             "mssql" => 1433,
+            "oracle" => 1521,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -484,6 +488,7 @@ pub async fn parse_connection_url(url: String) -> CmdResult<ParsedConnectionUrl>
         "mariadb" => ("mariadb", 3306),
         "sqlite" => ("sqlite", 0),
         "mssql" | "sqlserver" | "tds" => ("mssql", 1433),
+        "oracle" => ("oracle", 1521),
         s => return Err(format!("Unsupported scheme: {s}")),
     };
 

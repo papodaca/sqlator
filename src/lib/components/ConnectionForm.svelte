@@ -14,7 +14,7 @@
     onclose: () => void;
   } = $props();
 
-  type DbType = "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql";
+  type DbType = "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql" | "oracle";
   type Tab = "url" | "manual";
 
   // ── Form-level state ─────────────────────────────────────────────────────────
@@ -80,6 +80,7 @@
     if (dt === "postgres") return 5432;
     if (dt === "mysql" || dt === "mariadb") return 3306;
     if (dt === "mssql") return 1433;
+    if (dt === "oracle") return 1521;
     return 0;
   }
 
@@ -114,6 +115,8 @@
                 ? "sqlite"
                 : scheme === "mssql" || scheme === "sqlserver" || scheme === "tds"
                   ? "mssql"
+                  : scheme === "oracle"
+                  ? "oracle"
                   : "postgres";
 
       dbType = dt;
@@ -299,6 +302,7 @@
             <option value="mariadb">MariaDB</option>
             <option value="sqlite">SQLite</option>
             <option value="mssql">MS SQL Server</option>
+            <option value="oracle">Oracle (experimental)</option>
           </select>
         </label>
 

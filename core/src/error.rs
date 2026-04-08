@@ -65,3 +65,12 @@ impl From<tiberius::error::Error> for CoreError {
         }
     }
 }
+
+impl From<oracle_rs::Error> for CoreError {
+    fn from(e: oracle_rs::Error) -> Self {
+        CoreError {
+            message: e.to_string(),
+            code: "DATABASE_ERROR".to_string(),
+        }
+    }
+}
