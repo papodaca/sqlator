@@ -54,12 +54,25 @@ services:
     volumes:
       - oracledata:/opt/oracle/oradata
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - 8123:8123
+      - 9000:9000
+    environment:
+      CLICKHOUSE_USER: sqlator
+      CLICKHOUSE_PASSWORD: sqlator
+      CLICKHOUSE_DB: sqlator
+    volumes:
+      - clickhousedata:/var/lib/clickhouse
+
 volumes:
   pgdata:
   mysqldata:
   mariadbdata:
   mssqldata:
   oracledata:
+  clickhousedata:
 
 
   # - PostgreSQL: postgresql://sqlator:sqlator@localhost:5454/sqlator
@@ -67,6 +80,7 @@ volumes:
   # - MariaDB: mysql://sqlator:sqlator@localhost:3337/sqlator
   # - MSSQL: mssql://sa:Sqlator123!@localhost:1444/master
   # - Oracle (experimental): oracle://system:Sqlator123!@localhost:1522/FREEPDB1
+  # - ClickHouse: clickhouse://sqlator:sqlator@localhost:8123/sqlator
 
 # select * from Persons;
 
