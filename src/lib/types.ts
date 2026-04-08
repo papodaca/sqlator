@@ -14,7 +14,7 @@ export interface ConnectionInfo {
   id: string;
   name: string;
   color_id: ConnectionColorId;
-  db_type: "postgres" | "mysql" | "mariadb" | "sqlite";
+  db_type: "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql";
   host: string;
   port: number;
   database: string;
@@ -42,7 +42,7 @@ export interface ConnectionGroup {
 }
 
 export interface ParsedConnectionUrl {
-  db_type: "postgres" | "mysql" | "mariadb" | "sqlite";
+  db_type: "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql";
   host: string;
   port: number;
   database: string;

@@ -14,7 +14,7 @@
     onclose: () => void;
   } = $props();
 
-  type DbType = "postgres" | "mysql" | "mariadb" | "sqlite";
+  type DbType = "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql";
   type Tab = "url" | "manual";
 
   // ── Form-level state ─────────────────────────────────────────────────────────
@@ -77,7 +77,10 @@
   // ── Helpers ───────────────────────────────────────────────────────────────────
 
   function defaultPortFor(dt: DbType): number {
-    return dt === "postgres" ? 5432 : dt === "mysql" || dt === "mariadb" ? 3306 : 0;
+    if (dt === "postgres") return 5432;
+    if (dt === "mysql" || dt === "mariadb") return 3306;
+    if (dt === "mssql") return 1433;
+    return 0;
   }
 
   /** Build a postgres/mysql/sqlite URL from the manual fields */
@@ -109,7 +112,9 @@
               ? "mariadb"
               : scheme === "sqlite"
                 ? "sqlite"
-                : "postgres";
+                : scheme === "mssql" || scheme === "sqlserver" || scheme === "tds"
+                  ? "mssql"
+                  : "postgres";
 
       dbType = dt;
       host = u.hostname;
@@ -293,6 +298,7 @@
             <option value="mysql">MySQL</option>
             <option value="mariadb">MariaDB</option>
             <option value="sqlite">SQLite</option>
+            <option value="mssql">MS SQL Server</option>
           </select>
         </label>
 

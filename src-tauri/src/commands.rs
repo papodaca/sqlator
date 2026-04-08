@@ -30,6 +30,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
             if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
         }
         Some(DatabaseType::Sqlite) => "sqlite",
+        Some(DatabaseType::Mssql) => "mssql",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -42,6 +43,7 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         port: parsed.port().unwrap_or(match db_type {
             "postgres" => 5432,
             "mysql" | "mariadb" => 3306,
+            "mssql" => 1433,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -69,6 +71,7 @@ pub async fn update_connection(
             if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
         }
         Some(DatabaseType::Sqlite) => "sqlite",
+        Some(DatabaseType::Mssql) => "mssql",
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
@@ -81,6 +84,7 @@ pub async fn update_connection(
         port: parsed.port().unwrap_or(match db_type {
             "postgres" => 5432,
             "mysql" | "mariadb" => 3306,
+            "mssql" => 1433,
             _ => 0,
         }),
         database: parsed.path().trim_start_matches('/').to_string(),
@@ -479,6 +483,7 @@ pub async fn parse_connection_url(url: String) -> CmdResult<ParsedConnectionUrl>
         "mysql" => ("mysql", 3306),
         "mariadb" => ("mariadb", 3306),
         "sqlite" => ("sqlite", 0),
+        "mssql" | "sqlserver" | "tds" => ("mssql", 1433),
         s => return Err(format!("Unsupported scheme: {s}")),
     };
 

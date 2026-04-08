@@ -56,3 +56,12 @@ impl From<serde_json::Error> for CoreError {
         }
     }
 }
+
+impl From<tiberius::error::Error> for CoreError {
+    fn from(e: tiberius::error::Error) -> Self {
+        CoreError {
+            message: e.to_string(),
+            code: "DATABASE_ERROR".to_string(),
+        }
+    }
+}

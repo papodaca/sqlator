@@ -1,4 +1,5 @@
 mod any;
+mod mssql;
 mod mysql;
 mod postgres;
 mod sqlite;
@@ -16,6 +17,7 @@ pub enum DatabaseType {
     Postgres,
     MySql,
     Sqlite,
+    Mssql,
 }
 
 #[derive(Clone)]
@@ -24,6 +26,7 @@ pub enum DatabasePool {
     MySql(MySqlPool),
     Sqlite(SqlitePool),
     Any(AnyPool),
+    Mssql(mssql::MssqlPool),
 }
 
 pub struct DbManager {
@@ -47,8 +50,7 @@ impl DbManager {
         .map_err(|_| CoreError {
             message: "Connection timed out after 5 seconds".into(),
             code: "TIMEOUT".into(),
-        })?
-        .map_err(CoreError::from)?;
+        })??;
 
         close_pool(pool).await;
         Ok("Connected successfully".to_string())
@@ -67,8 +69,7 @@ impl DbManager {
         .map_err(|_| CoreError {
             message: "Connection timed out after 5 seconds".into(),
             code: "TIMEOUT".into(),
-        })?
-        .map_err(CoreError::from)?;
+        })??;
 
         self.pools.insert(connection_id.to_string(), pool);
         Ok(())
@@ -144,6 +145,13 @@ impl DbManager {
                     execute_statement_any(&p, sql_trimmed, sender, start).await
                 }
             }
+            DatabasePool::Mssql(p) => {
+                if is_select {
+                    mssql::execute_select(&p, sql_trimmed, sender, start).await
+                } else {
+                    mssql::execute_statement(&p, sql_trimmed, sender, start).await
+                }
+            }
         }
     }
 
@@ -163,7 +171,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => fetch_schema_postgres(&p, table_name, schema_name).await,
             DatabasePool::MySql(p) => fetch_schema_mysql(&p, table_name).await,
             DatabasePool::Sqlite(p) => fetch_schema_sqlite(&p, table_name).await,
-            DatabasePool::Any(_) => Err(CoreError {
+            DatabasePool::Any(_) | DatabasePool::Mssql(_) => Err(CoreError {
                 message: "Schema metadata not supported for this connection type".into(),
                 code: "UNSUPPORTED".into(),
             }),
@@ -181,6 +189,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => get_schemas_postgres(&p).await,
             DatabasePool::MySql(p) => get_schemas_mysql(&p).await,
             DatabasePool::Sqlite(_) => Ok(vec![SchemaInfo { name: "main".into(), is_default: true }]),
+            DatabasePool::Mssql(p) => mssql::get_schemas(&p).await,
             DatabasePool::Any(_) => Err(CoreError {
                 message: "Schema browsing not supported for this connection type".into(),
                 code: "UNSUPPORTED".into(),
@@ -200,6 +209,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => get_tables_postgres(&p, schema).await,
             DatabasePool::MySql(p) => get_tables_mysql(&p, schema).await,
             DatabasePool::Sqlite(p) => get_tables_sqlite(&p).await,
+            DatabasePool::Mssql(p) => mssql::get_tables(&p, schema).await,
             DatabasePool::Any(_) => Err(CoreError {
                 message: "Schema browsing not supported for this connection type".into(),
                 code: "UNSUPPORTED".into(),
@@ -220,6 +230,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => get_columns_postgres(&p, table_name, schema).await,
             DatabasePool::MySql(p) => get_columns_mysql(&p, table_name).await,
             DatabasePool::Sqlite(p) => get_columns_sqlite(&p, table_name).await,
+            DatabasePool::Mssql(p) => mssql::get_columns(&p, table_name, schema).await,
             DatabasePool::Any(_) => Err(CoreError {
                 message: "Schema browsing not supported for this connection type".into(),
                 code: "UNSUPPORTED".into(),
@@ -241,7 +252,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => get_columns_postgres(p, &params.table_name, params.schema.as_deref()).await?,
             DatabasePool::MySql(p) => get_columns_mysql(p, &params.table_name).await?,
             DatabasePool::Sqlite(p) => get_columns_sqlite(p, &params.table_name).await?,
-            DatabasePool::Any(_) => return Err(CoreError {
+            DatabasePool::Any(_) | DatabasePool::Mssql(_) => return Err(CoreError {
                 message: "Table query not supported for this connection type".into(),
                 code: "UNSUPPORTED".into(),
             }),
@@ -255,7 +266,7 @@ impl DbManager {
             DatabasePool::Postgres(p) => query_table_postgres(&p, params, &valid_columns, col_names, col_types).await,
             DatabasePool::MySql(p) => query_table_mysql(&p, params, &valid_columns, col_names, col_types).await,
             DatabasePool::Sqlite(p) => query_table_sqlite(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::Any(_) => unreachable!(),
+            DatabasePool::Any(_) | DatabasePool::Mssql(_) => unreachable!(),
         }
     }
 
@@ -275,6 +286,10 @@ impl DbManager {
             DatabasePool::MySql(p) => execute_batch_mysql(&p, batch).await,
             DatabasePool::Sqlite(p) => execute_batch_sqlite(&p, batch).await,
             DatabasePool::Any(p) => execute_batch_any(&p, batch).await,
+            DatabasePool::Mssql(_) => Err(CoreError {
+                message: "Batch execution not yet supported for MS SQL Server".into(),
+                code: "UNSUPPORTED".into(),
+            }),
         }
     }
 }
@@ -291,11 +306,12 @@ pub fn detect_database_type(url: &str) -> Option<DatabaseType> {
         "postgres" | "postgresql" => Some(DatabaseType::Postgres),
         "mysql" | "mariadb" => Some(DatabaseType::MySql),
         "sqlite" => Some(DatabaseType::Sqlite),
+        "mssql" | "sqlserver" | "tds" => Some(DatabaseType::Mssql),
         _ => None,
     }
 }
 
-async fn create_pool_for_url(url: &str) -> Result<DatabasePool, sqlx::Error> {
+async fn create_pool_for_url(url: &str) -> Result<DatabasePool, CoreError> {
     match detect_database_type(url) {
         Some(DatabaseType::Postgres) => {
             let pool = PgPool::connect(url).await?;
@@ -308,6 +324,10 @@ async fn create_pool_for_url(url: &str) -> Result<DatabasePool, sqlx::Error> {
         Some(DatabaseType::Sqlite) => {
             let pool = SqlitePool::connect(url).await?;
             Ok(DatabasePool::Sqlite(pool))
+        }
+        Some(DatabaseType::Mssql) => {
+            let pool = mssql::create_pool(url).await?;
+            Ok(DatabasePool::Mssql(pool))
         }
         None => {
             let pool = AnyPool::connect(url).await?;
@@ -322,6 +342,7 @@ async fn close_pool(pool: DatabasePool) {
         DatabasePool::MySql(p) => p.close().await,
         DatabasePool::Sqlite(p) => p.close().await,
         DatabasePool::Any(p) => p.close().await,
+        DatabasePool::Mssql(_) => {} // Arc<Mutex<Client>> drops naturally; tiberius sends logout on drop
     }
 }
 
