@@ -34,15 +34,28 @@ services:
     volumes:
       - mariadbdata:/var/lib/mysql
 
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    ports:
+      - 1444:1433
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: Sqlator123!
+      MSSQL_DB: sqlator
+    volumes:
+      - mssqldata:/var/opt/mssql
+
 volumes:
   pgdata:
   mysqldata:
   mariadbdata:
+  mssqldata:
 
 
   # - PostgreSQL: postgresql://sqlator:sqlator@localhost:5454/sqlator
   # - MySQL: mysql://sqlator:sqlator@localhost:3336/sqlator
   # - MariaDB: mysql://sqlator:sqlator@localhost:3337/sqlator
+  # - MSSQL: mssql://sa:Sqlator123!@localhost:1444/master
 
 # select * from Persons;
 
