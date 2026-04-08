@@ -1,7 +1,7 @@
 ---
 title: "feat: Database Schema Browser with Enhanced Data Grid"
 type: feat
-status: active
+status: completed
 date: 2026-04-04
 origin: docs/plans/2026-04-04-001-feat-sql-client-desktop-mvp-plan.md
 ---
