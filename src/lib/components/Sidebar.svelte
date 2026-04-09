@@ -8,8 +8,7 @@
   import ConnectionForm from "./ConnectionForm.svelte";
   import ImportDialog from "./ImportDialog.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
-  import { invoke } from "@tauri-apps/api/core";
-  import { openPath } from "@tauri-apps/plugin-opener";
+  import { api } from "$lib/api";
   import type { ConnectionInfo, TableInfo } from "$lib/types";
   import { tabs } from "$lib/stores/tabs.svelte";
   import SchemaBrowser from "./SchemaBrowser.svelte";
@@ -27,7 +26,7 @@
 
   async function handleExport() {
     try {
-      exportedPath = await invoke<string>("export_connections");
+      exportedPath = await api.invoke<string>("export_connections");
       setTimeout(() => { exportedPath = null; }, 6000);
     } catch (e) {
       console.error("Export failed:", e);
@@ -176,7 +175,7 @@
   {#if exportedPath}
     <div class="export-toast">
       <span class="export-msg">Saved to <code>{exportedPath}</code></span>
-      <button class="open-btn" onclick={() => openPath(exportedPath!)}>Open</button>
+      <button class="open-btn" onclick={() => api.openPath(exportedPath!)}>Open</button>
     </div>
   {/if}
 

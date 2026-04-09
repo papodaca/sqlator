@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { api } from "$lib/api";
   import { onMount } from "svelte";
   import type { TableBrowseState, SortSpec, FilterSpec, FilterOperator, TableQueryResult } from "$lib/types";
   import LoadMoreButton from "./LoadMoreButton.svelte";
@@ -42,7 +42,7 @@
 
     onStateChange({ isLoading: true, error: null, filters, offset });
     try {
-      const result = await invoke<TableQueryResult>("query_table", {
+      const result = await api.invoke<TableQueryResult>("query_table", {
         params: {
           connectionId: browseState.connectionId,
           tableName: browseState.tableName,

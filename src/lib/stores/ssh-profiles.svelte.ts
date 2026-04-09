@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { SshProfile, SshProfileConfig } from "$lib/types";
 
 let profileList = $state<SshProfile[]>([]);
@@ -24,7 +24,7 @@ export const sshProfiles = {
     loading = true;
     error = null;
     try {
-      profileList = await invoke<SshProfile[]>("get_ssh_profiles");
+      profileList = await api.invoke<SshProfile[]>("get_ssh_profiles");
     } catch (e) {
       error = String(e);
     } finally {
@@ -33,7 +33,7 @@ export const sshProfiles = {
   },
 
   async save(config: SshProfileConfig): Promise<SshProfile> {
-    const profile = await invoke<SshProfile>("save_ssh_profile", { config });
+    const profile = await api.invoke<SshProfile>("save_ssh_profile", { config });
     profileList = [...profileList, profile].sort((a, b) =>
       a.name.localeCompare(b.name),
     );
@@ -41,7 +41,7 @@ export const sshProfiles = {
   },
 
   async update(id: string, config: SshProfileConfig): Promise<SshProfile> {
-    const profile = await invoke<SshProfile>("update_ssh_profile", {
+    const profile = await api.invoke<SshProfile>("update_ssh_profile", {
       id,
       config,
     });
@@ -52,12 +52,12 @@ export const sshProfiles = {
   },
 
   async remove(id: string): Promise<void> {
-    await invoke("delete_ssh_profile", { id });
+    await api.invoke("delete_ssh_profile", { id });
     profileList = profileList.filter((p) => p.id !== id);
   },
 
   async connectionsUsing(profileId: string): Promise<string[]> {
-    return await invoke<string[]>("connections_using_ssh_profile", {
+    return await api.invoke<string[]>("connections_using_ssh_profile", {
       profileId,
     });
   },

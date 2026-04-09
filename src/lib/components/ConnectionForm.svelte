@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { api } from "$lib/api";
   import ColorPicker from "./ColorPicker.svelte";
   import SshProfileSelector from "./SshProfileSelector.svelte";
   import { connections } from "$lib/stores/connections.svelte";
@@ -189,7 +189,7 @@
     testMessage = "";
     try {
       if (sshProfileId) {
-        testMessage = await invoke<string>("test_connection_with_ssh", {
+        testMessage = await api.invoke<string>("test_connection_with_ssh", {
           url: effectiveUrl,
           sshProfileId,
         });

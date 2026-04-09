@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { TableMeta } from "$lib/types";
 
 export async function fetchSchemaMetadata(
@@ -6,7 +6,7 @@ export async function fetchSchemaMetadata(
   sql: string,
 ): Promise<TableMeta | null> {
   try {
-    const result = await invoke<TableMeta | null>("fetch_schema_metadata", {
+    const result = await api.invoke<TableMeta | null>("fetch_schema_metadata", {
       connectionId,
       sql,
     });

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { api } from "$lib/api";
   import { connections } from "$lib/stores/connections.svelte";
   import { groups } from "$lib/stores/groups.svelte";
   import { sshProfiles } from "$lib/stores/ssh-profiles.svelte";
@@ -59,7 +59,7 @@
     importing = true;
     error = "";
     try {
-      result = await invoke<ImportResult>("import_connections", {
+      result = await api.invoke<ImportResult>("import_connections", {
         json: fileJson,
         duplicateMode,
       });

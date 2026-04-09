@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 
 type ThemeMode = "light" | "dark" | "system";
 
@@ -30,7 +30,7 @@ export const theme = {
   async init() {
     // Load persisted preference
     try {
-      const saved = await invoke<string>("get_theme");
+      const saved = await api.invoke<string>("get_theme");
       if (saved === "light" || saved === "dark" || saved === "system") {
         mode = saved;
       }
@@ -58,7 +58,7 @@ export const theme = {
     }
     applyTheme();
     try {
-      await invoke("save_theme", { theme: mode });
+      await api.invoke("save_theme", { theme: mode });
     } catch {
       // Non-critical
     }
@@ -68,7 +68,7 @@ export const theme = {
     mode = newMode;
     applyTheme();
     try {
-      await invoke("save_theme", { theme: mode });
+      await api.invoke("save_theme", { theme: mode });
     } catch {
       // Non-critical
     }

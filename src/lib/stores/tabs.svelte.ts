@@ -1,4 +1,4 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus, TableBrowseState, TableInfo } from "$lib/types";
 import { editStore } from "$lib/stores/edit.svelte";
 import { fetchSchemaMetadata } from "$lib/services/schema-fetcher";
@@ -273,8 +273,6 @@ export const tabs = {
     const columns: string[] = [];
     const rows: Record<string, unknown>[] = [];
     let buffer: Record<string, unknown>[] = [];
-
-    const onEvent = new Channel<{ event: string; data: Record<string, unknown> }>();
     let flushTimer: ReturnType<typeof setInterval> | null = null;
 
     const flush = () => {
@@ -284,71 +282,69 @@ export const tabs = {
       }
     };
 
-    onEvent.onmessage = (msg) => {
-      switch (msg.event) {
-        case "columns":
-          columns.push(...(msg.data as unknown as { names: string[] }).names);
-          flushTimer = setInterval(flush, 50);
-          break;
-
-        case "row": {
-          const values = (msg.data as unknown as { values: unknown[] }).values;
-          const row: Record<string, unknown> = {};
-          columns.forEach((col, i) => { row[col] = values[i]; });
-          buffer.push(row);
-          break;
-        }
-
-        case "done": {
-          flush();
-          if (flushTimer) clearInterval(flushTimer);
-          const { row_count, duration_ms } = msg.data as unknown as {
-            row_count: number;
-            duration_ms: number;
-          };
-          const result: ResultPaneState =
-            rows.length === 0
-              ? { kind: "empty", durationMs: duration_ms }
-              : { kind: "results", columns, rows, rowCount: row_count, durationMs: duration_ms };
-          this._setTabExecuting(connectionId, queryTabId, false, result);
-
-          // After a successful SELECT, fetch schema metadata for the edit store
-          if (rows.length > 0) {
-            fetchSchemaMetadata(connectionId, sql).then((meta) => {
-              // Only update if this query tab is still the active one
-              if (editStore.queryTabId === queryTabId) {
-                editStore.setTableMeta(meta);
-              }
-            });
-          }
-          break;
-        }
-
-        case "rowsAffected": {
-          if (flushTimer) clearInterval(flushTimer);
-          const { count, duration_ms: dms } = msg.data as unknown as {
-            count: number;
-            duration_ms: number;
-          };
-          this._setTabExecuting(connectionId, queryTabId, false, {
-            kind: "rowsAffected",
-            count,
-            durationMs: dms,
-          });
-          break;
-        }
-
-        case "error": {
-          if (flushTimer) clearInterval(flushTimer);
-          const { message } = msg.data as unknown as { message: string };
-          this._setTabExecuting(connectionId, queryTabId, false, { kind: "error", message });
-          break;
-        }
-      }
-    };
-
     try {
-      await invoke("execute_query", { connectionId, sql, onEvent });
+      await api.executeQueryStream(connectionId, sql, (msg) => {
+        switch (msg.event) {
+          case "columns":
+            columns.push(...(msg.data as unknown as { names: string[] }).names);
+            flushTimer = setInterval(flush, 50);
+            break;
+
+          case "row": {
+            const values = (msg.data as unknown as { values: unknown[] }).values;
+            const row: Record<string, unknown> = {};
+            columns.forEach((col, i) => { row[col] = values[i]; });
+            buffer.push(row);
+            break;
+          }
+
+          case "done": {
+            flush();
+            if (flushTimer) clearInterval(flushTimer);
+            const { row_count, duration_ms } = msg.data as unknown as {
+              row_count: number;
+              duration_ms: number;
+            };
+            const result: ResultPaneState =
+              rows.length === 0
+                ? { kind: "empty", durationMs: duration_ms }
+                : { kind: "results", columns, rows, rowCount: row_count, durationMs: duration_ms };
+            this._setTabExecuting(connectionId, queryTabId, false, result);
+
+            // After a successful SELECT, fetch schema metadata for the edit store
+            if (rows.length > 0) {
+              fetchSchemaMetadata(connectionId, sql).then((meta) => {
+                // Only update if this query tab is still the active one
+                if (editStore.queryTabId === queryTabId) {
+                  editStore.setTableMeta(meta);
+                }
+              });
+            }
+            break;
+          }
+
+          case "rowsAffected": {
+            if (flushTimer) clearInterval(flushTimer);
+            const { count, duration_ms: dms } = msg.data as unknown as {
+              count: number;
+              duration_ms: number;
+            };
+            this._setTabExecuting(connectionId, queryTabId, false, {
+              kind: "rowsAffected",
+              count,
+              durationMs: dms,
+            });
+            break;
+          }
+
+          case "error": {
+            if (flushTimer) clearInterval(flushTimer);
+            const { message } = msg.data as unknown as { message: string };
+            this._setTabExecuting(connectionId, queryTabId, false, { kind: "error", message });
+            break;
+          }
+        }
+      });
     } catch (e) {
       if (flushTimer) clearInterval(flushTimer);
       this._setTabExecuting(connectionId, queryTabId, false, {
@@ -392,7 +388,7 @@ export const tabs = {
       })),
     };
     try {
-      await invoke("save_tab_state", { tabState: state });
+      await api.invoke("save_tab_state", { tabState: state });
     } catch (e) {
       console.warn("Failed to save tab state:", e);
     }
@@ -401,7 +397,7 @@ export const tabs = {
   async restoreState(connectRaw: (id: string) => Promise<void>) {
     let persisted: PersistedTabState | null = null;
     try {
-      persisted = await invoke<PersistedTabState | null>("get_tab_state");
+      persisted = await api.invoke<PersistedTabState | null>("get_tab_state");
     } catch {
       return;
     }

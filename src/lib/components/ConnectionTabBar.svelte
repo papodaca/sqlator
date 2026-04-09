@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { api } from "$lib/api";
   import { getColorHex } from "$lib/constants/colors";
   import { connections } from "$lib/stores/connections.svelte";
   import { tabs } from "$lib/stores/tabs.svelte";
@@ -116,14 +116,14 @@
     const closedIds = connectionTabs
       .filter((t) => t.connectionId !== keepId)
       .map((t) => t.connectionId);
-    await Promise.allSettled(closedIds.map((id) => invoke("disconnect_database", { id })));
+    await Promise.allSettled(closedIds.map((id) => api.invoke("disconnect_database", { id })));
     closeContextMenu();
   }
 
   async function handleCloseAll() {
     const allIds = connectionTabs.map((t) => t.connectionId);
     tabs.closeAllConnectionTabs();
-    await Promise.allSettled(allIds.map((id) => invoke("disconnect_database", { id })));
+    await Promise.allSettled(allIds.map((id) => api.invoke("disconnect_database", { id })));
     closeContextMenu();
   }
 </script>

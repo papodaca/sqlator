@@ -10,7 +10,7 @@ import type {
   TableMeta,
   TempRowId,
 } from "$lib/types";
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import { generateBatch } from "$lib/services/sql-generator";
 
 // Serialize PkValue to a stable string key
@@ -204,7 +204,7 @@ class EditStore {
 
   async executeBatch(batch: SqlBatch): Promise<BatchResult> {
     if (!this.connectionId) throw new Error("No connection");
-    const result = await invoke<BatchResult>("execute_batch", {
+    const result = await api.invoke<BatchResult>("execute_batch", {
       connectionId: this.connectionId,
       batch,
     });

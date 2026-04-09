@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { api } from "$lib/api";
   import { tabs } from "$lib/stores/tabs.svelte";
   import { connections } from "$lib/stores/connections.svelte";
   import ConnectionTabBar from "./ConnectionTabBar.svelte";
@@ -19,7 +19,7 @@
 
   async function handleCloseConnection(connectionId: string) {
     tabs.closeConnection(connectionId);
-    await invoke("disconnect_database", { id: connectionId }).catch(() => {});
+    await api.invoke("disconnect_database", { id: connectionId }).catch(() => {});
   }
 
   function handleNewConnectionTab() {

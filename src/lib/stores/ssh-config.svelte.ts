@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { SshHostEntry } from "$lib/types";
 
 let hosts = $state<SshHostEntry[]>([]);
@@ -20,7 +20,7 @@ export const sshConfig = {
     loading = true;
     error = null;
     try {
-      hosts = await invoke<SshHostEntry[]>("list_ssh_hosts");
+      hosts = await api.invoke<SshHostEntry[]>("list_ssh_hosts");
     } catch (e) {
       error = String(e);
       hosts = [];

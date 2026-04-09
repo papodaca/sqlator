@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { StorageMode, VaultSettings } from "$lib/types";
 
 let mode = $state<StorageMode | null>(null);
@@ -23,11 +23,11 @@ export const credentialStorage = {
     error = null;
     try {
       [keyringAvailable, mode, vaultExists, vaultLocked, settings] = await Promise.all([
-        invoke<boolean>("check_keyring_available"),
-        invoke<StorageMode>("get_storage_mode"),
-        invoke<boolean>("vault_exists"),
-        invoke<boolean>("is_vault_locked"),
-        invoke<VaultSettings>("get_vault_settings"),
+        api.invoke<boolean>("check_keyring_available"),
+        api.invoke<StorageMode>("get_storage_mode"),
+        api.invoke<boolean>("vault_exists"),
+        api.invoke<boolean>("is_vault_locked"),
+        api.invoke<VaultSettings>("get_vault_settings"),
       ]);
     } catch (e) {
       error = String(e);
@@ -37,33 +37,33 @@ export const credentialStorage = {
   },
 
   async setMode(newMode: StorageMode, migrate = false) {
-    await invoke("set_storage_mode", { mode: newMode, migrate });
+    await api.invoke("set_storage_mode", { mode: newMode, migrate });
     mode = newMode;
   },
 
   async createVault(password: string) {
-    await invoke("create_vault", { password });
+    await api.invoke("create_vault", { password });
     vaultExists = true;
     vaultLocked = false;
     mode = "vault";
   },
 
   async unlockVault(password: string) {
-    await invoke("unlock_vault", { password });
+    await api.invoke("unlock_vault", { password });
     vaultLocked = false;
   },
 
   async lockVault() {
-    await invoke("lock_vault");
+    await api.invoke("lock_vault");
     vaultLocked = true;
   },
 
   async saveSettings(s: VaultSettings) {
-    await invoke("save_vault_settings", { settings: s });
+    await api.invoke("save_vault_settings", { settings: s });
     settings = s;
   },
 
   async refreshLockState() {
-    vaultLocked = await invoke<boolean>("is_vault_locked");
+    vaultLocked = await api.invoke<boolean>("is_vault_locked");
   },
 };

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { ConnectionGroup, ConnectionInfo } from "$lib/types";
 
 let groupList = $state<ConnectionGroup[]>([]);
@@ -14,7 +14,7 @@ export const groups = {
 
   async load() {
     try {
-      groupList = await invoke<ConnectionGroup[]>("get_groups");
+      groupList = await api.invoke<ConnectionGroup[]>("get_groups");
     } catch (e) {
       console.error("Failed to load groups:", e);
     }
@@ -25,7 +25,7 @@ export const groups = {
     color: string | null = null,
     parentGroupId: string | null = null,
   ): Promise<ConnectionGroup> {
-    const group = await invoke<ConnectionGroup>("save_group", {
+    const group = await api.invoke<ConnectionGroup>("save_group", {
       payload: { name, color, parent_group_id: parentGroupId },
     });
     groupList = [...groupList, group];
@@ -33,13 +33,13 @@ export const groups = {
   },
 
   async update(group: ConnectionGroup): Promise<ConnectionGroup> {
-    const updated = await invoke<ConnectionGroup>("update_group", { group });
+    const updated = await api.invoke<ConnectionGroup>("update_group", { group });
     groupList = groupList.map((g) => (g.id === group.id ? updated : g));
     return updated;
   },
 
   async remove(id: string): Promise<void> {
-    await invoke("delete_group", { id });
+    await api.invoke("delete_group", { id });
     groupList = groupList.filter((g) => g.id !== id);
   },
 
@@ -47,7 +47,7 @@ export const groups = {
     const group = groupList.find((g) => g.id === id);
     if (!group) return;
     const updated = { ...group, collapsed: !group.collapsed };
-    await invoke<ConnectionGroup>("update_group", { group: updated });
+    await api.invoke<ConnectionGroup>("update_group", { group: updated });
     groupList = groupList.map((g) => (g.id === id ? updated : g));
   },
 
@@ -55,7 +55,7 @@ export const groups = {
     connectionId: string,
     groupId: string | null,
   ): Promise<ConnectionInfo> {
-    return await invoke<ConnectionInfo>("move_connection_to_group", {
+    return await api.invoke<ConnectionInfo>("move_connection_to_group", {
       connectionId,
       groupId,
     });

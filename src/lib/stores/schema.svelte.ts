@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { SchemaInfo, TableInfo, SchemaColumnInfo } from "$lib/types";
 
 // Per-connection schema state
@@ -54,7 +54,7 @@ export const schemaStore = {
     state.isLoadingSchemas = true;
     state.error = null;
     try {
-      const schemas = await invoke<SchemaInfo[]>("get_schemas", { connectionId });
+      const schemas = await api.invoke<SchemaInfo[]>("get_schemas", { connectionId });
       state.schemas = schemas;
       // Auto-select default schema
       const defaultSchema = schemas.find((s) => s.isDefault);
@@ -78,7 +78,7 @@ export const schemaStore = {
     state.isLoadingTables = true;
     state.error = null;
     try {
-      const tables = await invoke<TableInfo[]>("get_tables", {
+      const tables = await api.invoke<TableInfo[]>("get_tables", {
         connectionId,
         schema: schema ?? state.activeSchema ?? undefined,
       });
@@ -98,7 +98,7 @@ export const schemaStore = {
 
     state.loadingColumns = [...state.loadingColumns, tableName];
     try {
-      const cols = await invoke<SchemaColumnInfo[]>("get_columns", {
+      const cols = await api.invoke<SchemaColumnInfo[]>("get_columns", {
         connectionId,
         tableName,
         schema: schema ?? state.activeSchema ?? undefined,

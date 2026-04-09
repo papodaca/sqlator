@@ -1,4 +1,4 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type { ResultPaneState } from "$lib/types";
 
 let resultState = $state<ResultPaneState>({ kind: "idle" });
@@ -22,13 +22,6 @@ export const query = {
     const rows: Record<string, unknown>[] = [];
     let buffer: Record<string, unknown>[] = [];
 
-    // Set up streaming channel
-    const onEvent = new Channel<{
-      event: string;
-      data: Record<string, unknown>;
-    }>();
-
-    // Batch flush timer
     let flushTimer: ReturnType<typeof setInterval> | null = null;
 
     const flush = () => {
@@ -38,73 +31,63 @@ export const query = {
       }
     };
 
-    onEvent.onmessage = (msg) => {
-      switch (msg.event) {
-        case "columns":
-          columns.push(...(msg.data as unknown as { names: string[] }).names);
-          // Start batch flushing
-          flushTimer = setInterval(flush, 50);
-          break;
-
-        case "row": {
-          const values = (msg.data as unknown as { values: unknown[] })
-            .values;
-          const row: Record<string, unknown> = {};
-          columns.forEach((col, i) => {
-            row[col] = values[i];
-          });
-          buffer.push(row);
-          break;
-        }
-
-        case "done": {
-          flush();
-          if (flushTimer) clearInterval(flushTimer);
-          const { row_count, duration_ms } = msg.data as unknown as {
-            row_count: number;
-            duration_ms: number;
-          };
-          if (rows.length === 0) {
-            resultState = { kind: "empty", durationMs: duration_ms };
-          } else {
-            resultState = {
-              kind: "results",
-              columns,
-              rows,
-              rowCount: row_count,
-              durationMs: duration_ms,
-            };
-          }
-          isExecuting = false;
-          break;
-        }
-
-        case "rowsAffected": {
-          if (flushTimer) clearInterval(flushTimer);
-          const { count, duration_ms: dms } = msg.data as unknown as {
-            count: number;
-            duration_ms: number;
-          };
-          resultState = { kind: "rowsAffected", count, durationMs: dms };
-          isExecuting = false;
-          break;
-        }
-
-        case "error": {
-          if (flushTimer) clearInterval(flushTimer);
-          const { message } = msg.data as unknown as { message: string };
-          resultState = { kind: "error", message };
-          isExecuting = false;
-          break;
-        }
-      }
-    };
-
     try {
-      await invoke("execute_query", {
-        connectionId,
-        sql,
-        onEvent,
+      await api.executeQueryStream(connectionId, sql, (msg) => {
+        switch (msg.event) {
+          case "columns":
+            columns.push(...(msg.data as unknown as { names: string[] }).names);
+            flushTimer = setInterval(flush, 50);
+            break;
+
+          case "row": {
+            const values = (msg.data as unknown as { values: unknown[] }).values;
+            const row: Record<string, unknown> = {};
+            columns.forEach((col, i) => { row[col] = values[i]; });
+            buffer.push(row);
+            break;
+          }
+
+          case "done": {
+            flush();
+            if (flushTimer) clearInterval(flushTimer);
+            const { row_count, duration_ms } = msg.data as unknown as {
+              row_count: number;
+              duration_ms: number;
+            };
+            if (rows.length === 0) {
+              resultState = { kind: "empty", durationMs: duration_ms };
+            } else {
+              resultState = {
+                kind: "results",
+                columns,
+                rows,
+                rowCount: row_count,
+                durationMs: duration_ms,
+              };
+            }
+            isExecuting = false;
+            break;
+          }
+
+          case "rowsAffected": {
+            if (flushTimer) clearInterval(flushTimer);
+            const { count, duration_ms: dms } = msg.data as unknown as {
+              count: number;
+              duration_ms: number;
+            };
+            resultState = { kind: "rowsAffected", count, durationMs: dms };
+            isExecuting = false;
+            break;
+          }
+
+          case "error": {
+            if (flushTimer) clearInterval(flushTimer);
+            const { message } = msg.data as unknown as { message: string };
+            resultState = { kind: "error", message };
+            isExecuting = false;
+            break;
+          }
+        }
       });
     } catch (e) {
       if (flushTimer) clearInterval(flushTimer);

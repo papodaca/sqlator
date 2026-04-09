@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "$lib/api";
 import type {
   ConnectionInfo,
   ConnectionConfig,
@@ -29,14 +29,14 @@ export const connections = {
 
   async load() {
     try {
-      connectionList = await invoke<ConnectionInfo[]>("get_connections");
+      connectionList = await api.invoke<ConnectionInfo[]>("get_connections");
     } catch (e) {
       console.error("Failed to load connections:", e);
     }
   },
 
   async save(config: ConnectionConfig): Promise<ConnectionInfo> {
-    const info = await invoke<ConnectionInfo>("save_connection", { config });
+    const info = await api.invoke<ConnectionInfo>("save_connection", { config });
     connectionList = [...connectionList, info];
     return info;
   },
@@ -45,7 +45,7 @@ export const connections = {
     id: string,
     config: ConnectionConfig,
   ): Promise<ConnectionInfo> {
-    const info = await invoke<ConnectionInfo>("update_connection", {
+    const info = await api.invoke<ConnectionInfo>("update_connection", {
       id,
       config,
     });
@@ -54,13 +54,13 @@ export const connections = {
   },
 
   async clone(id: string): Promise<ConnectionInfo> {
-    const info = await invoke<ConnectionInfo>("clone_connection", { id });
+    const info = await api.invoke<ConnectionInfo>("clone_connection", { id });
     connectionList = [...connectionList, info];
     return info;
   },
 
   async remove(id: string) {
-    await invoke("delete_connection", { id });
+    await api.invoke("delete_connection", { id });
     connectionList = connectionList.filter((c) => c.id !== id);
     if (activeId === id) {
       activeId = null;
@@ -69,7 +69,7 @@ export const connections = {
   },
 
   async test(url: string): Promise<string> {
-    return await invoke<string>("test_connection", { url });
+    return await api.invoke<string>("test_connection", { url });
   },
 
   async select(id: string) {
@@ -80,7 +80,7 @@ export const connections = {
     connectionError = null;
 
     try {
-      await invoke("connect_database", { id });
+      await api.invoke("connect_database", { id });
       status = "connected";
     } catch (e) {
       status = "error";
@@ -96,7 +96,7 @@ export const connections = {
 
   /** Connect to a database by ID without touching activeId/status (used by tabs). */
   async connectRaw(id: string) {
-    await invoke("connect_database", { id });
+    await api.invoke("connect_database", { id });
   },
 
   /** Apply an updated ConnectionInfo (e.g. after a group move) without a full reload. */
