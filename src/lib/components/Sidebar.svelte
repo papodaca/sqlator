@@ -12,6 +12,7 @@
   import type { ConnectionInfo, TableInfo } from "$lib/types";
   import { tabs } from "$lib/stores/tabs.svelte";
   import SchemaBrowser from "./SchemaBrowser.svelte";
+  import { serverMode } from "$lib/stores/server-mode.svelte";
 
   let showForm = $state(false);
   let editingConnection = $state<ConnectionInfo | null>(null);
@@ -120,121 +121,123 @@
 <svelte:window onclick={closeHeaderMenu} />
 
 <aside class="sidebar">
-  <div class="sidebar-header">
-    <span class="sidebar-title">Connections</span>
-    <div class="sidebar-actions">
-      <ThemeToggle />
-      <button class="icon-btn" onclick={openNewForm} title="Add connection">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="5" x2="12" y2="19"></line>
-          <line x1="5" y1="12" x2="19" y2="12"></line>
-        </svg>
-      </button>
-      <!-- ⋯ overflow menu -->
-      <div class="header-menu-wrap">
-        <button
-          class="icon-btn"
-          onclick={(e) => { e.stopPropagation(); showHeaderMenu = !showHeaderMenu; }}
-          title="More options"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>
+  {#if !serverMode.isSingleDb}
+    <div class="sidebar-header">
+      <span class="sidebar-title">Connections</span>
+      <div class="sidebar-actions">
+        <ThemeToggle />
+        <button class="icon-btn" onclick={openNewForm} title="Add connection">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
         </button>
-        {#if showHeaderMenu}
-          <div class="header-menu" role="menu">
-            <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); creatingGroup = true; showHeaderMenu = false; }}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                <line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line>
-              </svg>
-              New group
-            </button>
-            <div class="header-menu-divider"></div>
-            <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); handleExport(); showHeaderMenu = false; }}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
-              </svg>
-              Export connections
-            </button>
-            <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); showImport = true; showHeaderMenu = false; }}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>
-              </svg>
-              Import connections
-            </button>
-          </div>
-        {/if}
+        <!-- ⋯ overflow menu -->
+        <div class="header-menu-wrap">
+          <button
+            class="icon-btn"
+            onclick={(e) => { e.stopPropagation(); showHeaderMenu = !showHeaderMenu; }}
+            title="More options"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>
+            </svg>
+          </button>
+          {#if showHeaderMenu}
+            <div class="header-menu" role="menu">
+              <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); creatingGroup = true; showHeaderMenu = false; }}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                  <line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line>
+                </svg>
+                New group
+              </button>
+              <div class="header-menu-divider"></div>
+              <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); handleExport(); showHeaderMenu = false; }}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                Export connections
+              </button>
+              <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); showImport = true; showHeaderMenu = false; }}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Import connections
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- Export toast -->
-  {#if exportedPath}
-    <div class="export-toast">
-      <span class="export-msg">Saved to <code>{exportedPath}</code></span>
-      <button class="open-btn" onclick={() => api.openPath(exportedPath!)}>Open</button>
-    </div>
-  {/if}
-
-  <!-- New group input -->
-  {#if creatingGroup}
-    <div class="new-group-row">
-      <!-- svelte-ignore a11y_autofocus -->
-      <input
-        class="new-group-input"
-        bind:value={newGroupName}
-        placeholder="Group name…"
-        onkeydown={handleGroupNameKeydown}
-        onblur={handleCreateGroup}
-        autofocus
-      />
-    </div>
-  {/if}
-
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="connection-list" class:has-schema={isConnected}>
-    {#if connections.list.length === 0 && groups.list.length === 0}
-      <div class="empty-list">
-        <p>No connections yet</p>
-        <button class="add-first-btn" onclick={openNewForm}>
-          Add your first connection
-        </button>
+    <!-- Export toast -->
+    {#if exportedPath}
+      <div class="export-toast">
+        <span class="export-msg">Saved to <code>{exportedPath}</code></span>
+        <button class="open-btn" onclick={() => api.openPath(exportedPath!)}>Open</button>
       </div>
-    {:else}
-      <!-- Ungrouped connections (drop zone to remove from group) -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="ungrouped-zone"
-        class:drag-over={rootDragOver}
-        ondragover={handleRootDragOver}
-        ondragleave={handleRootDragLeave}
-        ondrop={handleRootDrop}
-      >
-        {#each ungrouped as conn (conn.id)}
-          <ConnectionItem
-            connection={conn}
+    {/if}
+
+    <!-- New group input -->
+    {#if creatingGroup}
+      <div class="new-group-row">
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          class="new-group-input"
+          bind:value={newGroupName}
+          placeholder="Group name…"
+          onkeydown={handleGroupNameKeydown}
+          onblur={handleCreateGroup}
+          autofocus
+        />
+      </div>
+    {/if}
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="connection-list" class:has-schema={isConnected}>
+      {#if connections.list.length === 0 && groups.list.length === 0}
+        <div class="empty-list">
+          <p>No connections yet</p>
+          <button class="add-first-btn" onclick={openNewForm}>
+            Add your first connection
+          </button>
+        </div>
+      {:else}
+        <!-- Ungrouped connections (drop zone to remove from group) -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="ungrouped-zone"
+          class:drag-over={rootDragOver}
+          ondragover={handleRootDragOver}
+          ondragleave={handleRootDragLeave}
+          ondrop={handleRootDrop}
+        >
+          {#each ungrouped as conn (conn.id)}
+            <ConnectionItem
+              connection={conn}
+              onedit={openEditForm}
+              dragstart={(e) => {
+                e.dataTransfer?.setData("text/plain", conn.id);
+                if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+              }}
+            />
+          {/each}
+        </div>
+
+        <!-- Root groups -->
+        {#each rootGroups as group (group.id)}
+          <GroupItem
+            {group}
+            depth={0}
             onedit={openEditForm}
-            dragstart={(e) => {
-              e.dataTransfer?.setData("text/plain", conn.id);
-              if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-            }}
           />
         {/each}
-      </div>
-
-      <!-- Root groups -->
-      {#each rootGroups as group (group.id)}
-        <GroupItem
-          {group}
-          depth={0}
-          onedit={openEditForm}
-        />
-      {/each}
-    {/if}
-  </div>
+      {/if}
+    </div>
+  {/if}
 
   {#if activeConnectionId}
     <SchemaBrowser

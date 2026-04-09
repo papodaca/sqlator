@@ -105,9 +105,7 @@
 <div aria-live="polite" aria-atomic="true" class="sr-only">{announcement}</div>
 
 <div class="app-layout" class:single-db={serverMode.isSingleDb}>
-  {#if !serverMode.isSingleDb}
-    <Sidebar />
-  {/if}
+  <Sidebar />
   <main class="main-content">
     {@render children()}
   </main>
