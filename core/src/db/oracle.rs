@@ -1,7 +1,5 @@
-// Oracle database support (experimental) via oracle-rs pure-Rust TNS driver.
-// Currently disabled — oracle-rs is too unstable for production use.
+// Oracle database support via oracle-rs pure-Rust TNS driver.
 // Connection URL format: oracle://user:pass@host:1521/service_name
-#![allow(dead_code, unused_imports)]
 use crate::error::CoreError;
 use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
 use deadpool_oracle::PoolBuilder;
@@ -11,11 +9,23 @@ use std::time::Instant;
 
 pub type OraclePool = deadpool_oracle::Pool;
 
-pub async fn create_pool(_url: &str) -> Result<OraclePool, CoreError> {
-    Err(CoreError {
-        message: "Oracle support is currently disabled. The oracle-rs driver is too unstable for production use. Please use a PostgreSQL-compatible proxy (e.g. oracledb-pg) or wait for a stable Oracle driver.".into(),
-        code: "UNSUPPORTED".into(),
-    })
+pub async fn create_pool(url: &str) -> Result<OraclePool, CoreError> {
+    let config = parse_url(url)?;
+    let pool = PoolBuilder::new(config)
+        .max_size(4)
+        .build()
+        .map_err(|e| CoreError {
+            message: format!("Failed to create Oracle connection pool: {}", e),
+            code: "POOL_CREATE_FAILED".into(),
+        })?;
+
+    // Verify the connection works by getting one from the pool
+    let _conn = pool.get().await.map_err(|e| CoreError {
+        message: format!("Oracle connection failed: {}", e),
+        code: "CONNECTION_FAILED".into(),
+    })?;
+
+    Ok(pool)
 }
 
 fn parse_url(url: &str) -> Result<Config, CoreError> {
@@ -94,6 +104,12 @@ pub async fn execute_statement(
 
     match conn.execute(sql, &[]).await {
         Ok(result) => {
+            // Oracle auto-commit is off by default; commit DML so changes persist
+            // across pooled connections (deadpool recycles via rollback).
+            if let Err(e) = conn.commit().await {
+                let _ = sender.send(QueryEvent::Error { message: format!("Commit failed: {}", e) }).await;
+                return Ok(());
+            }
             let duration_ms = start.elapsed().as_millis() as u64;
             let _ = sender
                 .send(QueryEvent::RowsAffected {
@@ -127,11 +143,14 @@ pub async fn get_schemas(pool: &OraclePool) -> Result<Vec<SchemaInfo>, CoreError
         .unwrap_or("")
         .to_uppercase();
 
-    // oracle_maintained = 'N' filters out built-in Oracle system schemas (Oracle 12.1+)
+    // oracle_maintained = 'N' filters out built-in Oracle system schemas (Oracle 12.1+).
+    // Always include the current user even if they are oracle-maintained (e.g. SYSTEM).
     let result = conn
         .query(
-            "SELECT username FROM all_users WHERE oracle_maintained = 'N' ORDER BY username",
-            &[],
+            "SELECT username FROM all_users \
+             WHERE oracle_maintained = 'N' OR username = :1 \
+             ORDER BY username",
+            &[Value::String(current_user.clone())],
         )
         .await
         .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
@@ -171,9 +190,9 @@ pub async fn get_tables(
         .query(
             "SELECT table_name, 'table' AS obj_type FROM all_tables WHERE owner = :1 \
              UNION ALL \
-             SELECT view_name, 'view' FROM all_views WHERE owner = :1 \
+             SELECT view_name, 'view' FROM all_views WHERE owner = :2 \
              ORDER BY 1",
-            &[Value::String(schema_val.clone())],
+            &[Value::String(schema_val.clone()), Value::String(schema_val.clone())],
         )
         .await
         .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
