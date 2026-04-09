@@ -2,6 +2,7 @@
   import { api } from "$lib/api";
   import { tabs } from "$lib/stores/tabs.svelte";
   import { connections } from "$lib/stores/connections.svelte";
+  import { serverMode } from "$lib/stores/server-mode.svelte";
   import ConnectionTabBar from "./ConnectionTabBar.svelte";
   import QueryTabBar from "./QueryTabBar.svelte";
   import SqlEditor from "./SqlEditor.svelte";
@@ -47,13 +48,15 @@
 
 <div class="tabbed-editor">
   {#if tabs.connectionTabs.length > 0}
-    <ConnectionTabBar
-      connectionTabs={tabs.connectionTabs}
-      activeConnectionId={tabs.activeConnectionId}
-      onselect={handleSelectConnection}
-      onclose={handleCloseConnection}
-      onnew={handleNewConnectionTab}
-    />
+    {#if !serverMode.isSingleDb}
+      <ConnectionTabBar
+        connectionTabs={tabs.connectionTabs}
+        activeConnectionId={tabs.activeConnectionId}
+        onselect={handleSelectConnection}
+        onclose={handleCloseConnection}
+        onnew={handleNewConnectionTab}
+      />
+    {/if}
 
     {#if activeConnectionTab}
       <QueryTabBar
