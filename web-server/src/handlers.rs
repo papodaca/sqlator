@@ -72,12 +72,15 @@ pub async fn dispatch(
 
 async fn handle(command: &str, state: &Arc<AppState>, args: &Value) -> HandlerResult {
     match command {
+        // ── Server info (mode detection) ──────────────────────────────────────
+        "server-info" => server_info(state),
+
         // ── Connection CRUD ───────────────────────────────────────────────────
         "get-connections" => get_connections(state).await,
-        "save-connection" => save_connection(state, args).await,
-        "update-connection" => update_connection(state, args).await,
-        "clone-connection" => clone_connection(state, args).await,
-        "delete-connection" => delete_connection(state, args).await,
+        "save-connection" => require_multi_db(state, || save_connection(state, args)).await,
+        "update-connection" => require_multi_db(state, || update_connection(state, args)).await,
+        "clone-connection" => require_multi_db(state, || clone_connection(state, args)).await,
+        "delete-connection" => require_multi_db(state, || delete_connection(state, args)).await,
         "test-connection" => test_connection(args).await,
         "connect-database" => connect_database(state, args).await,
         "disconnect-database" => disconnect_database(state, args).await,
@@ -172,13 +175,76 @@ pub async fn export_file(Query(q): Query<ExportFileQuery>) -> impl IntoResponse 
     }
 }
 
+// ── Server info ───────────────────────────────────────────────────────────────
+
+fn server_info(state: &Arc<AppState>) -> HandlerResult {
+    match &state.single_db {
+        Some(cfg) => Ok(json!({
+            "mode": "single-db",
+            "connectionId": cfg.connection_id,
+            "connectionName": cfg.connection_name,
+        })),
+        None => Ok(json!({ "mode": "multi-db" })),
+    }
+}
+
+/// Returns an error if the server is running in single-db mode.
+async fn require_multi_db<F, Fut>(state: &Arc<AppState>, f: F) -> HandlerResult
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = HandlerResult>,
+{
+    if state.single_db.is_some() {
+        return Err(err("connection management is disabled in single-db mode"));
+    }
+    f().await
+}
+
 // ── Connection CRUD ───────────────────────────────────────────────────────────
 
 async fn get_connections(state: &Arc<AppState>) -> HandlerResult {
+    // In single-db mode return a synthetic locked connection.
+    if let Some(cfg) = &state.single_db {
+        let parsed = url::Url::parse(&cfg.url).map_err(err)?;
+        let db_type = match parsed.scheme() {
+            "postgres" | "postgresql" => "postgres",
+            "mysql" => "mysql",
+            "mariadb" => "mariadb",
+            "sqlite" => "sqlite",
+            "mssql" | "sqlserver" | "tds" => "mssql",
+            "oracle" => "oracle",
+            "clickhouse" => "clickhouse",
+            _ => "unknown",
+        };
+        return Ok(json!([{
+            "id": cfg.connection_id,
+            "name": cfg.connection_name,
+            "color_id": "blue",
+            "db_type": db_type,
+            "host": parsed.host_str().unwrap_or("localhost"),
+            "port": parsed.port().unwrap_or(0),
+            "database": parsed.path().trim_start_matches('/'),
+            "username": parsed.username(),
+            "masked_url": mask_url(&cfg.url),
+            "ssh_profile_id": null,
+            "group_id": null,
+        }]));
+    }
     let config = state.config.lock().await;
     let connections = config.get_connections().map_err(err)?;
     let infos: Vec<ConnectionInfo> = connections.iter().map(ConnectionInfo::from).collect();
     Ok(json!(infos))
+}
+
+fn mask_url(url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        if parsed.password().is_some() {
+            let _ = parsed.set_password(Some("***"));
+        }
+        parsed.to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 fn detect_db_type(url: &str) -> Result<(&'static str, u16), (StatusCode, String)> {
@@ -265,6 +331,13 @@ async fn test_connection(args: &Value) -> HandlerResult {
 
 async fn connect_database(state: &Arc<AppState>, args: &Value) -> HandlerResult {
     let id: String = get(args, "id")?;
+    // In single-db mode the pool is pre-connected at startup — no-op.
+    if let Some(cfg) = &state.single_db {
+        if id == cfg.connection_id {
+            return Ok(json!(null));
+        }
+        return Err(err("cannot connect to other databases in single-db mode"));
+    }
     let config = state.config.lock().await;
     let connections = config.get_connections().map_err(err)?;
     let conn = connections
