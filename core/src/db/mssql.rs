@@ -1,5 +1,6 @@
 use crate::error::CoreError;
-use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
+use crate::models::{FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo,
+    TableQueryParams, TableQueryResult};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
@@ -377,4 +378,128 @@ fn mssql_value_to_json(row: &tiberius::Row, index: usize) -> serde_json::Value {
 
     let type_name = format!("{:?}", row.columns()[index].column_type());
     serde_json::Value::String(format!("<{}>", type_name))
+}
+
+pub async fn query_table(
+    pool: &MssqlPool,
+    params: &TableQueryParams,
+    valid_columns: &[&str],
+    col_names: Vec<String>,
+    col_types: Vec<String>,
+) -> Result<TableQueryResult, CoreError> {
+    let schema = params.schema.as_deref().unwrap_or("dbo");
+    let table_quoted = format!(
+        "[{}].[{}]",
+        schema.replace(']', "]]"),
+        params.table_name.replace(']', "]]")
+    );
+
+    let where_clause = build_where_mssql(&params.filters, valid_columns);
+    let order_clause = build_order_by_mssql(&params.sort, valid_columns);
+    // OFFSET/FETCH NEXT requires ORDER BY
+    let order_final = if order_clause.is_empty() {
+        " ORDER BY (SELECT NULL)".to_string()
+    } else {
+        order_clause
+    };
+
+    let limit = params.limit.min(1000) + 1;
+    let sql = format!(
+        "SELECT * FROM {}{}{} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+        table_quoted, where_clause, order_final, params.offset, limit
+    );
+
+    let mut client = pool.lock().await;
+    let rows = client
+        .query(&sql, &[])
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?;
+
+    let has_more = rows.len() as i64 > params.limit.min(1000);
+    let rows_to_use = if has_more { &rows[..rows.len() - 1] } else { &rows[..] };
+
+    let result_rows: Vec<serde_json::Value> = rows_to_use
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in col_names.iter().enumerate() {
+                obj.insert(col.clone(), mssql_value_to_json(row, i));
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+
+    Ok(TableQueryResult {
+        columns: col_names,
+        column_types: col_types,
+        rows: result_rows,
+        has_more,
+        total_returned: rows_to_use.len(),
+    })
+}
+
+fn format_sql_literal(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("'{}'", val.to_string().replace('\'', "''")),
+    }
+}
+
+fn build_where_mssql(filters: &[FilterSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = filters
+        .iter()
+        .filter(|f| valid.contains(&f.column.as_str()))
+        .filter_map(|f| {
+            let col = format!("[{}]", f.column.replace(']', "]]"));
+            match f.operator.as_str() {
+                "isNull" => Some(format!("{} IS NULL", col)),
+                "isNotNull" => Some(format!("{} IS NOT NULL", col)),
+                _ => {
+                    let val = f.value.as_ref()?;
+                    let lit = format_sql_literal(val);
+                    match f.operator.as_str() {
+                        "contains" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '%{}%'", col, s))
+                        }
+                        "startsWith" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '{}%'", col, s))
+                        }
+                        "endsWith" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '%{}'", col, s))
+                        }
+                        "equals" => Some(format!("{} = {}", col, lit)),
+                        "gt"  => Some(format!("{} > {}", col, lit)),
+                        "gte" => Some(format!("{} >= {}", col, lit)),
+                        "lt"  => Some(format!("{} < {}", col, lit)),
+                        "lte" => Some(format!("{} <= {}", col, lit)),
+                        _ => None,
+                    }
+                }
+            }
+        })
+        .collect();
+
+    if parts.is_empty() { String::new() } else { format!(" WHERE {}", parts.join(" AND ")) }
+}
+
+fn build_order_by_mssql(sort: &[SortSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = sort
+        .iter()
+        .filter(|s| valid.contains(&s.column.as_str()))
+        .map(|s| {
+            let col = format!("[{}]", s.column.replace(']', "]]"));
+            format!("{} {}", col, if s.desc { "DESC" } else { "ASC" })
+        })
+        .collect();
+
+    if parts.is_empty() { String::new() } else { format!(" ORDER BY {}", parts.join(", ")) }
 }

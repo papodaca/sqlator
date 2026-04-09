@@ -6,7 +6,8 @@
 ///
 /// Connection URL format: clickhouse://user:pass@host:8123/database
 use crate::error::CoreError;
-use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
+use crate::models::{FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo,
+    TableQueryParams, TableQueryResult};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -337,6 +338,126 @@ fn map_clickhouse_type(raw: &str) -> String {
         other => other,
     }
     .to_string()
+}
+
+pub async fn query_table(
+    pool: &ClickHousePool,
+    params: &TableQueryParams,
+    valid_columns: &[&str],
+    col_names: Vec<String>,
+    col_types: Vec<String>,
+) -> Result<TableQueryResult, CoreError> {
+    let db = params.schema.as_deref().unwrap_or(&pool.database);
+    let table_quoted = format!(
+        "`{}`.`{}`",
+        escape_backtick(db),
+        escape_backtick(&params.table_name)
+    );
+
+    let where_clause = build_where_clickhouse(&params.filters, valid_columns);
+    let order_clause = build_order_by_clickhouse(&params.sort, valid_columns);
+
+    let limit = params.limit.min(1000) + 1;
+    let sql = format!(
+        "SELECT * FROM {}{}{} LIMIT {} OFFSET {} FORMAT JSONCompact",
+        table_quoted, where_clause, order_clause, limit, params.offset
+    );
+
+    let result = send_query(pool, &sql)
+        .await
+        .map_err(|e| CoreError { message: e.message, code: "QUERY_TABLE".into() })?;
+
+    let data = result["data"].as_array().cloned().unwrap_or_default();
+    let has_more = data.len() as i64 > params.limit.min(1000);
+    let rows_data = if has_more { &data[..data.len() - 1] } else { &data[..] };
+
+    let result_rows: Vec<serde_json::Value> = rows_data
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            if let serde_json::Value::Array(arr) = row {
+                for (i, col) in col_names.iter().enumerate() {
+                    obj.insert(col.clone(), arr.get(i).cloned().unwrap_or(serde_json::Value::Null));
+                }
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+
+    Ok(TableQueryResult {
+        columns: col_names,
+        column_types: col_types,
+        rows: result_rows,
+        has_more,
+        total_returned: rows_data.len(),
+    })
+}
+
+fn format_sql_literal(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("'{}'", val.to_string().replace('\'', "''")),
+    }
+}
+
+fn build_where_clickhouse(filters: &[FilterSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = filters
+        .iter()
+        .filter(|f| valid.contains(&f.column.as_str()))
+        .filter_map(|f| {
+            let col = format!("`{}`", escape_backtick(&f.column));
+            match f.operator.as_str() {
+                "isNull" => Some(format!("{} IS NULL", col)),
+                "isNotNull" => Some(format!("{} IS NOT NULL", col)),
+                _ => {
+                    let val = f.value.as_ref()?;
+                    let lit = format_sql_literal(val);
+                    match f.operator.as_str() {
+                        "contains" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '%{}%'", col, s))
+                        }
+                        "startsWith" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '{}%'", col, s))
+                        }
+                        "endsWith" => {
+                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            Some(format!("{} LIKE '%{}'", col, s))
+                        }
+                        "equals" => Some(format!("{} = {}", col, lit)),
+                        "gt"  => Some(format!("{} > {}", col, lit)),
+                        "gte" => Some(format!("{} >= {}", col, lit)),
+                        "lt"  => Some(format!("{} < {}", col, lit)),
+                        "lte" => Some(format!("{} <= {}", col, lit)),
+                        _ => None,
+                    }
+                }
+            }
+        })
+        .collect();
+
+    if parts.is_empty() { String::new() } else { format!(" WHERE {}", parts.join(" AND ")) }
+}
+
+fn build_order_by_clickhouse(sort: &[SortSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = sort
+        .iter()
+        .filter(|s| valid.contains(&s.column.as_str()))
+        .map(|s| {
+            let col = format!("`{}`", escape_backtick(&s.column));
+            format!("{} {}", col, if s.desc { "DESC" } else { "ASC" })
+        })
+        .collect();
+
+    if parts.is_empty() { String::new() } else { format!(" ORDER BY {}", parts.join(", ")) }
+}
+
+fn escape_backtick(s: &str) -> String {
+    s.replace('`', "\\`")
 }
 
 /// Minimal SQL string escaping: replace `'` with `''` and `\` with `\\`.

@@ -1,9 +1,7 @@
-/// Oracle database support (experimental) via oracle-rs pure-Rust TNS driver.
-///
-/// Requires Oracle Database 12.1+. No Oracle Instant Client or OCI libraries needed.
-/// Connection URL format: oracle://user:pass@host:1521/service_name
-///
-/// Tested against Oracle Free 23c (gvenzl/oracle-free Docker image).
+// Oracle database support (experimental) via oracle-rs pure-Rust TNS driver.
+// Currently disabled — oracle-rs is too unstable for production use.
+// Connection URL format: oracle://user:pass@host:1521/service_name
+#![allow(dead_code, unused_imports)]
 use crate::error::CoreError;
 use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
 use deadpool_oracle::PoolBuilder;
@@ -13,12 +11,11 @@ use std::time::Instant;
 
 pub type OraclePool = deadpool_oracle::Pool;
 
-pub async fn create_pool(url: &str) -> Result<OraclePool, CoreError> {
-    let config = parse_url(url)?;
-    PoolBuilder::new(config)
-        .max_size(10)
-        .build()
-        .map_err(|e| CoreError { message: e.to_string(), code: "CONNECTION_FAILED".into() })
+pub async fn create_pool(_url: &str) -> Result<OraclePool, CoreError> {
+    Err(CoreError {
+        message: "Oracle support is currently disabled. The oracle-rs driver is too unstable for production use. Please use a PostgreSQL-compatible proxy (e.g. oracledb-pg) or wait for a stable Oracle driver.".into(),
+        code: "UNSUPPORTED".into(),
+    })
 }
 
 fn parse_url(url: &str) -> Result<Config, CoreError> {
@@ -118,14 +115,22 @@ pub async fn get_schemas(pool: &OraclePool) -> Result<Vec<SchemaInfo>, CoreError
         code: "CONNECTION_FAILED".into(),
     })?;
 
+    // Resolve current user with a simple DUAL query (avoids SYS_CONTEXT in the main query
+    // which can trigger protocol issues on Oracle Free)
+    let current_user = conn
+        .query("SELECT USER FROM DUAL", &[])
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .rows
+        .first()
+        .and_then(|r| r.get_string(0))
+        .unwrap_or("")
+        .to_uppercase();
+
     // oracle_maintained = 'N' filters out built-in Oracle system schemas (Oracle 12.1+)
     let result = conn
         .query(
-            "SELECT username, \
-                 CASE WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_USER') THEN 1 ELSE 0 END \
-             FROM all_users \
-             WHERE oracle_maintained = 'N' \
-             ORDER BY username",
+            "SELECT username FROM all_users WHERE oracle_maintained = 'N' ORDER BY username",
             &[],
         )
         .await
@@ -136,7 +141,7 @@ pub async fn get_schemas(pool: &OraclePool) -> Result<Vec<SchemaInfo>, CoreError
         .iter()
         .map(|r| {
             let name = r.get_string(0).unwrap_or("unknown").to_string();
-            let is_default = r.get_i64(1).unwrap_or(0) != 0;
+            let is_default = name.to_uppercase() == current_user;
             SchemaInfo { name, is_default }
         })
         .collect())
