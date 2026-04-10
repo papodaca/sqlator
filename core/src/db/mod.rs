@@ -283,7 +283,8 @@ impl DbManager {
             DatabasePool::Sqlite(p) => get_columns_sqlite(p, &params.table_name).await?,
             DatabasePool::Mssql(p) => mssql::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
             DatabasePool::ClickHouse(p) => clickhouse::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
-            DatabasePool::Oracle(_) | DatabasePool::Any(_) => {
+            DatabasePool::Oracle(p) => oracle::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
+            DatabasePool::Any(_) => {
                 return Err(CoreError {
                     message: "Table query not supported for this connection type".into(),
                     code: "UNSUPPORTED".into(),
@@ -301,7 +302,8 @@ impl DbManager {
             DatabasePool::Sqlite(p) => query_table_sqlite(&p, params, &valid_columns, col_names, col_types).await,
             DatabasePool::Mssql(p) => mssql::query_table(&p, params, &valid_columns, col_names, col_types).await,
             DatabasePool::ClickHouse(p) => clickhouse::query_table(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::Oracle(_) | DatabasePool::Any(_) => unreachable!(),
+            DatabasePool::Oracle(p) => oracle::query_table(&p, params, &valid_columns, col_names, col_types).await,
+            DatabasePool::Any(_) => unreachable!(),
         }
     }
 

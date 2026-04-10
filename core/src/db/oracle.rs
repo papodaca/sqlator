@@ -1,7 +1,7 @@
 // Oracle database support via oracle-rs pure-Rust TNS driver.
 // Connection URL format: oracle://user:pass@host:1521/service_name
 use crate::error::CoreError;
-use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
+use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo, TableQueryParams, TableQueryResult};
 use deadpool_oracle::PoolBuilder;
 use oracle_rs::{Config, LobValue, Value};
 use std::collections::{HashMap, HashSet};
@@ -218,15 +218,16 @@ pub async fn get_columns(
     table_name: &str,
     schema: Option<&str>,
 ) -> Result<Vec<SchemaColumnInfo>, CoreError> {
-    let conn = pool.get().await.map_err(|e| CoreError {
-        message: e.to_string(),
-        code: "CONNECTION_FAILED".into(),
-    })?;
-
-    // Resolve schema
+    // Resolve schema using a dedicated connection that is dropped immediately after.
+    // Each query uses its own connection to avoid oracle-rs leaving the connection
+    // in a bad protocol state after complex multi-JOIN queries.
     let schema_val = if let Some(s) = schema {
         s.to_string()
     } else {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
         let r = conn
             .query("SELECT USER FROM DUAL", &[])
             .await
@@ -234,29 +235,38 @@ pub async fn get_columns(
         r.rows.first().and_then(|row| row.get_string(0)).unwrap_or("UNKNOWN").to_string()
     };
 
-    // Primary key columns
-    let pk_result = conn
-        .query(
+    let schema_esc = schema_val.replace('\'', "''");
+    let table_esc = table_name.replace('\'', "''");
+
+    // Primary key columns — fresh connection, dropped before next query
+    let pk_columns: HashSet<String> = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let pk_sql = format!(
             "SELECT acc.column_name \
              FROM all_constraints ac \
              JOIN all_cons_columns acc \
                  ON ac.constraint_name = acc.constraint_name AND ac.owner = acc.owner \
-             WHERE ac.constraint_type = 'P' AND ac.owner = :1 AND ac.table_name = :2 \
+             WHERE ac.constraint_type = 'P' AND ac.owner = '{}' AND ac.table_name = '{}' \
              ORDER BY acc.position",
-            &[Value::String(schema_val.clone()), Value::String(table_name.to_string())],
-        )
-        .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+            schema_esc, table_esc
+        );
+        let result = conn
+            .query(&pk_sql, &[])
+            .await
+            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        result.rows.iter().filter_map(|r| r.get_string(0).map(String::from)).collect()
+    };
 
-    let pk_columns: HashSet<String> = pk_result
-        .rows
-        .iter()
-        .filter_map(|r| r.get_string(0).map(String::from))
-        .collect();
-
-    // Foreign key columns
-    let fk_result = conn
-        .query(
+    // Foreign key columns — fresh connection
+    let fk_map: HashMap<String, (String, String)> = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let fk_sql = format!(
             "SELECT acc.column_name, ac2.owner, ac2.table_name, acc2.column_name \
              FROM all_constraints ac \
              JOIN all_cons_columns acc \
@@ -267,38 +277,51 @@ pub async fn get_columns(
                  ON ac2.constraint_name = acc2.constraint_name \
                  AND ac2.owner = acc2.owner \
                  AND acc.position = acc2.position \
-             WHERE ac.constraint_type = 'R' AND ac.owner = :1 AND ac.table_name = :2",
-            &[Value::String(schema_val.clone()), Value::String(table_name.to_string())],
-        )
-        .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
-
-    let mut fk_map: HashMap<String, (String, String)> = HashMap::new();
-    for r in &fk_result.rows {
-        if let (Some(col), Some(ref_owner), Some(ref_table), Some(ref_col)) = (
-            r.get_string(0),
-            r.get_string(1),
-            r.get_string(2),
-            r.get_string(3),
-        ) {
-            fk_map.insert(
-                col.to_string(),
-                (format!("{}.{}", ref_owner, ref_table), ref_col.to_string()),
-            );
+             WHERE ac.constraint_type = 'R' AND ac.owner = '{}' AND ac.table_name = '{}'",
+            schema_esc, table_esc
+        );
+        let result = conn
+            .query(&fk_sql, &[])
+            .await
+            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        let mut map = HashMap::new();
+        for r in &result.rows {
+            if let (Some(col), Some(ref_owner), Some(ref_table), Some(ref_col)) = (
+                r.get_string(0),
+                r.get_string(1),
+                r.get_string(2),
+                r.get_string(3),
+            ) {
+                map.insert(
+                    col.to_string(),
+                    (format!("{}.{}", ref_owner, ref_table), ref_col.to_string()),
+                );
+            }
         }
-    }
+        map
+    };
 
-    // Column metadata
-    let col_result = conn
-        .query(
-            "SELECT column_name, data_type, nullable, data_default, column_id \
+    // Column metadata — fresh connection
+    let col_result = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        // Exclude data_default (LONG type) — oracle-rs cannot decode Oracle LONG columns,
+        // causing the entire result to come back empty. Default values are not displayed
+        // in the schema browser so omitting them is safe.
+        let col_sql = format!(
+            "SELECT column_name, data_type, nullable, column_id \
              FROM all_tab_columns \
-             WHERE owner = :1 AND table_name = :2 \
+             WHERE owner = '{}' AND table_name = '{}' \
              ORDER BY column_id",
-            &[Value::String(schema_val), Value::String(table_name.to_string())],
-        )
-        .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+            schema_esc, table_esc
+        );
+        conn
+            .query(&col_sql, &[])
+            .await
+            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+    };
 
     Ok(col_result
         .rows
@@ -307,10 +330,7 @@ pub async fn get_columns(
             let name = r.get_string(0).unwrap_or("unknown").to_string();
             let data_type = r.get_string(1).unwrap_or("unknown");
             let nullable = r.get_string(2).map(|v| v == "Y").unwrap_or(true);
-            let default_value = r.get(3).and_then(|v| {
-                if v.is_null() { None } else { Some(v.to_string()) }
-            });
-            let ordinal = r.get_i64(4).unwrap_or(0) as i32;
+            let ordinal = r.get_i64(3).unwrap_or(0) as i32;
             let is_fk = fk_map.contains_key(&name);
             let (foreign_table, foreign_column) = fk_map
                 .get(&name)
@@ -320,7 +340,7 @@ pub async fn get_columns(
                 name: name.clone(),
                 data_type: map_oracle_type(data_type),
                 nullable,
-                default_value,
+                default_value: None,
                 is_primary_key: pk_columns.contains(&name),
                 is_foreign_key: is_fk,
                 foreign_table,
@@ -414,5 +434,152 @@ fn oracle_value_to_json(value: &Value) -> serde_json::Value {
         Value::Vector(_) => serde_json::Value::String("<vector>".to_string()),
         Value::Cursor(_) => serde_json::Value::String("<cursor>".to_string()),
         Value::Collection(_) => serde_json::Value::String("<collection>".to_string()),
+    }
+}
+
+pub async fn query_table(
+    pool: &OraclePool,
+    params: &TableQueryParams,
+    valid_columns: &[&str],
+    col_names: Vec<String>,
+    col_types: Vec<String>,
+) -> Result<TableQueryResult, CoreError> {
+    let schema = params.schema.as_deref().unwrap_or("").to_uppercase();
+    let table_upper = params.table_name.to_uppercase();
+    let table_quoted = if schema.is_empty() {
+        format!("\"{}\"", table_upper.replace('"', "\"\""))
+    } else {
+        format!(
+            "\"{}\".\"{}\"",
+            schema.replace('"', "\"\""),
+            table_upper.replace('"', "\"\"")
+        )
+    };
+
+    let where_clause = build_where_oracle(&params.filters, valid_columns);
+    let order_clause = build_order_by_oracle(&params.sort, valid_columns);
+
+    let limit = params.limit.min(1000) + 1;
+    let sql = format!(
+        "SELECT * FROM {}{}{} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+        table_quoted, where_clause, order_clause, params.offset, limit
+    );
+
+    let conn = pool.get().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "CONNECTION_FAILED".into(),
+    })?;
+
+    let result = conn.query(&sql, &[]).await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "QUERY_TABLE".into(),
+    })?;
+
+    let has_more = result.rows.len() as i64 > params.limit.min(1000);
+    let rows_slice = if has_more {
+        &result.rows[..result.rows.len() - 1]
+    } else {
+        &result.rows[..]
+    };
+
+    let result_rows: Vec<serde_json::Value> = rows_slice
+        .iter()
+        .map(|row| {
+            let values: Vec<serde_json::Value> = row.values().iter().map(oracle_value_to_json).collect();
+            let mut obj = serde_json::Map::new();
+            for (i, col) in col_names.iter().enumerate() {
+                let val = values.get(i).cloned().unwrap_or(serde_json::Value::Null);
+                obj.insert(col.clone(), val);
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+
+    Ok(TableQueryResult {
+        columns: col_names,
+        column_types: col_types,
+        rows: result_rows,
+        has_more,
+        total_returned: rows_slice.len(),
+    })
+}
+
+fn format_sql_literal(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("'{}'", val.to_string().replace('\'', "''")),
+    }
+}
+
+fn build_where_oracle(filters: &[crate::models::FilterSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = filters
+        .iter()
+        .filter(|f| valid.contains(&f.column.as_str()))
+        .filter_map(|f| {
+            let col = format!("\"{}\"", f.column.replace('"', "\"\""));
+            match f.operator.as_str() {
+                "isNull" => Some(format!("{} IS NULL", col)),
+                "isNotNull" => Some(format!("{} IS NOT NULL", col)),
+                _ => {
+                    let val = f.value.as_ref()?;
+                    let lit = format_sql_literal(val);
+                    match f.operator.as_str() {
+                        "contains" => {
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
+                            Some(format!("{} LIKE '%{}%'", col, s))
+                        }
+                        "startsWith" => {
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
+                            Some(format!("{} LIKE '{}%'", col, s))
+                        }
+                        "endsWith" => {
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
+                            Some(format!("{} LIKE '%{}'", col, s))
+                        }
+                        "equals" => Some(format!("{} = {}", col, lit)),
+                        "gt" => Some(format!("{} > {}", col, lit)),
+                        "gte" => Some(format!("{} >= {}", col, lit)),
+                        "lt" => Some(format!("{} < {}", col, lit)),
+                        "lte" => Some(format!("{} <= {}", col, lit)),
+                        _ => None,
+                    }
+                }
+            }
+        })
+        .collect();
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", parts.join(" AND "))
+    }
+}
+
+fn build_order_by_oracle(sort: &[crate::models::SortSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = sort
+        .iter()
+        .filter(|s| valid.contains(&s.column.as_str()))
+        .map(|s| {
+            let col = format!("\"{}\"", s.column.replace('"', "\"\""));
+            format!("{} {}", col, if s.desc { "DESC" } else { "ASC" })
+        })
+        .collect();
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", parts.join(", "))
     }
 }
