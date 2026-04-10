@@ -9,6 +9,7 @@ interface PersistedQueryTab {
   id: string;
   label: string;
   sql: string;
+  tableBrowse?: { tableName: string; schema?: string; sort: SortSpec[]; filters: FilterSpec[] };
 }
 
 interface PersistedConnectionTab {
@@ -384,6 +385,7 @@ export const tabs = {
           id: qt.id,
           label: qt.label,
           sql: qt.sql,
+          ...(qt.tableBrowse ? { tableBrowse: { tableName: qt.tableBrowse.tableName, schema: qt.tableBrowse.schema, sort: qt.tableBrowse.sort, filters: qt.tableBrowse.filters } } : {}),
         })),
       })),
     };
@@ -416,6 +418,19 @@ export const tabs = {
         isDirty: false,
         result: { kind: "idle" as const },
         isExecuting: false,
+        ...(qt.tableBrowse ? {
+          tableBrowse: {
+            tableName: qt.tableBrowse.tableName,
+            schema: qt.tableBrowse.schema,
+            connectionId: ct.connectionId,
+            result: null,
+            isLoading: true,
+            sort: qt.tableBrowse.sort,
+            filters: qt.tableBrowse.filters,
+            offset: 0,
+            error: null,
+          } satisfies TableBrowseState,
+        } : {}),
       })),
     }));
     activeConnectionId = persisted.activeConnectionId ?? persisted.connectionTabs[0]?.connectionId ?? null;

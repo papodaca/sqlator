@@ -18,7 +18,9 @@
   } = $props();
 
   // Local filter input state (debounced before sending to server)
-  let localFilters: Record<string, FilterEntry> = $state({});
+  let localFilters: Record<string, FilterEntry> = $state(
+    Object.fromEntries(browseState.filters.map((f) => [f.column, { operator: f.operator, value: String(f.value ?? "") }]))
+  );
   let filterTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   let activeFilterColumn: string | null = $state(null);
 
