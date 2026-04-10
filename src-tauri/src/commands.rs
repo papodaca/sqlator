@@ -5,6 +5,7 @@ use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, 
 use sqlator_core::{BatchResult, DatabaseType};
 use tauri::ipc::Channel;
 use tauri::State;
+use tracing::{debug, info, warn};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -142,14 +143,94 @@ pub async fn connect_database(state: State<'_, AppState>, id: String) -> CmdResu
     let conn = connections
         .iter()
         .find(|c| c.id == id)
-        .ok_or_else(|| format!("Connection '{}' not found", id))?;
+        .ok_or_else(|| format!("Connection '{}' not found", id))?
+        .clone();
 
-    state.db.connect(&id, &conn.url).await.map_err(map_err)
+    let url = if let Some(ssh_profile_id) = &conn.ssh_profile_id {
+        info!(
+            "connect_database '{}': SSH profile '{}' attached, setting up tunnel",
+            id, ssh_profile_id
+        );
+
+        let profile = state
+            .config
+            .get_ssh_profile(ssh_profile_id)
+            .map_err(map_err)?
+            .ok_or_else(|| format!("SSH profile '{ssh_profile_id}' not found"))?;
+
+        debug!(
+            "connect_database: SSH profile loaded — host={}:{}, auth={:?}, proxy_jump={}",
+            profile.host,
+            profile.port,
+            profile.auth_method,
+            profile.proxy_jump.len()
+        );
+
+        let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
+        let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
+        let default_port = match parsed_url.scheme() {
+            "postgres" | "postgresql" => 5432u16,
+            "mysql" | "mariadb" => 3306,
+            _ => 0,
+        };
+        let target_port = parsed_url.port().unwrap_or(default_port);
+
+        info!(
+            "connect_database: tunnel target = {}:{} (from URL scheme={})",
+            target_host,
+            target_port,
+            parsed_url.scheme()
+        );
+
+        let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+        // Close any existing tunnel for this connection before opening a new one
+        if let Some((_, old_tunnel)) = state.tunnels.remove(&id) {
+            warn!("connect_database: closing stale tunnel for connection '{}'", id);
+            SshTunnel::close(old_tunnel).await.ok();
+        }
+
+        let tunnel = SshTunnel::create(
+            id.clone(),
+            &ssh_config,
+            auth_config,
+            target_host,
+            target_port,
+            jump_hosts,
+        )
+        .await
+        .map_err(map_err)?;
+
+        SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+        let local_port = tunnel.local_port;
+
+        info!(
+            "connect_database: tunnel ready on localhost:{}, connecting DB",
+            local_port
+        );
+
+        state.tunnels.insert(id.clone(), tunnel);
+
+        let mut tunneled_url = parsed_url;
+        let _ = tunneled_url.set_host(Some("127.0.0.1"));
+        let _ = tunneled_url.set_port(Some(local_port));
+        tunneled_url.to_string()
+    } else {
+        debug!("connect_database '{}': no SSH profile, direct connection", id);
+        conn.url.clone()
+    };
+
+    state.db.connect(&id, &url).await.map_err(map_err)
 }
 
 #[tauri::command]
 pub async fn disconnect_database(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     state.db.disconnect(&id).await;
+    if let Some((_, tunnel)) = state.tunnels.remove(&id) {
+        SshTunnel::close(tunnel).await.ok();
+    }
     Ok(())
 }
 
@@ -536,7 +617,7 @@ pub async fn test_connection_with_ssh(
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
 
-    // Create ephemeral tunnel (no jump hosts for now — TODO: wire up proxy_jump)
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
     let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
     let tunnel = SshTunnel::create(
         tunnel_id,
@@ -544,7 +625,7 @@ pub async fn test_connection_with_ssh(
         auth_config,
         target_host,
         target_port,
-        vec![],
+        jump_hosts,
     )
     .await
     .map_err(map_err)?;
@@ -565,6 +646,33 @@ pub async fn test_connection_with_ssh(
     SshTunnel::close(tunnel).await.ok();
 
     result.map_err(map_err)
+}
+
+fn build_jump_hosts_for_profile(
+    profile: &sqlator_core::models::SshProfile,
+) -> CmdResult<Vec<(SshHostConfig, SshAuthConfig)>> {
+    use sqlator_core::models::SshAuthMethod;
+    profile
+        .proxy_jump
+        .iter()
+        .map(|jump| {
+            let auth = match jump.auth_method {
+                SshAuthMethod::Key => {
+                    let key_path = jump.key_path.as_deref().unwrap_or_default();
+                    SshAuthConfig::with_key(&jump.username, key_path)
+                }
+                SshAuthMethod::Agent => SshAuthConfig::with_agent(&jump.username),
+                SshAuthMethod::Password => {
+                    return Err(format!(
+                        "Jump host '{}' uses password auth, which is not supported for stored jump hosts",
+                        jump.host
+                    ))
+                }
+            };
+            let config = SshHostConfig::new(&jump.host, jump.port, auth.clone());
+            Ok((config, auth))
+        })
+        .collect()
 }
 
 fn build_auth_config_for_profile(

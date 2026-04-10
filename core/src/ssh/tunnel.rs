@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 pub type SessionHandle = Arc<Mutex<client::Handle<Client>>>;
 
@@ -35,11 +35,27 @@ impl SshTunnel {
     ) -> SshResult<TunnelHandle> {
         let cancel_token = CancellationToken::new();
 
+        info!(
+            "SSH tunnel: connecting to {}:{} (jump_hosts={}), target={}:{}",
+            ssh_config.host,
+            ssh_config.port,
+            jump_hosts.len(),
+            target_host,
+            target_port
+        );
+
         let session = if jump_hosts.is_empty() {
+            debug!("SSH tunnel: direct connection to {}:{}", ssh_config.host, ssh_config.port);
             Self::connect_direct(ssh_config, auth_config).await?
         } else {
+            debug!(
+                "SSH tunnel: connecting via {} jump host(s)",
+                jump_hosts.len()
+            );
             Self::connect_via_jump(ssh_config, auth_config, &jump_hosts).await?
         };
+
+        info!("SSH tunnel: SSH session established");
 
         let local_port = Self::find_available_port()?;
 
@@ -69,28 +85,36 @@ impl SshTunnel {
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
-                        debug!("Tunnel forwarding cancelled");
+                        debug!("SSH tunnel: forwarding cancelled");
                         break;
                     }
                     result = listener.accept() => {
                         match result {
-                            Ok((stream, _addr)) => {
+                            Ok((stream, addr)) => {
+                                debug!(
+                                    "SSH tunnel: accepted connection from {} -> opening channel to {}:{}",
+                                    addr, target_host, target_port
+                                );
                                 let session = session.lock().await;
                                 match session
                                     .channel_open_direct_tcpip(&target_host, target_port.into(), "127.0.0.1", 0)
                                     .await
                                 {
                                     Ok(channel) => {
+                                        debug!("SSH tunnel: direct-tcpip channel opened, forwarding stream");
                                         drop(session);
                                         tokio::spawn(Self::forward_stream(stream, channel));
                                     }
                                     Err(e) => {
-                                        debug!("Failed to open direct-tcpip channel: {}", e);
+                                        error!(
+                                            "SSH tunnel: failed to open direct-tcpip channel to {}:{}: {}",
+                                            target_host, target_port, e
+                                        );
                                     }
                                 }
                             }
                             Err(e) => {
-                                debug!("Failed to accept connection: {}", e);
+                                warn!("SSH tunnel: failed to accept connection: {}", e);
                             }
                         }
                     }
@@ -110,47 +134,69 @@ impl SshTunnel {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let channel = Arc::new(Mutex::new(channel));
         let (mut stream_reader, mut stream_writer) = tokio::io::split(stream);
-        let channel_clone = channel.clone();
+        let (to_ssh_tx, mut to_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (from_ssh_tx, mut from_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
 
-        let reader_handle = tokio::spawn(async move {
+        // Single task owns the SSH channel and handles both directions with select!,
+        // avoiding the deadlock that occurs when holding a mutex across ch.wait().
+        tokio::spawn(async move {
+            let mut channel = channel;
+            loop {
+                tokio::select! {
+                    msg = to_ssh_rx.recv() => {
+                        match msg {
+                            Some(data) => {
+                                if channel.data(data.as_ref()).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    msg = channel.wait() => {
+                        match msg {
+                            Some(ChannelMsg::Data { ref data }) => {
+                                if from_ssh_tx.send(data.to_vec()).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(ChannelMsg::Eof) | None => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        // Read from local TCP stream, forward to SSH channel task.
+        tokio::spawn(async move {
             let mut buf = vec![0u8; 8192];
             loop {
                 match stream_reader.read(&mut buf).await {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let ch = channel_clone.lock().await;
-                        if ch.data(&buf[..n]).await.is_err() {
+                        if to_ssh_tx.send(buf[..n].to_vec()).await.is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });
 
-        let writer_handle = tokio::spawn(async move {
+        // Write data arriving from SSH channel to local TCP stream.
+        tokio::spawn(async move {
             loop {
-                let mut ch = channel.lock().await;
-                let Some(msg) = ch.wait().await else {
-                    break;
-                };
-                drop(ch);
-
-                match msg {
-                    ChannelMsg::Data { ref data } => {
-                        if stream_writer.write_all(data).await.is_err() {
+                match from_ssh_rx.recv().await {
+                    Some(data) => {
+                        if stream_writer.write_all(&data).await.is_err() {
                             break;
                         }
                     }
-                    ChannelMsg::Eof => break,
-                    _ => {}
+                    None => break,
                 }
             }
         });
-
-        let _ = tokio::try_join!(reader_handle, writer_handle);
     }
 
     async fn connect_direct(
@@ -160,15 +206,27 @@ impl SshTunnel {
         let ssh_config = client::Config::default();
         let config_arc = Arc::new(ssh_config);
 
+        debug!(
+            "SSH tunnel: TCP connect to {}:{}",
+            config.host, config.port
+        );
         let mut session = client::connect(
             config_arc,
             (config.host.as_str(), config.port),
             Client {},
         )
         .await
-        .map_err(|e| SshError::ConnectionFailed(e.to_string()))?;
+        .map_err(|e| {
+            error!(
+                "SSH tunnel: TCP connect failed to {}:{}: {}",
+                config.host, config.port, e
+            );
+            SshError::ConnectionFailed(e.to_string())
+        })?;
 
+        debug!("SSH tunnel: authenticating as '{}'", auth_config.username);
         Self::authenticate(&mut session, &auth_config).await?;
+        debug!("SSH tunnel: authenticated");
 
         Ok(session)
     }
@@ -183,14 +241,28 @@ impl SshTunnel {
         }
 
         let (first_host, first_auth) = &jump_hosts[0];
+        debug!(
+            "SSH tunnel: connecting to first jump host {}:{}",
+            first_host.host, first_host.port
+        );
         let mut current_session = Self::connect_direct(first_host, first_auth.clone()).await?;
 
         for (i, (jump_config, jump_auth)) in jump_hosts.iter().skip(1).enumerate() {
-            debug!("Connecting to jump host {} of {}", i + 2, jump_hosts.len());
+            debug!(
+                "SSH tunnel: connecting through jump host {} of {} ({}:{})",
+                i + 2,
+                jump_hosts.len(),
+                jump_config.host,
+                jump_config.port
+            );
             current_session =
                 Self::connect_through_jump(&current_session, jump_config, jump_auth.clone()).await?;
         }
 
+        debug!(
+            "SSH tunnel: final hop to target SSH host {}:{}",
+            target_config.host, target_config.port
+        );
         let final_session =
             Self::connect_through_jump(&current_session, target_config, target_auth).await?;
         Ok(final_session)
@@ -201,6 +273,10 @@ impl SshTunnel {
         target_config: &SshHostConfig,
         auth_config: SshAuthConfig,
     ) -> SshResult<client::Handle<Client>> {
+        debug!(
+            "SSH tunnel: opening direct-tcpip channel to {}:{}",
+            target_config.host, target_config.port
+        );
         let channel = jump_session
             .channel_open_direct_tcpip(
                 target_config.host.as_str(),
@@ -209,16 +285,36 @@ impl SshTunnel {
                 0,
             )
             .await
-            .map_err(|e| SshError::JumpHostFailed(e.to_string()))?;
+            .map_err(|e| {
+                error!(
+                    "SSH tunnel: failed to open direct-tcpip channel to {}:{}: {}",
+                    target_config.host, target_config.port, e
+                );
+                SshError::JumpHostFailed(e.to_string())
+            })?;
 
         let ssh_config = client::Config::default();
         let config_arc = Arc::new(ssh_config);
 
         let mut session = client::connect_stream(config_arc, channel.into_stream(), Client {})
             .await
-            .map_err(|e| SshError::JumpHostFailed(e.to_string()))?;
+            .map_err(|e| {
+                error!(
+                    "SSH tunnel: connect_stream failed for {}:{}: {}",
+                    target_config.host, target_config.port, e
+                );
+                SshError::JumpHostFailed(e.to_string())
+            })?;
 
+        debug!(
+            "SSH tunnel: authenticating through jump as '{}'",
+            auth_config.username
+        );
         Self::authenticate(&mut session, &auth_config).await?;
+        debug!(
+            "SSH tunnel: authenticated through jump to {}:{}",
+            target_config.host, target_config.port
+        );
 
         Ok(session)
     }
@@ -236,6 +332,12 @@ impl SshTunnel {
                     .as_ref()
                     .ok_or_else(|| SshError::AuthFailed("Key path not provided".into()))?;
 
+                debug!(
+                    "SSH tunnel: authenticating user '{}' with key '{}'",
+                    username,
+                    key_path.display()
+                );
+
                 let key_pair =
                     Self::load_key_pair(key_path, auth_config.key_passphrase.as_deref())?;
 
@@ -244,10 +346,14 @@ impl SshTunnel {
                 session
                     .authenticate_publickey(username, key_with_hash)
                     .await
-                    .map_err(|e| SshError::AuthFailed(e.to_string()))?
+                    .map_err(|e| {
+                        error!("SSH tunnel: publickey auth error for '{}': {}", username, e);
+                        SshError::AuthFailed(e.to_string())
+                    })?
                     .success()
             }
             AuthMethod::Password => {
+                debug!("SSH tunnel: authenticating user '{}' with password", username);
                 let password = auth_config
                     .password
                     .as_ref()
@@ -256,13 +362,13 @@ impl SshTunnel {
                 session
                     .authenticate_password(username, password)
                     .await
-                    .map_err(|e| SshError::AuthFailed(e.to_string()))?
+                    .map_err(|e| {
+                        error!("SSH tunnel: password auth error for '{}': {}", username, e);
+                        SshError::AuthFailed(e.to_string())
+                    })?
                     .success()
             }
             AuthMethod::Agent => {
-                // TODO: Implement proper SSH agent authentication
-                // The russh API for agent auth requires using authenticate_future
-                // which needs the agent client to implement a specific trait
                 return Err(SshError::AuthFailed(
                     "SSH agent authentication not yet implemented".into(),
                 ));
@@ -270,6 +376,7 @@ impl SshTunnel {
         };
 
         if !success {
+            error!("SSH tunnel: authentication rejected for user '{}'", username);
             return Err(SshError::AuthFailed("Authentication rejected".into()));
         }
 
