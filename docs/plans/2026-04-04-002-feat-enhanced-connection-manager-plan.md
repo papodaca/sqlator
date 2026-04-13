@@ -38,30 +38,30 @@ The MVP connection manager (origin: `docs/plans/2026-04-04-001-feat-sql-client-d
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Svelte 5 Frontend                               │
+┌────────────────────────────────────────────────────────────────────┐
+│                      Svelte 5 Frontend                             │
 │  ┌────────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
 │  │  Sidebar       │  │  Connection      │  │  SSH Profile       │  │
 │  │  Groups/       │  │  Form            │  │  Manager           │  │
 │  │  Connections   │  │  (Tabbed UI)     │  │  (Reusable)        │  │
 │  └───────┬────────┘  └────────┬─────────┘  └─────────┬──────────┘  │
-│          │                    │                      │              │
-│          └────────────────────┼──────────────────────┘              │
-│                               │ invoke()                            │
-└───────────────────────────────┼─────────────────────────────────────┘
+│          │                    │                      │             │
+│          └────────────────────┼──────────────────────┘             │
+│                               │ invoke()                           │
+└───────────────────────────────┼────────────────────────────────────┘
                                 │
 ┌───────────────────────────────┼─────────────────────────────────────┐
-│           Tauri 2 App (Thin Wrapper)                                 │
+│           Tauri 2 App (Thin Wrapper)                                │
 │  ┌────────────────────────────▼──────────────────────────────────┐  │
 │  │  Commands: save_connection, get_connections, test_connection, │  │
 │  │  create_ssh_tunnel, manage_ssh_profiles, import/export,       │  │
 │  │  validate_ssh_config                                          │  │
-│  └───────┬────────────────────────────────────────────────────────┘  │
+│  └───────┬───────────────────────────────────────────────────────┘  │
 └──────────┼──────────────────────────────────────────────────────────┘
            │
 ┌──────────▼──────────────────────────────────────────────────────────┐
-│           Core Library (Pure Rust)                                   │
-│                                                                       │
+│           Core Library (Pure Rust)                                  │
+│                                                                     │
 │  ┌──────────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
 │  │  russh           │  │  Credential     │  │  russh-config      │  │
 │  │  (SSH Tunnels)   │  │  Manager        │  │  (SSH Config)      │  │
@@ -69,11 +69,11 @@ The MVP connection manager (origin: `docs/plans/2026-04-04-001-feat-sql-client-d
 │  │  - Password      │  │  - Encrypted    │  │  - List hosts      │  │
 │  │  - Agent fwd     │  │    vault        │  │  - ProxyJump       │  │
 │  └──────────────────┘  └─────────────────┘  └────────────────────┘  │
-│                                                                       │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │  Core Config Manager (connection metadata + SSH profiles)      │  │
-│  │  + groups + status + import history                            │  │
-│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Core Config Manager (connection metadata + SSH profiles)     │  │
+│  │  + groups + status + import history                           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -85,13 +85,13 @@ User Preference ──────┬────── OS Keyring Available?
           ┌───────────┴───────────┐
           │ YES                   │ NO
           ▼                       ▼
-┌─────────────────┐    ┌─────────────────────────┐
-│ keyring 3.3     │    │ Encrypted Vault         │
-│ - macOS Keychain│    │ - Argon2id KDF          │
-│ - Win DPAPI     │    │ - AES-256-GCM           │
-│ - Linux libsecret│   │ - Master password       │
-└─────────────────┘    │ - Portable file         │
-                       └─────────────────────────┘
+┌──────────────────┐    ┌─────────────────────────┐
+│ keyring 3.3      │    │ Encrypted Vault         │
+│ - macOS Keychain │    │ - Argon2id KDF          │
+│ - Win DPAPI      │    │ - AES-256-GCM           │
+│ - Linux libsecret│    │ - Master password       │
+└──────────────────┘    │ - Portable file         │
+                        └─────────────────────────┘
 ```
 
 ---

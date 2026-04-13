@@ -27,12 +27,12 @@ Users with databases in Docker containers face a connectivity gap when container
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      Svelte 5 Frontend                               │
+│                      Svelte 5 Frontend                              │
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │  API Adapter Layer (from Plan 007)                             │ │
 │  │  - invoke_command() → fetch() [web] or Tauri IPC [desktop]     │ │
 │  └────────────────────────────────────────────────────────────────┘ │
-│                                                                       │
+│                                                                     │
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │  Container Connection Wizard (NEW)                             │ │
 │  │  1. SSH Profile Selection (uses profiles from Plan 002)        │ │
@@ -44,9 +44,9 @@ Users with databases in Docker containers face a connectivity gap when container
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────────┐
-│           Tauri 2 App / Web Server (Plan 007)                        │
+│           Tauri 2 App / Web Server (Plan 007)                       │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │  Commands (extend Plan 002):                                    │ │
+│  │  Commands (extend Plan 002):                                   │ │
 │  │  - discover_container(ssh_profile_id, container_name)          │ │
 │  │  - connect_database() → handles DockerContainer type (NEW)     │ │
 │  │  - disconnect_database() → closes tunnel + pool (existing)     │ │
@@ -54,15 +54,15 @@ Users with databases in Docker containers face a connectivity gap when container
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────────┐
-│           Core Library (Pure Rust)                                   │
-│                                                                       │
+│           Core Library (Pure Rust)                                  │
+│                                                                     │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────────┐ │
 │  │  SSH (Plan 002) │  │  Docker (NEW)   │  │  DbManager           │ │
 │  │  - SshProfile   │  │  - Inspector    │  │  - AnyPool           │ │
 │  │  - SshTunnel    │  │  - docker       │  │  - Query execution   │ │
 │  │  - TunnelMgr    │  │    inspect      │  │                      │ │
 │  └─────────────────┘  └─────────────────┘  └──────────────────────┘ │
-│                                                                       │
+│                                                                     │
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │  Config Manager (Plan 002)                                     │ │
 │  │  - SavedConnection (extended with container fields)            │ │

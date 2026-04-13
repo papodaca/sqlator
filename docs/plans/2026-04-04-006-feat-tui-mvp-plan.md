@@ -47,16 +47,16 @@ The TUI directly consumes the `core/` library API, bypassing any Tauri-specific 
 └─────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────┐
-│           Core Library (Pure Rust)                       │
+│           Core Library (Pure Rust)                      │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │  Core API (Config, DB Pools, Query Execution)     │  │
 │  └──────────┬─────────────────────────┬──────────────┘  │
 │             │                         │                 │
-│  ┌──────────▼────────┐    ┌───────────▼─────────────┐  │
-│  │  sqlx AnyPool     │    │  Config Manager (fs)    │  │
-│  │  (Postgres/MySQL/ │    │  connections.json       │  │
-│  │  SQLite)          │    │  (name, host, color)    │  │
-│  └───────────────────┘    └─────────────────────────┘  │
+│  ┌──────────▼────────┐    ┌───────────▼──────────────┐  │
+│  │  sqlx AnyPool     │    │  Config Manager (fs)     │  │
+│  │  (Postgres/MySQL/ │    │  connections.json        │  │
+│  │  SQLite)          │    │  (name, host, color)     │  │
+│  └───────────────────┘    └──────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
 

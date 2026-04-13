@@ -51,16 +51,16 @@ The project will expand to include a web server boundary that proxies HTTP/WS re
 └─────────────┼─────────────────────────┼─────────────────┘
               │                         │
 ┌─────────────▼─────────────────────────▼─────────────────┐
-│           Core Library (Pure Rust)                       │
+│           Core Library (Pure Rust)                      │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │  Core API (Connection Manager, Query Execution)   │  │
 │  └──────────┬─────────────────────────┬──────────────┘  │
 │             │                         │                 │
-│  ┌──────────▼────────┐    ┌───────────▼─────────────┐  │
-│  │  sqlx AnyPool     │    │  Config Manager (fs)    │  │
-│  │  (Postgres/MySQL/ │    │  connections.json       │  │
-│  │  SQLite)          │    │  (name, host, color)    │  │
-│  └───────────────────┘    └─────────────────────────┘  │
+│  ┌──────────▼────────┐    ┌───────────▼──────────────┐  │
+│  │  sqlx AnyPool     │    │  Config Manager (fs)     │  │
+│  │  (Postgres/MySQL/ │    │  connections.json        │  │
+│  │  SQLite)          │    │  (name, host, color)     │  │
+│  └───────────────────┘    └──────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
 

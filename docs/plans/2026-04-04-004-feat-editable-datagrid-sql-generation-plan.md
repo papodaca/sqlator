@@ -67,10 +67,10 @@ A multi-layered architecture that:
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Svelte 5 Frontend                          │
+┌────────────────────────────────────────────────────────────────┐
+│                      Svelte 5 Frontend                         │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  ResultGrid.svelte (Enhanced)                             │  │
+│  │  ResultGrid.svelte (Enhanced)                            │  │
 │  │  ┌────────────────────────────────────────────────────┐  │  │
 │  │  │  Virtual Grid (TanStack)                           │  │  │
 │  │  │  • Inline cell editors (type-aware)                │  │  │
@@ -85,7 +85,7 @@ A multi-layered architecture that:
 │  │  │  • Pending changes count badge                     │  │  │
 │  │  └────────────────────────────────────────────────────┘  │  │
 │  └──────────────────────────────────────────────────────────┘  │
-│                              │                                  │
+│                              │                                 │
 │  ┌───────────────────────────┼──────────────────────────────┐  │
 │  │  stores/edit.svelte.ts    │  stores/schema.svelte.ts     │  │
 │  │  • changeSet: Added/      │  • tableMeta: TableMeta |    │  │
@@ -93,39 +93,39 @@ A multi-layered architecture that:
 │  │  • hasChanges: boolean    │  • editability: 'full' |     │  │
 │  │  • sqlPreview: string     │    'readonly' | 'partial'    │  │
 │  └───────────────────────────┴──────────────────────────────┘  │
-│                              │                                  │
-│              invoke() (IPC)  │  Channel<SchemaEvent>            │
-└──────────────────────────────┼──────────────────────────────────┘
+│                              │                                 │
+│              invoke() (IPC)  │  Channel<SchemaEvent>           │
+└──────────────────────────────┼─────────────────────────────────┘
                                │
 ┌──────────────────────────────┼──────────────────────────────────┐
-│           Tauri 2 Rust Backend                                   │
-│                              │                                   │
+│           Tauri 2 Rust Backend                                  │
+│                              │                                  │
 │  ┌───────────────────────────▼───────────────────────────────┐  │
-│  │  Commands:                                                 │  │
-│  │  • fetch_schema_metadata(query, conn_id) → TableMeta       │  │
+│  │  Commands:                                                │  │
+│  │  • fetch_schema_metadata(query, conn_id) → TableMeta      │  │
 │  │  • execute_batch(sql_batch, conn_id) → BatchResult        │  │
 │  └───────────────────────────────────────────────────────────┘  │
-│                              │                                   │
+│                              │                                  │
 │  ┌───────────────────────────▼───────────────────────────────┐  │
-│  │  Schema Detector (new)                                     │  │
-│  │  • Parse SELECT to find table sources                      │  │
-│  │  • Query information_schema for PKs, types                 │  │
-│  │  • Cache per-connection with TTL (5 min)                   │  │
+│  │  Schema Detector (new)                                    │  │
+│  │  • Parse SELECT to find table sources                     │  │
+│  │  • Query information_schema for PKs, types                │  │
+│  │  • Cache per-connection with TTL (5 min)                  │  │
 │  └───────────────────────────────────────────────────────────┘  │
-│                                                                  │
+│                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  SQL Generator (new)                                       │  │
-│  │  • PostgresGenerator: RETURNING, $1/$2 params              │  │
-│  │  • MySqlGenerator: ? params, re-query for inserted IDs     │  │
-│  │  • SqliteGenerator: ? params, re-query for inserted IDs    │  │
+│  │  SQL Generator (new)                                      │  │
+│  │  • PostgresGenerator: RETURNING, $1/$2 params             │  │
+│  │  • MySqlGenerator: ? params, re-query for inserted IDs    │  │
+│  │  • SqliteGenerator: ? params, re-query for inserted IDs   │  │
 │  └───────────────────────────────────────────────────────────┘  │
-│                                                                  │
+│                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  sqlx AnyPool (existing)                                   │  │
-│  │  • Transaction support for batch execution                 │  │
-│  │  • Parameterized queries for safety                        │  │
+│  │  sqlx AnyPool (existing)                                  │  │
+│  │  • Transaction support for batch execution                │  │
+│  │  • Parameterized queries for safety                       │  │
 │  └───────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Schema Metadata Model
