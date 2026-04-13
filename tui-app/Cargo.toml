@@ -2,8 +2,13 @@
 name = "sqlator-tui"
 version = "0.1.0"
 edition = "2021"
-description = "Terminal UI for SQLator (future)"
+description = "Terminal UI for SQLator"
 
 [dependencies]
 sqlator-core = { path = "../core" }
+ratatui = "0.29"
+crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
+tui-textarea = "0.7"
+unicode-width = "0.2"
+serde_json = "1"
