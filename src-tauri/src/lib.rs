@@ -68,6 +68,12 @@ pub fn run() {
             commands::get_columns,
             commands::query_table,
             commands::get_ddl,
+            commands::discover_container,
+            commands::list_running_containers,
+            commands::test_docker_connection,
+            commands::discover_local_container,
+            commands::list_local_containers,
+            commands::test_local_docker_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -16,6 +16,7 @@
 
   type DbType = "postgres" | "mysql" | "mariadb" | "sqlite" | "mssql" | "oracle" | "clickhouse";
   type Tab = "url" | "manual";
+  type SslMode = "prefer" | "disable" | "require";
 
   // ── Form-level state ─────────────────────────────────────────────────────────
   let name = $state("");
@@ -27,6 +28,19 @@
   let saveError = $state("");
   let testStatus = $state<"idle" | "testing" | "success" | "error">("idle");
   let testMessage = $state("");
+
+  // ── SSL state (non-Docker) ────────────────────────────────────────────────────
+  let sslMode = $state<SslMode>("prefer");
+
+  // ── Docker-specific state ─────────────────────────────────────────────────────
+  let dockerContainerName = $state("");
+  let dockerContainerPort = $state(3306);
+  let dockerSslMode = $state<SslMode>("prefer");
+
+  const isDocker = $derived(
+    editing?.connection_type === "docker_container" ||
+    editing?.connection_type === "local_docker_container",
+  );
 
   // ── URL tab state ─────────────────────────────────────────────────────────────
   let url = $state("");
@@ -63,6 +77,19 @@
         database = editing.database ?? "";
         username = editing.username ?? "";
         password = "";
+
+        if (
+          editing.connection_type === "docker_container" ||
+          editing.connection_type === "local_docker_container"
+        ) {
+          // Docker-specific fields
+          dockerContainerName = editing.container_name ?? "";
+          dockerContainerPort = editing.container_port ?? defaultDockerPortFor(dbType);
+          dockerSslMode = parseSslModeFromUrl(editing.masked_url ?? "");
+        } else {
+          // Parse SSL mode for regular connections
+          sslMode = parseSslModeFromUrl(editing.masked_url ?? "");
+        }
       } else {
         dbType = "postgres";
         host = "";
@@ -70,6 +97,10 @@
         database = "";
         username = "";
         password = "";
+        sslMode = "prefer";
+        dockerContainerName = "";
+        dockerContainerPort = 3306;
+        dockerSslMode = "prefer";
       }
     }
   });
@@ -85,6 +116,55 @@
     return 0;
   }
 
+  function defaultDockerPortFor(dt: DbType): number {
+    return defaultPortFor(dt) || 3306;
+  }
+
+  function parseSslModeFromUrl(rawUrl: string): SslMode {
+    try {
+      const u = new URL(rawUrl);
+      const sslmode = u.searchParams.get("sslmode");
+      const sslModeParam = u.searchParams.get("ssl-mode");
+      if (sslmode === "disable" || sslModeParam === "disabled") return "disable";
+      if (sslmode === "require" || sslModeParam === "required") return "require";
+    } catch {
+      // ignore
+    }
+    return "prefer";
+  }
+
+  function buildSslParam(dt: DbType, mode: SslMode): string {
+    if (mode === "prefer") return "";
+    if (dt === "postgres") return mode === "disable" ? "?sslmode=disable" : "?sslmode=require";
+    if (dt === "mysql" || dt === "mariadb") return mode === "disable" ? "?ssl-mode=disabled" : "?ssl-mode=required";
+    return "";
+  }
+
+  /** Remove any SSL-related query params from a URL string. */
+  function stripSslParams(rawUrl: string): string {
+    try {
+      const u = new URL(rawUrl);
+      u.searchParams.delete("sslmode");
+      u.searchParams.delete("ssl-mode");
+      u.searchParams.delete("ssl");
+      return u.toString();
+    } catch {
+      return rawUrl;
+    }
+  }
+
+  function buildDockerUrl(): string {
+    const scheme = dbType;
+    const userPart = username
+      ? password
+        ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+        : `${encodeURIComponent(username)}@`
+      : "";
+    const dbPart = database ? `/${database}` : "";
+    const sslParam = buildSslParam(dbType, dockerSslMode);
+    return `${scheme}://${userPart}localhost:${dockerContainerPort}${dbPart}${sslParam}`;
+  }
+
   /** Build a postgres/mysql/sqlite URL from the manual fields */
   function buildUrlFromFields(): string {
     if (!host && dbType !== "sqlite") return "";
@@ -97,10 +177,10 @@
     const portPart = port && port !== defaultPortFor(dbType) ? `:${port}` : `:${port}`;
     const hostPart = dbType === "sqlite" ? "" : `${host}${portPart}`;
     const dbPart = database ? `/${database}` : "";
-    return `${scheme}://${userPart}${hostPart}${dbPart}`;
+    return `${scheme}://${userPart}${hostPart}${dbPart}${buildSslParam(dbType, sslMode)}`;
   }
 
-  /** Parse a connection URL into manual fields. Returns false on failure. */
+  /** Parse a connection URL into manual fields and SSL mode. Returns false on failure. */
   function applyUrlToFields(rawUrl: string): boolean {
     try {
       const u = new URL(rawUrl);
@@ -128,6 +208,7 @@
       database = u.pathname.replace(/^\//, "");
       username = decodeURIComponent(u.username);
       password = decodeURIComponent(u.password);
+      sslMode = parseSslModeFromUrl(rawUrl);
       return true;
     } catch {
       return false;
@@ -175,26 +256,46 @@
   // ── Effective URL (what gets submitted) ───────────────────────────────────────
 
   const effectiveUrl = $derived(
-    activeTab === "url" ? url.trim() : buildUrlFromFields(),
+    isDocker
+      ? buildDockerUrl()
+      : activeTab === "url"
+        ? url.trim()
+          ? stripSslParams(url.trim()) + buildSslParam(dbType, sslMode)
+          : ""
+        : buildUrlFromFields(),
   );
 
-  const canSave = $derived(name.trim() !== "" && effectiveUrl !== "");
-  const canTest = $derived(effectiveUrl !== "" && testStatus !== "testing");
+  const canSave = $derived(
+    name.trim() !== "" &&
+    (isDocker ? dockerContainerName.trim() !== "" && !!sshProfileId : effectiveUrl !== ""),
+  );
+  const canTest = $derived(
+    (isDocker ? dockerContainerName.trim() !== "" && !!sshProfileId : effectiveUrl !== "") &&
+    testStatus !== "testing",
+  );
 
   // ── Actions ───────────────────────────────────────────────────────────────────
 
   async function handleTest() {
-    if (!effectiveUrl) return;
     testStatus = "testing";
     testMessage = "";
     try {
-      if (sshProfileId) {
+      if (isDocker && sshProfileId) {
+        testMessage = await api.invoke<string>("test_docker_connection", {
+          sshProfileId,
+          containerName: dockerContainerName.trim(),
+          containerPort: dockerContainerPort,
+          url: buildDockerUrl(),
+        });
+      } else if (!isDocker && sshProfileId) {
         testMessage = await api.invoke<string>("test_connection_with_ssh", {
           url: effectiveUrl,
           sshProfileId,
         });
-      } else {
+      } else if (!isDocker) {
         testMessage = await connections.test(effectiveUrl);
+      } else {
+        throw new Error("SSH profile is required for Docker container connections.");
       }
       testStatus = "success";
     } catch (e) {
@@ -214,6 +315,13 @@
         url: effectiveUrl,
         ssh_profile_id: sshProfileId ?? null,
         group_id: groupId ?? null,
+        ...(isDocker && editing
+          ? {
+              connection_type: editing.connection_type,
+              container_name: dockerContainerName.trim(),
+              container_port: dockerContainerPort,
+            }
+          : {}),
       };
       if (editing) {
         await connections.update(editing.id, config);
@@ -253,123 +361,207 @@
       />
     </label>
 
-    <!-- Tabs -->
-    <div class="tabs">
-      <button
-        class="tab-btn"
-        class:active={activeTab === "url"}
-        type="button"
-        onclick={() => switchTab("url")}
-      >
-        Quick (URL)
-      </button>
-      <button
-        class="tab-btn"
-        class:active={activeTab === "manual"}
-        type="button"
-        onclick={() => switchTab("manual")}
-      >
-        Advanced (Fields)
-      </button>
-    </div>
+    {#if isDocker}
+      <!-- Docker container fields (read-only type badge + editable credentials) -->
+      <div class="docker-badge">
+        <span class="docker-label">Docker Container</span>
+        <span class="docker-type">{editing?.connection_type === "local_docker_container" ? "Local" : "Remote (SSH)"}</span>
+      </div>
 
-    <!-- URL tab -->
-    {#if activeTab === "url"}
-      <label class="field">
-        <span class="label">Connection URL</span>
-        <input
-          type="text"
-          bind:value={url}
-          onblur={onUrlBlur}
-          onpaste={onUrlPaste}
-          placeholder="postgres://user:pass@host:5432/dbname"
-          class="input font-mono text-sm"
-        />
-      </label>
-      {#if editing}
-        <p class="hint">Re-enter the full URL to test or change the connection. Previous URL: <code class="masked">{editing.masked_url}</code></p>
-      {/if}
-
-    <!-- Manual tab -->
-    {:else}
       <div class="manual-grid">
-        <label class="field">
-          <span class="label">Database type</span>
-          <select
-            bind:value={dbType}
-            onchange={onDbTypeChange}
-            class="input select"
-          >
-            <option value="postgres">PostgreSQL</option>
-            <option value="mysql">MySQL</option>
-            <option value="mariadb">MariaDB</option>
-            <option value="sqlite">SQLite</option>
-            <option value="mssql">MS SQL Server</option>
-            <option value="oracle">Oracle (experimental)</option>
-            <option value="clickhouse">ClickHouse</option>
-          </select>
-        </label>
-
-        {#if dbType !== "sqlite"}
-          <label class="field">
-            <span class="label">Host</span>
-            <input
-              type="text"
-              bind:value={host}
-              oninput={onFieldChange}
-              placeholder="localhost"
-              class="input"
-            />
-          </label>
-
-          <label class="field field-port">
-            <span class="label">Port</span>
-            <input
-              type="number"
-              bind:value={port}
-              oninput={onFieldChange}
-              min="1"
-              max="65535"
-              class="input"
-            />
-          </label>
-        {/if}
-
         <label class="field field-wide">
-          <span class="label">{dbType === "sqlite" ? "File path" : "Database"}</span>
+          <span class="label">Container name</span>
           <input
             type="text"
-            bind:value={database}
-            oninput={onFieldChange}
-            placeholder={dbType === "sqlite" ? "/path/to/db.sqlite" : "myapp"}
+            bind:value={dockerContainerName}
+            placeholder="my-db-container"
             class="input"
           />
         </label>
 
-        {#if dbType !== "sqlite"}
+        <label class="field field-port">
+          <span class="label">Container port</span>
+          <input
+            type="number"
+            bind:value={dockerContainerPort}
+            min="1"
+            max="65535"
+            class="input"
+          />
+        </label>
+
+        <label class="field">
+          <span class="label">Database</span>
+          <input
+            type="text"
+            bind:value={database}
+            placeholder="myapp"
+            class="input"
+          />
+        </label>
+
+        <label class="field">
+          <span class="label">Username</span>
+          <input
+            type="text"
+            bind:value={username}
+            placeholder="admin"
+            class="input"
+          />
+        </label>
+
+        <label class="field field-wide">
+          <span class="label">Password</span>
+          <input
+            type="password"
+            bind:value={password}
+            placeholder="(unchanged)"
+            class="input"
+          />
+        </label>
+
+        {#if dbType === "postgres" || dbType === "mysql" || dbType === "mariadb"}
+          <label class="field field-wide">
+            <span class="label">SSL mode</span>
+            <select bind:value={dockerSslMode} class="input select">
+              <option value="prefer">Prefer (auto)</option>
+              <option value="disable">Disable (recommended for MySQL 5.7)</option>
+              <option value="require">Require</option>
+            </select>
+          </label>
+        {/if}
+      </div>
+    {:else}
+      <!-- Tabs -->
+      <div class="tabs">
+        <button
+          class="tab-btn"
+          class:active={activeTab === "url"}
+          type="button"
+          onclick={() => switchTab("url")}
+        >
+          Quick (URL)
+        </button>
+        <button
+          class="tab-btn"
+          class:active={activeTab === "manual"}
+          type="button"
+          onclick={() => switchTab("manual")}
+        >
+          Advanced (Fields)
+        </button>
+      </div>
+
+      <!-- URL tab -->
+      {#if activeTab === "url"}
+        <label class="field">
+          <span class="label">Connection URL</span>
+          <input
+            type="text"
+            bind:value={url}
+            onblur={onUrlBlur}
+            onpaste={onUrlPaste}
+            placeholder="postgres://user:pass@host:5432/dbname"
+            class="input font-mono text-sm"
+          />
+        </label>
+        {#if editing}
+          <p class="hint">Re-enter the full URL to test or change the connection. Previous URL: <code class="masked">{editing.masked_url}</code></p>
+        {/if}
+
+      <!-- Manual tab -->
+      {:else}
+        <div class="manual-grid">
           <label class="field">
-            <span class="label">Username</span>
+            <span class="label">Database type</span>
+            <select
+              bind:value={dbType}
+              onchange={onDbTypeChange}
+              class="input select"
+            >
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql">MySQL</option>
+              <option value="mariadb">MariaDB</option>
+              <option value="sqlite">SQLite</option>
+              <option value="mssql">MS SQL Server</option>
+              <option value="oracle">Oracle (experimental)</option>
+              <option value="clickhouse">ClickHouse</option>
+            </select>
+          </label>
+
+          {#if dbType !== "sqlite"}
+            <label class="field">
+              <span class="label">Host</span>
+              <input
+                type="text"
+                bind:value={host}
+                oninput={onFieldChange}
+                placeholder="localhost"
+                class="input"
+              />
+            </label>
+
+            <label class="field field-port">
+              <span class="label">Port</span>
+              <input
+                type="number"
+                bind:value={port}
+                oninput={onFieldChange}
+                min="1"
+                max="65535"
+                class="input"
+              />
+            </label>
+          {/if}
+
+          <label class="field field-wide">
+            <span class="label">{dbType === "sqlite" ? "File path" : "Database"}</span>
             <input
               type="text"
-              bind:value={username}
+              bind:value={database}
               oninput={onFieldChange}
-              placeholder="admin"
+              placeholder={dbType === "sqlite" ? "/path/to/db.sqlite" : "myapp"}
               class="input"
             />
           </label>
 
-          <label class="field">
-            <span class="label">Password</span>
-            <input
-              type="password"
-              bind:value={password}
-              oninput={onFieldChange}
-              placeholder={editing ? "(unchanged)" : ""}
-              class="input"
-            />
-          </label>
-        {/if}
-      </div>
+          {#if dbType !== "sqlite"}
+            <label class="field">
+              <span class="label">Username</span>
+              <input
+                type="text"
+                bind:value={username}
+                oninput={onFieldChange}
+                placeholder="admin"
+                class="input"
+              />
+            </label>
+
+            <label class="field">
+              <span class="label">Password</span>
+              <input
+                type="password"
+                bind:value={password}
+                oninput={onFieldChange}
+                placeholder={editing ? "(unchanged)" : ""}
+                class="input"
+              />
+            </label>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- SSL mode — only postgres/mysql/mariadb read this param; mssql/oracle/clickhouse don't -->
+      {#if dbType === "postgres" || dbType === "mysql" || dbType === "mariadb"}
+        <label class="field">
+          <span class="label">SSL mode</span>
+          <select bind:value={sslMode} class="input select">
+            <option value="prefer">Prefer (auto)</option>
+            <option value="disable">Disable (recommended for MySQL 5.7 / old servers)</option>
+            <option value="require">Require</option>
+          </select>
+        </label>
+      {/if}
     {/if}
 
     <!-- Color -->
@@ -391,10 +583,15 @@
       </label>
     {/if}
 
-    <!-- SSH profile -->
-    <div class="field">
-      <SshProfileSelector bind:value={sshProfileId} />
-    </div>
+    <!-- SSH profile (required for docker_container, optional for others) -->
+    {#if !isDocker || editing?.connection_type === "docker_container"}
+      <div class="field">
+        <SshProfileSelector bind:value={sshProfileId} />
+        {#if isDocker && editing?.connection_type === "docker_container" && !sshProfileId}
+          <p class="hint hint-warn">An SSH profile is required for remote Docker container connections.</p>
+        {/if}
+      </div>
+    {/if}
 
     <!-- Test result -->
     {#if testStatus !== "idle"}
@@ -404,7 +601,7 @@
         class:error={testStatus === "error"}
       >
         {#if testStatus === "testing"}
-          {sshProfileId ? "Establishing SSH tunnel…" : "Testing connection…"}
+          {isDocker ? "Inspecting container and establishing tunnel…" : sshProfileId ? "Establishing SSH tunnel…" : "Testing connection…"}
         {:else}
           {testMessage}
         {/if}
@@ -640,5 +837,41 @@
 
   .text-sm {
     font-size: 13px;
+  }
+
+  /* Docker badge */
+  .docker-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--color-surface-2);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+  }
+
+  .docker-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .docker-type {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  .hint-warn {
+    color: oklch(0.55 0.12 60);
+  }
+
+  :global(.dark) .hint-warn {
+    color: oklch(0.75 0.1 60);
   }
 </style>

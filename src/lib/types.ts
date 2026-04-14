@@ -10,6 +10,12 @@ export type ConnectionColorId =
   | "slate"
   | "white";
 
+export type ConnectionType =
+  | "direct"
+  | "ssh_tunnel"
+  | "docker_container"
+  | "local_docker_container";
+
 export interface ConnectionInfo {
   id: string;
   name: string;
@@ -22,6 +28,9 @@ export interface ConnectionInfo {
   masked_url: string;
   ssh_profile_id?: string | null;
   group_id?: string | null;
+  connection_type?: ConnectionType;
+  container_name?: string | null;
+  container_port?: number | null;
 }
 
 export interface ConnectionConfig {
@@ -30,6 +39,32 @@ export interface ConnectionConfig {
   url: string;
   ssh_profile_id?: string | null;
   group_id?: string | null;
+  connection_type?: ConnectionType | null;
+  container_name?: string | null;
+  container_port?: number | null;
+}
+
+// Docker discovery
+
+export interface ContainerPort {
+  container_port: number;
+  protocol: string;
+}
+
+export type ContainerStatus = "running" | "stopped" | "not_found";
+
+export interface ContainerInfo {
+  ip_address: string;
+  status: ContainerStatus;
+  ports: ContainerPort[];
+  database_type_hint: string | null;
+}
+
+export interface ContainerSummary {
+  name: string;
+  image: string;
+  status: string;
+  database_type_hint: string | null;
 }
 
 export interface ConnectionGroup {

@@ -59,6 +59,21 @@ pub struct SshProfile {
     pub keepalive_interval: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionType {
+    Direct,
+    SshTunnel,
+    DockerContainer,
+    LocalDockerContainer,
+}
+
+impl Default for ConnectionType {
+    fn default() -> Self {
+        ConnectionType::Direct
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub id: String,
@@ -69,13 +84,17 @@ pub struct SavedConnection {
     pub port: u16,
     pub database: String,
     pub username: String,
-    pub url: String, // MVP: stored as-is; TODO: migrate passwords to OS keychain
-    /// Optional link to an SshProfile for tunnelled connections
+    pub url: String,
     #[serde(default)]
     pub ssh_profile_id: Option<String>,
-    /// Optional connection group id
     #[serde(default)]
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub connection_type: ConnectionType,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub container_port: Option<u16>,
 }
 
 impl SavedConnection {
@@ -100,6 +119,12 @@ pub struct ConnectionConfig {
     pub ssh_profile_id: Option<String>,
     #[serde(default)]
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub connection_type: Option<ConnectionType>,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub container_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,9 +287,14 @@ pub struct ConnectionInfo {
     pub masked_url: String,
     #[serde(default)]
     pub ssh_profile_id: Option<String>,
-    /// Optional connection group id
     #[serde(default)]
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub connection_type: ConnectionType,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub container_port: Option<u16>,
 }
 
 impl From<&SavedConnection> for ConnectionInfo {
@@ -281,6 +311,9 @@ impl From<&SavedConnection> for ConnectionInfo {
             masked_url: conn.masked_url(),
             ssh_profile_id: conn.ssh_profile_id.clone(),
             group_id: conn.group_id.clone(),
+            connection_type: conn.connection_type.clone(),
+            container_name: conn.container_name.clone(),
+            container_port: conn.container_port,
         }
     }
 }

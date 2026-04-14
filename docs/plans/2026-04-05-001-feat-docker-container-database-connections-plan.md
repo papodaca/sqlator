@@ -1,7 +1,7 @@
 ---
 title: "feat: Docker Container Database Connections"
 type: feat
-status: active
+status: complete
 date: 2026-04-05
 origin: docs/plans/2026-04-04-002-feat-enhanced-connection-manager-plan.md
 brainstorm: docs/brainstorms/2026-04-04-docker-container-database-connections-requirements.md

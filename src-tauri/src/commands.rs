@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
-use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta, SchemaInfo, TableInfo, SchemaColumnInfo, TableQueryParams, TableQueryResult};
+use sqlator_core::docker::inspector::ContainerInspector;
+use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta, SchemaInfo, TableInfo, SchemaColumnInfo, TableQueryParams, TableQueryResult};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
 use sqlator_core::{BatchResult, DatabaseType};
 use tauri::ipc::Channel;
@@ -37,6 +38,8 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
+    let connection_type = resolve_connection_type(&config);
+
     let conn = SavedConnection {
         id: uuid::Uuid::new_v4().to_string(),
         name: config.name,
@@ -56,6 +59,9 @@ pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfi
         url: config.url,
         ssh_profile_id: config.ssh_profile_id,
         group_id: config.group_id,
+        connection_type,
+        container_name: config.container_name,
+        container_port: config.container_port,
     };
 
     state.config.save_connection(conn.clone()).map_err(map_err)?;
@@ -82,6 +88,8 @@ pub async fn update_connection(
         None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
     };
 
+    let connection_type = resolve_connection_type(&config);
+
     let conn = SavedConnection {
         id,
         name: config.name,
@@ -101,6 +109,9 @@ pub async fn update_connection(
         url: config.url,
         ssh_profile_id: config.ssh_profile_id,
         group_id: config.group_id,
+        connection_type,
+        container_name: config.container_name,
+        container_port: config.container_port,
     };
 
     state.config.update_connection(conn.clone()).map_err(map_err)?;
@@ -138,7 +149,6 @@ pub async fn test_connection(url: String) -> CmdResult<String> {
 
 #[tauri::command]
 pub async fn connect_database(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    // Look up the connection URL from config
     let connections = state.config.get_connections().map_err(map_err)?;
     let conn = connections
         .iter()
@@ -146,83 +156,167 @@ pub async fn connect_database(state: State<'_, AppState>, id: String) -> CmdResu
         .ok_or_else(|| format!("Connection '{}' not found", id))?
         .clone();
 
-    let url = if let Some(ssh_profile_id) = &conn.ssh_profile_id {
-        info!(
-            "connect_database '{}': SSH profile '{}' attached, setting up tunnel",
-            id, ssh_profile_id
-        );
-
-        let profile = state
-            .config
-            .get_ssh_profile(ssh_profile_id)
-            .map_err(map_err)?
-            .ok_or_else(|| format!("SSH profile '{ssh_profile_id}' not found"))?;
-
-        debug!(
-            "connect_database: SSH profile loaded — host={}:{}, auth={:?}, proxy_jump={}",
-            profile.host,
-            profile.port,
-            profile.auth_method,
-            profile.proxy_jump.len()
-        );
-
-        let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
-        let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
-        let default_port = match parsed_url.scheme() {
-            "postgres" | "postgresql" => 5432u16,
-            "mysql" | "mariadb" => 3306,
-            _ => 0,
-        };
-        let target_port = parsed_url.port().unwrap_or(default_port);
-
-        info!(
-            "connect_database: tunnel target = {}:{} (from URL scheme={})",
-            target_host,
-            target_port,
-            parsed_url.scheme()
-        );
-
-        let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-        let jump_hosts = build_jump_hosts_for_profile(&profile)?;
-
-        // Close any existing tunnel for this connection before opening a new one
-        if let Some((_, old_tunnel)) = state.tunnels.remove(&id) {
-            warn!("connect_database: closing stale tunnel for connection '{}'", id);
-            SshTunnel::close(old_tunnel).await.ok();
+    let url = match conn.connection_type {
+        ConnectionType::DockerContainer => {
+            connect_docker_container(&state, &id, &conn).await?
         }
-
-        let tunnel = SshTunnel::create(
-            id.clone(),
-            &ssh_config,
-            auth_config,
-            target_host,
-            target_port,
-            jump_hosts,
-        )
-        .await
-        .map_err(map_err)?;
-
-        SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
-        let local_port = tunnel.local_port;
-
-        info!(
-            "connect_database: tunnel ready on localhost:{}, connecting DB",
-            local_port
-        );
-
-        state.tunnels.insert(id.clone(), tunnel);
-
-        let mut tunneled_url = parsed_url;
-        let _ = tunneled_url.set_host(Some("127.0.0.1"));
-        let _ = tunneled_url.set_port(Some(local_port));
-        tunneled_url.to_string()
-    } else {
-        debug!("connect_database '{}': no SSH profile, direct connection", id);
-        conn.url.clone()
+        ConnectionType::SshTunnel | ConnectionType::Direct if conn.ssh_profile_id.is_some() => {
+            connect_ssh_tunnel(&state, &id, &conn).await?
+        }
+        ConnectionType::LocalDockerContainer => {
+            connect_local_docker(&state, &id, &conn).await?
+        }
+        _ => {
+            debug!("connect_database '{}': no SSH profile, direct connection", id);
+            conn.url.clone()
+        }
     };
 
     state.db.connect(&id, &url).await.map_err(map_err)
+}
+
+async fn connect_docker_container(
+    state: &AppState,
+    id: &str,
+    conn: &SavedConnection,
+) -> CmdResult<String> {
+    let ssh_profile_id = conn.ssh_profile_id.as_ref()
+        .ok_or_else(|| "DockerContainer connection requires an SSH profile".to_string())?;
+
+    info!("connect_database '{}': Docker container, setting up tunnel via SSH profile '{}'", id, ssh_profile_id);
+
+    let profile = state.config.get_ssh_profile(ssh_profile_id).map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
+
+    let container_name = conn.container_name.as_ref()
+        .ok_or_else(|| "DockerContainer connection requires a container name".to_string())?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let container_info = ContainerInspector::inspect(
+        &ssh_config,
+        auth_config.clone(),
+        jump_hosts.clone(),
+        container_name,
+    )
+    .await
+    .map_err(|e| format!("Docker inspect failed: {}", e))?;
+
+    if container_info.status != sqlator_core::ContainerStatus::Running {
+        return Err(format!("Container '{}' is not running", container_name));
+    }
+
+    let container_port = conn.container_port
+        .unwrap_or_else(|| default_port_for_db_type(&conn.db_type));
+
+    if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
+        warn!("connect_database: closing stale tunnel for connection '{}'", id);
+        SshTunnel::close(old_tunnel).await.ok();
+    }
+
+    let tunnel = SshTunnel::create(
+        id.to_string(),
+        &ssh_config,
+        auth_config,
+        container_info.ip_address.clone(),
+        container_port,
+        jump_hosts,
+    )
+    .await
+    .map_err(map_err)?;
+
+    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    let local_port = tunnel.local_port;
+    state.tunnels.insert(id.to_string(), tunnel);
+
+    info!("connect_database: Docker tunnel ready on localhost:{} -> {}:{}", local_port, container_info.ip_address, container_port);
+
+    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
+    let mut tunneled_url = parsed_url;
+    let _ = tunneled_url.set_host(Some("127.0.0.1"));
+    let _ = tunneled_url.set_port(Some(local_port));
+    Ok(tunneled_url.to_string())
+}
+
+async fn connect_ssh_tunnel(
+    state: &AppState,
+    id: &str,
+    conn: &SavedConnection,
+) -> CmdResult<String> {
+    let ssh_profile_id = conn.ssh_profile_id.as_ref().unwrap();
+
+    info!("connect_database '{}': SSH tunnel via profile '{}'", id, ssh_profile_id);
+
+    let profile = state.config.get_ssh_profile(ssh_profile_id).map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
+    let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
+    let default_port = match parsed_url.scheme() {
+        "postgres" | "postgresql" => 5432u16,
+        "mysql" | "mariadb" => 3306,
+        _ => 0,
+    };
+    let target_port = parsed_url.port().unwrap_or(default_port);
+
+    if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
+        warn!("connect_database: closing stale tunnel for connection '{}'", id);
+        SshTunnel::close(old_tunnel).await.ok();
+    }
+
+    let tunnel = SshTunnel::create(
+        id.to_string(),
+        &ssh_config,
+        auth_config,
+        target_host,
+        target_port,
+        jump_hosts,
+    )
+    .await
+    .map_err(map_err)?;
+
+    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    let local_port = tunnel.local_port;
+    state.tunnels.insert(id.to_string(), tunnel);
+
+    let mut tunneled_url = parsed_url;
+    let _ = tunneled_url.set_host(Some("127.0.0.1"));
+    let _ = tunneled_url.set_port(Some(local_port));
+    Ok(tunneled_url.to_string())
+}
+
+async fn connect_local_docker(
+    state: &AppState,
+    id: &str,
+    conn: &SavedConnection,
+) -> CmdResult<String> {
+    let container_name = conn.container_name.as_ref()
+        .ok_or_else(|| "LocalDockerContainer connection requires a container name".to_string())?;
+
+    let local_docker = sqlator_core::docker::LocalDockerAccess::new()
+        .map_err(|e| format!("Local Docker access failed: {}", e))?;
+
+    let container_info = local_docker.inspect(container_name).await
+        .map_err(|e| format!("Docker inspect failed: {}", e))?;
+
+    if container_info.status != sqlator_core::ContainerStatus::Running {
+        return Err(format!("Container '{}' is not running", container_name));
+    }
+
+    let container_port = conn.container_port
+        .unwrap_or_else(|| default_port_for_db_type(&conn.db_type));
+
+    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
+    let mut docker_url = parsed_url;
+    let _ = docker_url.set_host(Some(&container_info.ip_address));
+    let _ = docker_url.set_port(Some(container_port));
+    Ok(docker_url.to_string())
 }
 
 #[tauri::command]
@@ -1136,6 +1230,9 @@ pub async fn import_connections(
             url,
             ssh_profile_id: ec.ssh_profile_name.as_ref().and_then(|n| profile_id_map.get(n)).cloned(),
             group_id: ec.group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+            connection_type: ConnectionType::default(),
+            container_name: None,
+            container_port: None,
         };
         state.config.save_connection(conn).map_err(map_err)?;
         all_conn_names.insert(final_name);
@@ -1166,6 +1263,32 @@ fn build_url_no_password(db_type: &str, host: &str, port: u16, database: &str, u
     }
 }
 
+fn resolve_connection_type(config: &ConnectionConfig) -> ConnectionType {
+    match config.connection_type {
+        Some(ref ct) => ct.clone(),
+        None => {
+            if config.container_name.is_some() && config.ssh_profile_id.is_some() {
+                ConnectionType::DockerContainer
+            } else if config.ssh_profile_id.is_some() {
+                ConnectionType::SshTunnel
+            } else {
+                ConnectionType::Direct
+            }
+        }
+    }
+}
+
+fn default_port_for_db_type(db_type: &str) -> u16 {
+    match db_type {
+        "postgres" => 5432,
+        "mysql" | "mariadb" => 3306,
+        "mssql" => 1433,
+        "oracle" => 1521,
+        "clickhouse" => 8123,
+        _ => 0,
+    }
+}
+
 fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {
     match s {
         "key" => Ok(sqlator_core::models::SshAuthMethod::Key),
@@ -1173,6 +1296,231 @@ fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> 
         "agent" => Ok(sqlator_core::models::SshAuthMethod::Agent),
         other => Err(format!("Unknown auth method: {other}")),
     }
+}
+
+// ── Docker Container Discovery ────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn discover_container(
+    state: State<'_, AppState>,
+    ssh_profile_id: String,
+    container_name: String,
+) -> CmdResult<DockerContainerInfo> {
+    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let info = ContainerInspector::inspect(
+        &ssh_config,
+        auth_config,
+        jump_hosts,
+        &container_name,
+    )
+    .await
+    .map_err(|e| format!("{}", e))?;
+
+    Ok(DockerContainerInfo {
+        ip_address: info.ip_address,
+        status: match info.status {
+            sqlator_core::ContainerStatus::Running => "running".to_string(),
+            sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
+            sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
+        },
+        ports: info.ports.into_iter().map(|p| ContainerPortInfo {
+            container_port: p.container_port,
+            protocol: p.protocol,
+        }).collect(),
+        database_type_hint: info.database_type_hint,
+    })
+}
+
+#[tauri::command]
+pub async fn list_running_containers(
+    state: State<'_, AppState>,
+    ssh_profile_id: String,
+) -> CmdResult<Vec<ContainerSummaryInfo>> {
+    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let containers = ContainerInspector::list_running(
+        &ssh_config,
+        auth_config,
+        jump_hosts,
+    )
+    .await
+    .map_err(|e| format!("{}", e))?;
+
+    Ok(containers.into_iter().map(|c| ContainerSummaryInfo {
+        name: c.name,
+        image: c.image,
+        status: c.status,
+        database_type_hint: c.database_type_hint,
+    }).collect())
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DockerContainerInfo {
+    pub ip_address: String,
+    pub status: String,
+    pub ports: Vec<ContainerPortInfo>,
+    pub database_type_hint: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ContainerPortInfo {
+    pub container_port: u16,
+    pub protocol: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ContainerSummaryInfo {
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub database_type_hint: Option<String>,
+}
+
+/// Test a Docker container connection with a fresh docker inspect + ephemeral tunnel.
+/// Mirrors connect_docker_container exactly, but tears the tunnel down after testing.
+#[tauri::command]
+pub async fn test_docker_connection(
+    state: State<'_, AppState>,
+    ssh_profile_id: String,
+    container_name: String,
+    container_port: u16,
+    url: String,
+) -> CmdResult<String> {
+    info!("test_docker_connection: SSH profile='{}', container='{}'", ssh_profile_id, container_name);
+
+    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let container_info = ContainerInspector::inspect(
+        &ssh_config,
+        auth_config.clone(),
+        jump_hosts.clone(),
+        &container_name,
+    )
+    .await
+    .map_err(|e| format!("Docker inspect failed: {}", e))?;
+
+    if container_info.status != sqlator_core::ContainerStatus::Running {
+        return Err(format!("Container '{}' is not running", container_name));
+    }
+
+    let tunnel_id = format!("test-docker-{}", uuid::Uuid::new_v4());
+    let tunnel = SshTunnel::create(
+        tunnel_id,
+        &ssh_config,
+        auth_config,
+        container_info.ip_address.clone(),
+        container_port,
+        jump_hosts,
+    )
+    .await
+    .map_err(map_err)?;
+
+    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    let local_port = tunnel.local_port;
+
+    info!(
+        "test_docker_connection: tunnel ready localhost:{} -> {}:{}",
+        local_port, container_info.ip_address, container_port
+    );
+
+    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
+    let mut test_url = parsed_url;
+    let _ = test_url.set_host(Some("127.0.0.1"));
+    let _ = test_url.set_port(Some(local_port));
+
+    let result = sqlator_core::db::DbManager::test_connection(&test_url.to_string()).await;
+    SshTunnel::close(tunnel).await.ok();
+    result.map_err(map_err)
+}
+
+// ── Local Docker commands ──────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn discover_local_container(
+    _state: State<'_, AppState>,
+    container_name: String,
+) -> CmdResult<DockerContainerInfo> {
+    let local = sqlator_core::docker::LocalDockerAccess::new()
+        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
+
+    let info = local.inspect(&container_name).await
+        .map_err(|e| format!("{}", e))?;
+
+    Ok(DockerContainerInfo {
+        ip_address: info.ip_address,
+        status: match info.status {
+            sqlator_core::ContainerStatus::Running => "running".to_string(),
+            sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
+            sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
+        },
+        ports: info.ports.into_iter().map(|p| ContainerPortInfo {
+            container_port: p.container_port,
+            protocol: p.protocol,
+        }).collect(),
+        database_type_hint: info.database_type_hint,
+    })
+}
+
+#[tauri::command]
+pub async fn list_local_containers(
+    _state: State<'_, AppState>,
+) -> CmdResult<Vec<ContainerSummaryInfo>> {
+    let local = sqlator_core::docker::LocalDockerAccess::new()
+        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
+
+    let containers = local.list_running().await
+        .map_err(|e| format!("{}", e))?;
+
+    Ok(containers.into_iter().map(|c| ContainerSummaryInfo {
+        name: c.name,
+        image: c.image,
+        status: c.status,
+        database_type_hint: c.database_type_hint,
+    }).collect())
+}
+
+/// Test a local Docker container connection — inspects via local socket, connects directly.
+#[tauri::command]
+pub async fn test_local_docker_connection(
+    _state: State<'_, AppState>,
+    container_name: String,
+    container_port: u16,
+    url: String,
+) -> CmdResult<String> {
+    let local = sqlator_core::docker::LocalDockerAccess::new()
+        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
+
+    let container_info = local.inspect(&container_name).await
+        .map_err(|e| format!("Docker inspect failed: {}", e))?;
+
+    if container_info.status != sqlator_core::ContainerStatus::Running {
+        return Err(format!("Container '{}' is not running", container_name));
+    }
+
+    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
+    let mut test_url = parsed_url;
+    let _ = test_url.set_host(Some(&container_info.ip_address));
+    let _ = test_url.set_port(Some(container_port));
+
+    sqlator_core::db::DbManager::test_connection(&test_url.to_string())
+        .await
+        .map_err(map_err)
 }
 
 // ── Schema Metadata ───────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
   import type { ConnectionInfo, TableInfo } from "$lib/types";
   import { tabs } from "$lib/stores/tabs.svelte";
   import SchemaBrowser from "./SchemaBrowser.svelte";
+  import DockerConnectionWizard from "./DockerConnectionWizard.svelte";
   import { serverMode } from "$lib/stores/server-mode.svelte";
 
   let showForm = $state(false);
@@ -20,6 +21,7 @@
   let creatingGroup = $state(false);
   let newGroupName = $state("");
   let showImport = $state(false);
+  let showDockerWizard = $state(false);
   let exportedPath = $state<string | null>(null);
   let showHeaderMenu = $state(false);
 
@@ -150,6 +152,16 @@
           </button>
           {#if showHeaderMenu}
             <div class="header-menu" role="menu">
+              <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); showDockerWizard = true; showHeaderMenu = false; }}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="11" width="4" height="4" rx="1"/><rect x="9" y="11" width="4" height="4" rx="1"/>
+                  <rect x="15" y="11" width="4" height="4" rx="1"/><rect x="6" y="7" width="4" height="4" rx="1"/>
+                  <rect x="12" y="7" width="4" height="4" rx="1"/><path d="M6 7V5a1 1 0 0 1 1-1h2"/>
+                  <path d="M13 7V5a1 1 0 0 0-1-1h-2"/><path d="M3 11V9a1 1 0 0 1 1-1h1"/>
+                  <path d="M20 11V9a1 1 0 0 0-1-1h-1"/><path d="M19 15v2a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-2"/>
+                </svg>
+                Docker container connection
+              </button>
               <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); creatingGroup = true; showHeaderMenu = false; }}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -260,6 +272,10 @@
 
 {#if showImport}
   <ImportDialog onclose={() => (showImport = false)} />
+{/if}
+
+{#if showDockerWizard}
+  <DockerConnectionWizard onclose={() => (showDockerWizard = false)} />
 {/if}
 
 <style>

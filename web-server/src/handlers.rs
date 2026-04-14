@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use sqlator_core::{
     credentials::{CredentialStore, StorageMode, VaultSettings},
     db::DbManager,
+    docker::inspector::ContainerInspector,
     models::{
-        ConnectionConfig, ConnectionGroup, ConnectionInfo, SavedConnection, SchemaColumnInfo,
+        ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, SavedConnection, SchemaColumnInfo,
         SchemaInfo, SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams, TableQueryResult,
         BatchResult,
     },
@@ -145,6 +146,9 @@ async fn handle(command: &str, state: &Arc<AppState>, args: &Value) -> HandlerRe
         "get-columns" => get_columns(state, args).await,
         "query-table" => query_table(state, args).await,
         "execute-batch" => execute_batch(state, args).await,
+        "discover-container" => discover_container(state, args).await,
+        "list-running-containers" => list_running_containers(state, args).await,
+        "test-docker-connection" => test_docker_connection(state, args).await,
 
         other => Err(err(format!("unknown command: {}", other))),
     }
@@ -264,12 +268,12 @@ fn detect_db_type(url: &str) -> Result<(&'static str, u16), (StatusCode, String)
 fn build_saved_connection(id: String, config: ConnectionConfig) -> Result<SavedConnection, (StatusCode, String)> {
     let parsed = url::Url::parse(&config.url).map_err(err)?;
     let (db_type, default_port) = detect_db_type(&config.url)?;
-    // Adjust for mariadb scheme
     let db_type = if db_type == "mysql" && parsed.scheme() == "mariadb" {
         "mariadb"
     } else {
         db_type
     };
+    let connection_type = resolve_connection_type(&config);
     Ok(SavedConnection {
         id,
         name: config.name,
@@ -282,6 +286,9 @@ fn build_saved_connection(id: String, config: ConnectionConfig) -> Result<SavedC
         url: config.url,
         ssh_profile_id: config.ssh_profile_id,
         group_id: config.group_id,
+        connection_type,
+        container_name: config.container_name,
+        container_port: config.container_port,
     })
 }
 
@@ -973,6 +980,9 @@ async fn import_connections(state: &Arc<AppState>, args: &Value) -> HandlerResul
             url,
             ssh_profile_id: ec.ssh_profile_name.as_ref().and_then(|n| profile_id_map.get(n)).cloned(),
             group_id: ec.group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+            connection_type: sqlator_core::models::ConnectionType::default(),
+            container_name: None,
+            container_port: None,
         };
         config.save_connection(conn).map_err(err)?;
         all_conn_names.insert(final_name);
@@ -1227,4 +1237,158 @@ async fn execute_batch(state: &Arc<AppState>, args: &Value) -> HandlerResult {
     let batch: SqlBatch = get(args, "batch")?;
     let result: BatchResult = state.db.execute_batch(&connection_id, &batch).await.map_err(err)?;
     Ok(json!(result))
+}
+
+// ── Docker Container Discovery ────────────────────────────────────────────────
+
+async fn discover_container(state: &Arc<AppState>, args: &Value) -> HandlerResult {
+    let ssh_profile_id: String = get(args, "sshProfileId")?;
+    let container_name: String = get(args, "containerName")?;
+
+    let profile = state.config.lock().await
+        .get_ssh_profile(&ssh_profile_id).map_err(err)?
+        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let info = ContainerInspector::inspect(
+        &ssh_config,
+        auth_config,
+        jump_hosts,
+        &container_name,
+    )
+    .await
+    .map_err(|e| err(format!("{}", e)))?;
+
+    Ok(json!({
+        "ip_address": info.ip_address,
+        "status": match info.status {
+            sqlator_core::ContainerStatus::Running => "running",
+            sqlator_core::ContainerStatus::Stopped => "stopped",
+            sqlator_core::ContainerStatus::NotFound => "not_found",
+        },
+        "ports": info.ports,
+        "database_type_hint": info.database_type_hint,
+    }))
+}
+
+async fn list_running_containers(state: &Arc<AppState>, args: &Value) -> HandlerResult {
+    let ssh_profile_id: String = get(args, "sshProfileId")?;
+
+    let profile = state.config.lock().await
+        .get_ssh_profile(&ssh_profile_id).map_err(err)?
+        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let containers = ContainerInspector::list_running(
+        &ssh_config,
+        auth_config,
+        jump_hosts,
+    )
+    .await
+    .map_err(|e| err(format!("{}", e)))?;
+
+    Ok(json!(containers))
+}
+
+async fn test_docker_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
+    let ssh_profile_id: String = get(args, "sshProfileId")?;
+    let container_name: String = get(args, "containerName")?;
+    let container_port: u16 = get(args, "containerPort")?;
+    let url: String = get(args, "url")?;
+
+    let profile = state.config.lock().await
+        .get_ssh_profile(&ssh_profile_id).map_err(err)?
+        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
+
+    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+
+    let container_info = ContainerInspector::inspect(
+        &ssh_config,
+        auth_config.clone(),
+        jump_hosts.clone(),
+        &container_name,
+    )
+    .await
+    .map_err(|e| err(format!("Docker inspect failed: {}", e)))?;
+
+    if container_info.status != sqlator_core::ContainerStatus::Running {
+        return Err(err(format!("Container '{}' is not running", container_name)));
+    }
+
+    let tunnel_id = format!("test-docker-{}", uuid::Uuid::new_v4());
+    let tunnel = SshTunnel::create(
+        tunnel_id,
+        &ssh_config,
+        auth_config,
+        container_info.ip_address.clone(),
+        container_port,
+        jump_hosts,
+    )
+    .await
+    .map_err(err)?;
+
+    SshTunnel::start_forwarding(&tunnel).await.map_err(err)?;
+    let local_port = tunnel.local_port;
+
+    let parsed_url = url::Url::parse(&url).map_err(err)?;
+    let mut test_url = parsed_url;
+    let _ = test_url.set_host(Some("127.0.0.1"));
+    let _ = test_url.set_port(Some(local_port));
+
+    let result = DbManager::test_connection(&test_url.to_string()).await;
+    SshTunnel::close(tunnel).await.ok();
+    let msg = result.map_err(err)?;
+    Ok(json!(msg))
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn resolve_connection_type(config: &ConnectionConfig) -> ConnectionType {
+    match config.connection_type {
+        Some(ref ct) => ct.clone(),
+        None => {
+            if config.container_name.is_some() && config.ssh_profile_id.is_some() {
+                ConnectionType::DockerContainer
+            } else if config.ssh_profile_id.is_some() {
+                ConnectionType::SshTunnel
+            } else {
+                ConnectionType::Direct
+            }
+        }
+    }
+}
+
+fn build_jump_hosts_for_profile(
+    profile: &SshProfile,
+) -> Result<Vec<(SshHostConfig, SshAuthConfig)>, (StatusCode, String)> {
+    use sqlator_core::models::SshAuthMethod;
+    profile
+        .proxy_jump
+        .iter()
+        .map(|jump| {
+            let auth = match jump.auth_method {
+                SshAuthMethod::Key => {
+                    let key_path = jump.key_path.as_deref().unwrap_or_default();
+                    SshAuthConfig::with_key(&jump.username, key_path)
+                }
+                SshAuthMethod::Agent => SshAuthConfig::with_agent(&jump.username),
+                SshAuthMethod::Password => {
+                    return Err(err(format!(
+                        "Jump host '{}' uses password auth, which is not supported for stored jump hosts",
+                        jump.host
+                    )))
+                }
+            };
+            let config = SshHostConfig::new(&jump.host, jump.port, auth.clone());
+            Ok((config, auth))
+        })
+        .collect()
 }
