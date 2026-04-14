@@ -351,6 +351,277 @@ pub async fn get_columns(
         .collect())
 }
 
+pub async fn get_ddl(pool: &OraclePool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+    let schema_val = if let Some(s) = schema {
+        s.to_string()
+    } else {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let r = conn
+            .query("SELECT USER FROM DUAL", &[])
+            .await
+            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        r.rows.first().and_then(|row| row.get_string(0)).unwrap_or("UNKNOWN").to_string()
+    };
+
+    if let Some(ddl) = try_dbms_metadata(pool, table_name, &schema_val).await? {
+        return Ok(ddl);
+    }
+
+    reconstruct_ddl(pool, table_name, &schema_val).await
+}
+
+async fn try_dbms_metadata(pool: &OraclePool, table_name: &str, schema_val: &str) -> Result<Option<String>, CoreError> {
+    let conn = pool.get().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "CONNECTION_FAILED".into(),
+    })?;
+
+    let schema_esc = schema_val.replace('\'', "''");
+    let table_esc = table_name.replace('\'', "''");
+
+    let ddl_sql = format!(
+        "SELECT DBMS_METADATA.GET_DDL('TABLE', '{}', '{}') FROM DUAL",
+        table_esc, schema_esc
+    );
+
+    let result = match conn.query(&ddl_sql, &[]).await {
+        Ok(r) => r,
+        Err(_) => {
+            let view_sql = format!(
+                "SELECT DBMS_METADATA.GET_DDL('VIEW', '{}', '{}') FROM DUAL",
+                table_esc, schema_esc
+            );
+            match conn.query(&view_sql, &[]).await {
+                Ok(r) => r,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
+
+    Ok(result.rows.first().and_then(|r| r.get_string(0)).map(|s| s.trim().to_string()))
+}
+
+async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) -> Result<String, CoreError> {
+    let schema_esc = schema_val.replace('\'', "''");
+    let table_esc = table_name.replace('\'', "''");
+    let qualified = format!("\"{}\".\"{}\"", schema_val, table_name);
+
+    let mut parts: Vec<String> = Vec::new();
+
+    let is_view = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM all_views WHERE owner = '{}' AND view_name = '{}'",
+            schema_esc, table_esc
+        );
+        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        result.rows.first().and_then(|r| r.get_i64(0)).unwrap_or(0) > 0
+    };
+
+    if is_view {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT text FROM all_views WHERE owner = '{}' AND view_name = '{}'",
+            schema_esc, table_esc
+        );
+        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        let view_text = result.rows.first().and_then(|r| r.get_string(0)).unwrap_or("").trim();
+        return Ok(format!("CREATE OR REPLACE VIEW {} AS\n{};", qualified, view_text));
+    }
+
+    let col_rows = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT column_name, data_type, data_length, data_precision, data_scale, nullable \
+             FROM all_tab_columns \
+             WHERE owner = '{}' AND table_name = '{}' \
+             ORDER BY column_id",
+            schema_esc, table_esc
+        );
+        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+    };
+
+    if col_rows.rows.is_empty() {
+        return Err(CoreError {
+            message: format!("Table {}.{} not found. It may have been dropped.", schema_val, table_name),
+            code: "TABLE_NOT_FOUND".into(),
+        });
+    }
+
+    for row in &col_rows.rows {
+        let col_name = row.get_string(0).unwrap_or("unknown");
+        let data_type = row.get_string(1).unwrap_or("UNKNOWN");
+        let data_length = row.get_i64(2).unwrap_or(0) as i32;
+        let data_precision = row.get_i64(3).map(|v| v as i32);
+        let data_scale = row.get_i64(4).map(|v| v as i32);
+        let nullable = row.get_string(5).map(|v| v == "Y").unwrap_or(true);
+
+        let full_type = resolve_oracle_type(data_type, data_length, data_precision, data_scale);
+
+        let mut col_def = format!("  \"{}\" {}", col_name, full_type);
+        if !nullable {
+            col_def.push_str(" NOT NULL");
+        }
+        parts.push(col_def);
+    }
+
+    let pk_rows = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT ac.constraint_name, acc.column_name \
+             FROM all_constraints ac \
+             JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name AND ac.owner = acc.owner \
+             WHERE ac.constraint_type = 'P' AND ac.owner = '{}' AND ac.table_name = '{}' \
+             ORDER BY ac.constraint_name, acc.position",
+            schema_esc, table_esc
+        );
+        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+    };
+
+    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for row in &pk_rows.rows {
+        let cname = row.get_string(0).unwrap_or("").to_string();
+        let col = row.get_string(1).unwrap_or("").to_string();
+        pk_by_constraint.entry(cname).or_default().push(col);
+    }
+    for (cname, cols) in &pk_by_constraint {
+        let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
+        parts.push(format!("  CONSTRAINT \"{}\" PRIMARY KEY ({})", cname, quoted.join(", ")));
+    }
+
+    let fk_rows = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT ac.constraint_name, acc.column_name, ac2.owner AS ref_schema, ac2.table_name AS ref_table, acc2.column_name AS ref_column \
+             FROM all_constraints ac \
+             JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name AND ac.owner = acc.owner \
+             JOIN all_constraints ac2 ON ac.r_constraint_name = ac2.constraint_name AND ac.r_owner = ac2.owner \
+             JOIN all_cons_columns acc2 ON ac2.constraint_name = acc2.constraint_name AND ac2.owner = acc2.owner AND acc.position = acc2.position \
+             WHERE ac.constraint_type = 'R' AND ac.owner = '{}' AND ac.table_name = '{}' \
+             ORDER BY ac.constraint_name, acc.position",
+            schema_esc, table_esc
+        );
+        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+    };
+
+    let mut fk_by_constraint: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> = std::collections::BTreeMap::new();
+    for row in &fk_rows.rows {
+        let cname = row.get_string(0).unwrap_or("").to_string();
+        let col = row.get_string(1).unwrap_or("").to_string();
+        let ref_schema = row.get_string(2).unwrap_or("").to_string();
+        let ref_table = row.get_string(3).unwrap_or("").to_string();
+        let ref_col = row.get_string(4).unwrap_or("").to_string();
+        fk_by_constraint.entry(cname).or_default().push((col, ref_schema, ref_table, ref_col));
+    }
+    for (cname, refs) in &fk_by_constraint {
+        let from_cols: Vec<String> = refs.iter().map(|(c, _, _, _)| format!("\"{}\"", c)).collect();
+        let first = refs.first().unwrap();
+        let ref_qualified = format!("\"{}\".\"{}\"", first.1, first.2);
+        let to_cols: Vec<String> = refs.iter().map(|(_, _, _, c)| format!("\"{}\"", c)).collect();
+        parts.push(format!("  CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES {} ({})", cname, from_cols.join(", "), ref_qualified, to_cols.join(", ")));
+    }
+
+    let uq_rows = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT ac.constraint_name, acc.column_name \
+             FROM all_constraints ac \
+             JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name AND ac.owner = acc.owner \
+             WHERE ac.constraint_type = 'U' AND ac.owner = '{}' AND ac.table_name = '{}' \
+             ORDER BY ac.constraint_name, acc.position",
+            schema_esc, table_esc
+        );
+        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+    };
+
+    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for row in &uq_rows.rows {
+        let cname = row.get_string(0).unwrap_or("").to_string();
+        let col = row.get_string(1).unwrap_or("").to_string();
+        uq_by_constraint.entry(cname).or_default().push(col);
+    }
+    for (cname, cols) in &uq_by_constraint {
+        let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
+        parts.push(format!("  CONSTRAINT \"{}\" UNIQUE ({})", cname, quoted.join(", ")));
+    }
+
+    let ck_rows = {
+        let conn = pool.get().await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
+        let sql = format!(
+            "SELECT ac.constraint_name, ac.search_condition \
+             FROM all_constraints ac \
+             WHERE ac.constraint_type = 'C' AND ac.owner = '{}' AND ac.table_name = '{}' \
+             AND ac.generated = 'USER NAME' \
+             ORDER BY ac.constraint_name",
+            schema_esc, table_esc
+        );
+        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+    };
+
+    for row in &ck_rows.rows {
+        let cname = row.get_string(0).unwrap_or("").to_string();
+        let check_clause = row.get_string(1).unwrap_or("").to_string();
+        if !check_clause.is_empty() {
+            parts.push(format!("  CONSTRAINT \"{}\" CHECK ({})", cname, check_clause));
+        }
+    }
+
+    Ok(format!("CREATE TABLE {} (\n{}\n);", qualified, parts.join(",\n")))
+}
+
+fn resolve_oracle_type(data_type: &str, data_length: i32, data_precision: Option<i32>, data_scale: Option<i32>) -> String {
+    let upper = data_type.to_uppercase();
+    let base = upper.split('(').next().unwrap_or(&upper).trim();
+    match base {
+        "VARCHAR2" | "NVARCHAR2" => format!("{}({})", base, data_length),
+        "CHAR" | "NCHAR" => {
+            if data_length > 1 {
+                format!("{}({})", base, data_length)
+            } else {
+                base.to_string()
+            }
+        }
+        "NUMBER" => match (data_precision, data_scale) {
+            (Some(p), Some(s)) => format!("NUMBER({}, {})", p, s),
+            (Some(p), None) => format!("NUMBER({})", p),
+            _ => "NUMBER".to_string(),
+        },
+        "FLOAT" => {
+            if let Some(p) = data_precision {
+                format!("FLOAT({})", p)
+            } else {
+                "FLOAT".to_string()
+            }
+        }
+        "RAW" => format!("RAW({})", data_length),
+        _ => base.to_string(),
+    }
+}
+
 fn map_oracle_type(type_name: &str) -> String {
     let lower = type_name.to_lowercase();
     // Oracle types often have precision/scale appended, e.g. "NUMBER(10,2)"

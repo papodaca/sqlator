@@ -58,6 +58,21 @@ pub async fn execute_select(
     Ok(())
 }
 
+pub async fn get_ddl(pool: &MySqlPool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+    let qualified = match schema {
+        Some(s) => format!("`{}`.`{}`", s.replace('`', "``"), table_name.replace('`', "``")),
+        None => format!("`{}`", table_name.replace('`', "``")),
+    };
+    let sql = format!("SHOW CREATE TABLE {}", qualified);
+    let row = sqlx::query(&sql)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    Ok(row.try_get::<String, _>("Create Table")
+        .or_else(|_| row.try_get::<String, _>(1))
+        .unwrap_or_default())
+}
+
 pub(super) fn mysql_row_to_json(row: &MySqlRow, index: usize) -> serde_json::Value {
     if let Ok(v) = row.try_get::<Option<sqlx::types::Json<serde_json::Value>>, _>(index) {
         return v.map(|j| j.0).unwrap_or(serde_json::Value::Null);

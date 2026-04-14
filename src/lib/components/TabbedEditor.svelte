@@ -9,6 +9,7 @@
   import ResultPane from "./ResultPane.svelte";
   import EditorToolbar from "./EditorToolbar.svelte";
   import EnhancedGrid from "./EnhancedGrid.svelte";
+  import SchemaDdlViewer from "./SchemaDdlViewer.svelte";
   import type { TableBrowseState } from "$lib/types";
 
   // Expose a way for the sidebar to open the connection form
@@ -103,6 +104,22 @@
               browseState={activeQueryTab.tableBrowse}
               onStateChange={(patch) => {
                 tabs.updateTableBrowseState(
+                  activeConnectionTab.connectionId,
+                  activeQueryTab.id,
+                  patch
+                );
+              }}
+            />
+          {:else if activeQueryTab.schemaDdl}
+            <div class="table-browse-header">
+              <span class="table-browse-title">
+                🔧 {activeQueryTab.label}
+              </span>
+            </div>
+            <SchemaDdlViewer
+              ddlState={activeQueryTab.schemaDdl}
+              onStateChange={(patch) => {
+                tabs.updateSchemaDdlState(
                   activeConnectionTab.connectionId,
                   activeQueryTab.id,
                   patch

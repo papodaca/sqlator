@@ -116,6 +116,11 @@
     if (!activeConnectionId) return;
     tabs.openTableBrowse(activeConnectionId, table);
   }
+
+  function handleSchemaOpen(table: TableInfo) {
+    if (!activeConnectionId) return;
+    tabs.openSchemaDdl(activeConnectionId, table);
+  }
 </script>
 
 <svelte:window onclick={closeHeaderMenu} />
@@ -244,6 +249,7 @@
       connectionId={activeConnectionId}
       {isConnected}
       onopen={handleTableOpen}
+      onopenschema={handleSchemaOpen}
     />
   {/if}
 </aside>

@@ -6,9 +6,11 @@
   let {
     connectionId,
     onopen,
+    onopenschema,
   }: {
     connectionId: string;
     onopen: (table: TableInfo) => void;
+    onopenschema: (table: TableInfo) => void;
   } = $props();
 
   const schemaState = $derived(schemaStore.getState(connectionId));
@@ -77,6 +79,7 @@
             isLoadingColumns={schemaState.loadingColumns.includes(table.name)}
             onexpand={handleExpand}
             onopen={onopen}
+            onopenschema={onopenschema}
           />
         </li>
       {/each}

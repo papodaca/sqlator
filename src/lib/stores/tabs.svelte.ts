@@ -1,5 +1,5 @@
 import { api } from "$lib/api";
-import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus, TableBrowseState, TableInfo } from "$lib/types";
+import type { ConnectionTab, QueryTab, ResultPaneState, ConnectionStatus, TableBrowseState, TableInfo, SchemaDdlState, SortSpec, FilterSpec } from "$lib/types";
 import { editStore } from "$lib/stores/edit.svelte";
 import { fetchSchemaMetadata } from "$lib/services/schema-fetcher";
 
@@ -10,6 +10,7 @@ interface PersistedQueryTab {
   label: string;
   sql: string;
   tableBrowse?: { tableName: string; schema?: string; sort: SortSpec[]; filters: FilterSpec[] };
+  schemaDdl?: { tableName: string; schema?: string };
 }
 
 interface PersistedConnectionTab {
@@ -147,6 +148,65 @@ export const tabs = {
             queryTabs: ct.queryTabs.map((qt) =>
               qt.id === queryTabId && qt.tableBrowse
                 ? { ...qt, tableBrowse: { ...qt.tableBrowse, ...patch } }
+                : qt
+            ),
+          }
+        : ct
+    );
+  },
+
+  openSchemaDdl(connectionId: string, table: TableInfo) {
+    const ct = connectionTabs.find((t) => t.connectionId === connectionId);
+    if (!ct) return;
+
+    const existing = ct.queryTabs.find(
+      (t) => t.schemaDdl?.tableName === table.name && t.schemaDdl?.schema === table.schema
+    );
+    if (existing) {
+      connectionTabs = connectionTabs.map((t) =>
+        t.connectionId === connectionId ? { ...t, activeQueryTabId: existing.id } : t
+      );
+      return;
+    }
+
+    const ddlState: SchemaDdlState = {
+      tableName: table.name,
+      schema: table.schema,
+      connectionId,
+      ddl: null,
+      isLoading: true,
+      error: null,
+    };
+
+    const label = table.schema
+      ? `DDL: ${table.schema}.${table.name}`
+      : `DDL: ${table.name}`;
+
+    const newTab: QueryTab = {
+      id: crypto.randomUUID(),
+      label,
+      sql: "",
+      isDirty: false,
+      result: { kind: "idle" },
+      isExecuting: false,
+      schemaDdl: ddlState,
+    };
+
+    connectionTabs = connectionTabs.map((t) =>
+      t.connectionId === connectionId
+        ? { ...t, queryTabs: [...t.queryTabs, newTab], activeQueryTabId: newTab.id }
+        : t
+    );
+  },
+
+  updateSchemaDdlState(connectionId: string, queryTabId: string, patch: Partial<SchemaDdlState>) {
+    connectionTabs = connectionTabs.map((ct) =>
+      ct.connectionId === connectionId
+        ? {
+            ...ct,
+            queryTabs: ct.queryTabs.map((qt) =>
+              qt.id === queryTabId && qt.schemaDdl
+                ? { ...qt, schemaDdl: { ...qt.schemaDdl, ...patch } }
                 : qt
             ),
           }
@@ -386,6 +446,7 @@ export const tabs = {
           label: qt.label,
           sql: qt.sql,
           ...(qt.tableBrowse ? { tableBrowse: { tableName: qt.tableBrowse.tableName, schema: qt.tableBrowse.schema, sort: qt.tableBrowse.sort, filters: qt.tableBrowse.filters } } : {}),
+          ...(qt.schemaDdl ? { schemaDdl: { tableName: qt.schemaDdl.tableName, schema: qt.schemaDdl.schema } } : {}),
         })),
       })),
     };
@@ -430,6 +491,16 @@ export const tabs = {
             offset: 0,
             error: null,
           } satisfies TableBrowseState,
+        } : {}),
+        ...(qt.schemaDdl ? {
+          schemaDdl: {
+            tableName: qt.schemaDdl.tableName,
+            schema: qt.schemaDdl.schema,
+            connectionId: ct.connectionId,
+            ddl: null,
+            isLoading: true,
+            error: null,
+          } satisfies SchemaDdlState,
         } : {}),
       })),
     }));

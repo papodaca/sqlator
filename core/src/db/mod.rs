@@ -307,6 +307,29 @@ impl DbManager {
         }
     }
 
+    pub async fn get_ddl(
+        &self,
+        connection_id: &str,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<String, CoreError> {
+        let pool = self.pools.get(connection_id)
+            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+            .clone();
+        match pool {
+            DatabasePool::Postgres(p) => postgres::get_ddl(&p, table_name, schema).await,
+            DatabasePool::MySql(p) => mysql::get_ddl(&p, table_name, schema).await,
+            DatabasePool::Sqlite(p) => sqlite::get_ddl(&p, table_name).await,
+            DatabasePool::Mssql(p) => mssql::get_ddl(&p, table_name, schema).await,
+            DatabasePool::Oracle(p) => oracle::get_ddl(&p, table_name, schema).await,
+            DatabasePool::ClickHouse(p) => clickhouse::get_ddl(&p, table_name, schema).await,
+            DatabasePool::Any(_) => Err(CoreError {
+                message: "DDL retrieval not supported for this connection type".into(),
+                code: "UNSUPPORTED".into(),
+            }),
+        }
+    }
+
     pub async fn execute_batch(
         &self,
         connection_id: &str,

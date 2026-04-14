@@ -8,10 +8,12 @@
     connectionId,
     isConnected = false,
     onopen,
+    onopenschema,
   }: {
     connectionId: string;
     isConnected?: boolean;
     onopen: (table: TableInfo) => void;
+    onopenschema: (table: TableInfo) => void;
   } = $props();
 
   const schemaState = $derived(schemaStore.getState(connectionId));
@@ -63,7 +65,7 @@
       onchange={handleSchemaChange}
     />
 
-    <SchemaTree {connectionId} onopen={onopen} />
+    <SchemaTree {connectionId} onopen={onopen} onopenschema={onopenschema} />
   {/if}
 </div>
 

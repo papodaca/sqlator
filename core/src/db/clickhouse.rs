@@ -456,6 +456,28 @@ fn build_order_by_clickhouse(sort: &[SortSpec], valid: &[&str]) -> String {
     if parts.is_empty() { String::new() } else { format!(" ORDER BY {}", parts.join(", ")) }
 }
 
+pub async fn get_ddl(pool: &ClickHousePool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+    let db = schema.unwrap_or(&pool.database);
+
+    let sql = format!(
+        "SHOW CREATE TABLE `{}`.`{}` FORMAT JSONCompact",
+        escape_backtick(db),
+        escape_backtick(table_name)
+    );
+
+    let result = send_query(pool, &sql).await?;
+    let data = result["data"].as_array().cloned().unwrap_or_default();
+
+    data.first()
+        .and_then(|row| row.as_array())
+        .and_then(|arr| arr.get(0))
+        .and_then(|v| v.as_str().map(String::from))
+        .ok_or_else(|| CoreError {
+            message: format!("No DDL returned for {}.{}", db, table_name),
+            code: "DDL_QUERY".into(),
+        })
+}
+
 fn escape_backtick(s: &str) -> String {
     s.replace('`', "\\`")
 }

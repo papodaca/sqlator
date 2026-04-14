@@ -1357,6 +1357,16 @@ pub async fn query_table(
     state.db.query_table(&connection_id, &params).await.map_err(map_err)
 }
 
+#[tauri::command]
+pub async fn get_ddl(
+    state: State<'_, AppState>,
+    connection_id: String,
+    table_name: String,
+    schema: Option<String>,
+) -> CmdResult<String> {
+    state.db.get_ddl(&connection_id, &table_name, schema.as_deref()).await.map_err(map_err)
+}
+
 // ── Batch Execute ─────────────────────────────────────────────────────────────
 
 #[tauri::command]

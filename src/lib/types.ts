@@ -85,6 +85,7 @@ export interface QueryTab {
   result: ResultPaneState;
   isExecuting: boolean;
   tableBrowse?: TableBrowseState;
+  schemaDdl?: SchemaDdlState;
 }
 
 export interface ConnectionTab {
@@ -265,6 +266,16 @@ export interface TableBrowseState {
   sort: SortSpec[];
   filters: FilterSpec[];
   offset: number;
+  error: string | null;
+}
+
+// Schema DDL tab state
+export interface SchemaDdlState {
+  tableName: string;
+  schema?: string;
+  connectionId: string;
+  ddl: string | null;
+  isLoading: boolean;
   error: string | null;
 }
 

@@ -320,6 +320,226 @@ pub async fn get_columns(
         .collect())
 }
 
+pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+    let schema = schema.unwrap_or("dbo");
+    let mut client = pool.lock().await;
+
+    let mut parts = Vec::new();
+
+    let col_rows = client
+        .query(
+            "SELECT c.name, tp.name AS data_type, c.is_nullable,
+                    c.max_length, c.precision, c.scale,
+                    dc.definition AS default_value,
+                    CASE WHEN c.is_identity = 1 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS is_identity
+             FROM sys.columns c
+             JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+             JOIN sys.tables t ON c.object_id = t.object_id
+             JOIN sys.schemas s ON t.schema_id = s.schema_id
+             LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+             WHERE t.name = @P1 AND s.name = @P2
+             ORDER BY c.column_id",
+            &[&table_name, &schema],
+        )
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+
+    if col_rows.is_empty() {
+        return Err(CoreError {
+            message: format!("Table {}.{} not found. It may have been dropped.", schema, table_name),
+            code: "TABLE_NOT_FOUND".into(),
+        });
+    }
+
+    for row in &col_rows {
+        let name: &str = row.try_get(0).ok().flatten().unwrap_or("unknown");
+        let data_type: &str = row.try_get(1).ok().flatten().unwrap_or("unknown");
+        let is_nullable: bool = row.try_get::<bool, _>(2).ok().flatten().unwrap_or(true);
+        let max_length: Option<i32> = row.try_get(3).ok().flatten();
+        let precision: Option<i32> = row.try_get(4).ok().flatten();
+        let scale: Option<i32> = row.try_get(5).ok().flatten();
+        let default_value: Option<String> = row.try_get::<&str, _>(6).ok().flatten().map(String::from);
+        let is_identity: bool = row.try_get::<bool, _>(7).ok().flatten().unwrap_or(false);
+
+        let full_type = resolve_mssql_type(data_type, max_length, precision, scale);
+
+        let mut col_def = format!("  [{}] {}", name.replace(']', "]]"), full_type);
+        if is_identity {
+            col_def.push_str(" IDENTITY");
+        }
+        if !is_nullable {
+            col_def.push_str(" NOT NULL");
+        }
+        if let Some(def) = &default_value {
+            col_def.push_str(&format!(" DEFAULT {}", def));
+        }
+        parts.push(col_def);
+    }
+
+    let pk_rows = client
+        .query(
+            "SELECT kc.name AS constraint_name, k.name AS column_name
+             FROM sys.key_constraints kc
+             JOIN sys.index_columns ic ON kc.parent_object_id = ic.object_id
+                 AND kc.unique_index_id = ic.index_id
+             JOIN sys.columns k ON ic.object_id = k.object_id AND ic.column_id = k.column_id
+             JOIN sys.schemas s ON kc.schema_id = s.schema_id
+             WHERE kc.type = 'PK' AND kc.parent_object_id = OBJECT_ID(@P1) AND s.name = @P2
+             ORDER BY kc.name, ic.key_ordinal",
+            &[&format!("{}.{}", schema, table_name), &schema],
+        )
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+
+    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for row in &pk_rows {
+        let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
+        let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
+        pk_by_constraint.entry(cname.to_string()).or_default().push(col.to_string());
+    }
+    for (cname, cols) in &pk_by_constraint {
+        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("[{}]", c.replace(']', "]]"))).collect();
+        parts.push(format!("  CONSTRAINT [{}] PRIMARY KEY ({})", cname.replace(']', "]]"), quoted_cols.join(", ")));
+    }
+
+    let fk_rows = client
+        .query(
+            "SELECT fk.name AS constraint_name,
+                    c.name AS column_name,
+                    rs.name AS ref_schema,
+                    rt.name AS ref_table,
+                    rc.name AS ref_column
+             FROM sys.foreign_key_columns fkc
+             JOIN sys.foreign_keys fk ON fkc.constraint_object_id = fk.object_id
+             JOIN sys.columns c ON fkc.parent_object_id = c.object_id
+                 AND fkc.parent_column_id = c.column_id
+             JOIN sys.tables t ON c.object_id = t.object_id
+             JOIN sys.schemas s ON t.schema_id = s.schema_id
+             JOIN sys.tables rt ON fkc.referenced_object_id = rt.object_id
+             JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+             JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id
+                 AND fkc.referenced_column_id = rc.column_id
+             WHERE t.name = @P1 AND s.name = @P2
+             ORDER BY fk.name, fkc.constraint_column_id",
+            &[&table_name, &schema],
+        )
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+
+    let mut fk_by_constraint: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> = std::collections::BTreeMap::new();
+    for row in &fk_rows {
+        let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
+        let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
+        let ref_schema: &str = row.try_get(2).ok().flatten().unwrap_or("");
+        let ref_table: &str = row.try_get(3).ok().flatten().unwrap_or("");
+        let ref_col: &str = row.try_get(4).ok().flatten().unwrap_or("");
+        fk_by_constraint.entry(cname.to_string()).or_default().push((col.to_string(), ref_schema.to_string(), ref_table.to_string(), ref_col.to_string()));
+    }
+    for (cname, refs) in &fk_by_constraint {
+        let from_cols: Vec<String> = refs.iter().map(|(c, _, _, _)| format!("[{}]", c.replace(']', "]]"))).collect();
+        let first = refs.first().unwrap();
+        let ref_qualified = format!("[{}].[{}]", first.1.replace(']', "]]"), first.2.replace(']', "]]"));
+        let to_cols: Vec<String> = refs.iter().map(|(_, _, _, c)| format!("[{}]", c.replace(']', "]]"))).collect();
+        parts.push(format!("  CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES {} ({})",
+            cname.replace(']', "]]"), from_cols.join(", "), ref_qualified, to_cols.join(", ")));
+    }
+
+    let uq_rows = client
+        .query(
+            "SELECT i.name AS index_name, c.name AS column_name
+             FROM sys.indexes i
+             JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+             JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+             JOIN sys.tables t ON i.object_id = t.object_id
+             JOIN sys.schemas s ON t.schema_id = s.schema_id
+             WHERE i.is_unique_constraint = 1 AND i.is_primary_key = 0
+                 AND t.name = @P1 AND s.name = @P2
+             ORDER BY i.name, ic.key_ordinal",
+            &[&table_name, &schema],
+        )
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+
+    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for row in &uq_rows {
+        let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
+        let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
+        uq_by_constraint.entry(cname.to_string()).or_default().push(col.to_string());
+    }
+    for (cname, cols) in &uq_by_constraint {
+        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("[{}]", c.replace(']', "]]"))).collect();
+        parts.push(format!("  CONSTRAINT [{}] UNIQUE ({})", cname.replace(']', "]]"), quoted_cols.join(", ")));
+    }
+
+    let ck_rows = client
+        .query(
+            "SELECT cc.name AS constraint_name, cc.definition
+             FROM sys.check_constraints cc
+             JOIN sys.tables t ON cc.parent_object_id = t.object_id
+             JOIN sys.schemas s ON t.schema_id = s.schema_id
+             WHERE t.name = @P1 AND s.name = @P2
+             ORDER BY cc.name",
+            &[&table_name, &schema],
+        )
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .into_first_result()
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+
+    for row in &ck_rows {
+        let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
+        let check_clause: &str = row.try_get(1).ok().flatten().unwrap_or("");
+        parts.push(format!("  CONSTRAINT [{}] CHECK ({})", cname.replace(']', "]]"), check_clause));
+    }
+
+    let table_quoted = format!("[{}].[{}]", schema.replace(']', "]]"), table_name.replace(']', "]]"));
+    Ok(format!("CREATE TABLE {} (\n{}\n);", table_quoted, parts.join(",\n")))
+}
+
+fn resolve_mssql_type(data_type: &str, max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> String {
+    let lower = data_type.to_lowercase();
+    match lower.as_str() {
+        "varchar" | "nvarchar" => {
+            let len = max_length.unwrap_or(0);
+            if len == -1 { format!("{}(MAX)", lower) }
+            else if lower == "nvarchar" { format!("nvarchar({})", len / 2) }
+            else { format!("varchar({})", len) }
+        }
+        "char" | "nchar" => {
+            let len = max_length.unwrap_or(1);
+            if lower == "nchar" { format!("nchar({})", len / 2) }
+            else { format!("char({})", len) }
+        }
+        "decimal" | "numeric" => match (precision, scale) {
+            (Some(p), Some(s)) => format!("{}({}, {})", lower, p, s),
+            (Some(p), None) => format!("{}({})", lower, p),
+            _ => lower,
+        },
+        "float" | "real" => {
+            if let Some(p) = precision { format!("float({})", p) } else { lower }
+        }
+        "varbinary" | "binary" => {
+            let len = max_length.unwrap_or(0);
+            if len == -1 { format!("{}(MAX)", lower) }
+            else { format!("{}({})", lower, len) }
+        }
+        _ => lower,
+    }
+}
+
 fn map_mssql_type(type_name: &str) -> String {
     match type_name.to_lowercase().as_str() {
         "int" => "integer",

@@ -67,6 +67,7 @@ pub fn run() {
             commands::get_tables,
             commands::get_columns,
             commands::query_table,
+            commands::get_ddl,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ContextMenu, { type ContextMenuItem } from "./ContextMenu.svelte";
   import type { TableInfo, SchemaColumnInfo } from "$lib/types";
 
   let {
@@ -8,6 +9,7 @@
     isLoadingColumns = false,
     onexpand,
     onopen,
+    onopenschema,
   }: {
     table: TableInfo;
     columns: SchemaColumnInfo[] | null;
@@ -15,7 +17,15 @@
     isLoadingColumns?: boolean;
     onexpand: (table: TableInfo) => void;
     onopen: (table: TableInfo) => void;
+    onopenschema: (table: TableInfo) => void;
   } = $props();
+
+  let contextMenu = $state<{ x: number; y: number } | null>(null);
+
+  const contextItems = $derived<ContextMenuItem[]>([
+    { label: table.tableType === "view" ? "Open View Data" : "Open Table", action: "open-table" },
+    { label: "Open Schema", action: "open-schema" },
+  ]);
 
   function handleToggle() {
     onexpand(table);
@@ -24,6 +34,17 @@
   function handleDblClick(e: MouseEvent) {
     e.preventDefault();
     onopen(table);
+  }
+
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY };
+  }
+
+  function handleContextSelect(action: string) {
+    if (action === "open-table") onopen(table);
+    if (action === "open-schema") onopenschema(table);
+    contextMenu = null;
   }
 
   function typeLabel(t: SchemaColumnInfo): string {
@@ -37,13 +58,14 @@
     class:expanded={isExpanded}
     onclick={handleToggle}
     ondblclick={handleDblClick}
+    oncontextmenu={handleContextMenu}
     title="Single-click to expand, double-click to open table"
   >
     <span class="toggle-icon">
       {#if isLoadingColumns}
         <span class="spinner-sm"></span>
       {:else}
-        <span class="chevron" class:open={isExpanded}>▶</span>
+        <span class="chevron" class:open={isExpanded}>&#9654;</span>
       {/if}
     </span>
     <span class="table-icon">{table.tableType === "view" ? "◫" : "⊞"}</span>
@@ -55,8 +77,8 @@
       {#each columns as col (col.name)}
         <li class="column-row" title={col.isForeignKey ? `→ ${col.foreignTable}.${col.foreignColumn}` : ""}>
           <span class="col-icons">
-            {#if col.isPrimaryKey}<span class="icon-pk" title="Primary key">🔑</span>{/if}
-            {#if col.isForeignKey}<span class="icon-fk" title="Foreign key → {col.foreignTable}">🔗</span>{/if}
+            {#if col.isPrimaryKey}<span class="icon-pk" title="Primary key">&#128273;</span>{/if}
+            {#if col.isForeignKey}<span class="icon-fk" title="Foreign key → {col.foreignTable}">&#128279;</span>{/if}
             {#if !col.isPrimaryKey && !col.isForeignKey}<span class="icon-col">○</span>{/if}
           </span>
           <span class="col-name">{col.name}</span>
@@ -67,6 +89,16 @@
     </ul>
   {:else if isExpanded && !columns && !isLoadingColumns}
     <p class="no-columns">No columns found</p>
+  {/if}
+
+  {#if contextMenu}
+    <ContextMenu
+      x={contextMenu.x}
+      y={contextMenu.y}
+      items={contextItems}
+      onselect={handleContextSelect}
+      onclose={() => contextMenu = null}
+    />
   {/if}
 </div>
 

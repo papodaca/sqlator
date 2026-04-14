@@ -58,6 +58,30 @@ pub async fn execute_select(
     Ok(())
 }
 
+pub async fn get_ddl(pool: &SqlitePool, table_name: &str) -> Result<String, CoreError> {
+    let safe_name = table_name.replace('"', "\"\"");
+    let sql = format!("SELECT sql FROM sqlite_master WHERE name = \"{}\"", safe_name);
+    let row = sqlx::query(&sql)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    let raw = row.try_get::<String, _>("sql").unwrap_or_default();
+    let mut result = String::with_capacity(raw.len());
+    let mut prev_newline = false;
+    for ch in raw.chars() {
+        if ch == '\n' {
+            if prev_newline {
+                continue;
+            }
+            prev_newline = true;
+        } else {
+            prev_newline = false;
+        }
+        result.push(ch);
+    }
+    Ok(result)
+}
+
 pub(super) fn sqlite_row_to_json(row: &SqliteRow, index: usize) -> serde_json::Value {
     if let Ok(v) = row.try_get::<Option<String>, _>(index) {
         return match v {
