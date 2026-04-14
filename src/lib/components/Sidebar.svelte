@@ -22,6 +22,7 @@
   let newGroupName = $state("");
   let showImport = $state(false);
   let showDockerWizard = $state(false);
+  let showTypePicker = $state(false);
   let exportedPath = $state<string | null>(null);
   let showHeaderMenu = $state(false);
 
@@ -42,10 +43,25 @@
     groups.load();
 
     // Allow TabbedEditor's "+" button to open this form
-    function handleOpenForm() { openNewForm(); }
+    function handleOpenForm() { openTypePicker(); }
     window.addEventListener("sqlator:open-connection-form", handleOpenForm);
     return () => window.removeEventListener("sqlator:open-connection-form", handleOpenForm);
   });
+
+  function openTypePicker() {
+    showTypePicker = true;
+  }
+
+  function pickDirect() {
+    showTypePicker = false;
+    editingConnection = null;
+    showForm = true;
+  }
+
+  function pickDocker() {
+    showTypePicker = false;
+    showDockerWizard = true;
+  }
 
   function openNewForm() {
     editingConnection = null;
@@ -133,7 +149,7 @@
       <span class="sidebar-title">Connections</span>
       <div class="sidebar-actions">
         <ThemeToggle />
-        <button class="icon-btn" onclick={openNewForm} title="Add connection">
+        <button class="icon-btn" onclick={openTypePicker} title="Add connection">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -152,16 +168,6 @@
           </button>
           {#if showHeaderMenu}
             <div class="header-menu" role="menu">
-              <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); showDockerWizard = true; showHeaderMenu = false; }}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="11" width="4" height="4" rx="1"/><rect x="9" y="11" width="4" height="4" rx="1"/>
-                  <rect x="15" y="11" width="4" height="4" rx="1"/><rect x="6" y="7" width="4" height="4" rx="1"/>
-                  <rect x="12" y="7" width="4" height="4" rx="1"/><path d="M6 7V5a1 1 0 0 1 1-1h2"/>
-                  <path d="M13 7V5a1 1 0 0 0-1-1h-2"/><path d="M3 11V9a1 1 0 0 1 1-1h1"/>
-                  <path d="M20 11V9a1 1 0 0 0-1-1h-1"/><path d="M19 15v2a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-2"/>
-                </svg>
-                Docker container connection
-              </button>
               <button class="header-menu-item" role="menuitem" onclick={(e) => { e.stopPropagation(); creatingGroup = true; showHeaderMenu = false; }}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -218,7 +224,7 @@
       {#if connections.list.length === 0 && groups.list.length === 0}
         <div class="empty-list">
           <p>No connections yet</p>
-          <button class="add-first-btn" onclick={openNewForm}>
+          <button class="add-first-btn" onclick={openTypePicker}>
             Add your first connection
           </button>
         </div>
@@ -265,6 +271,36 @@
     />
   {/if}
 </aside>
+
+{#if showTypePicker}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (showTypePicker = false)}>
+    <div class="type-picker" onclick={(e) => e.stopPropagation()}>
+      <h2 class="type-picker-title">New Connection</h2>
+      <div class="type-picker-options">
+        <button class="type-option" onclick={pickDirect}>
+          <svg class="type-option-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+          </svg>
+          <span class="type-option-name">Direct connection</span>
+          <span class="type-option-desc">Connect to a database by URL or host/port</span>
+        </button>
+        <button class="type-option" onclick={pickDocker}>
+          <svg class="type-option-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="4" height="4" rx="1"/><rect x="9" y="11" width="4" height="4" rx="1"/>
+            <rect x="15" y="11" width="4" height="4" rx="1"/><rect x="6" y="7" width="4" height="4" rx="1"/>
+            <rect x="12" y="7" width="4" height="4" rx="1"/><path d="M6 7V5a1 1 0 0 1 1-1h2"/>
+            <path d="M13 7V5a1 1 0 0 0-1-1h-2"/><path d="M3 11V9a1 1 0 0 1 1-1h1"/>
+            <path d="M20 11V9a1 1 0 0 0-1-1h-1"/><path d="M19 15v2a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-2"/>
+          </svg>
+          <span class="type-option-name">Docker container</span>
+          <span class="type-option-desc">Connect to a database inside a container</span>
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if showForm}
   <ConnectionForm editing={editingConnection} onclose={closeForm} />
@@ -480,5 +516,80 @@
 
   .open-btn:hover {
     background: color-mix(in oklab, var(--color-accent) 15%, transparent);
+  }
+
+  /* Connection type picker */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  .type-picker {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 24px;
+    width: 400px;
+    max-width: 90vw;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .type-picker-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .type-picker-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .type-option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 16px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background-color 0.15s;
+  }
+
+  .type-option:hover {
+    border-color: var(--color-accent);
+    background: color-mix(in oklch, var(--color-accent) 6%, var(--color-bg));
+  }
+
+  .type-option-icon {
+    color: var(--color-text-muted);
+    margin-bottom: 4px;
+  }
+
+  .type-option:hover .type-option-icon {
+    color: var(--color-accent);
+  }
+
+  .type-option-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .type-option-desc {
+    font-size: 12px;
+    color: var(--color-text-muted);
   }
 </style>
