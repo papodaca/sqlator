@@ -1,0 +1,22 @@
+  7. Query Snippets / Templates
+  A library of named, reusable SQL snippets that can be inserted into the editor. Pairs well with saved queries.
+
+  9. Database Monitoring Panel
+  Live view of active connections, running queries, locks, and table sizes — driven by pg_stat_activity, information_schema, etc. Each DB gets its own queries. Useful for
+  DBAs and anyone debugging slow production queries.
+
+  10. Multi-Result Set Execution
+  Run a script with multiple ;-separated statements and show each result in a stacked or tabbed sub-panel. Right now a script only shows the last result.
+
+  11. Named Query Parameters
+  :userId or $1-style placeholders that pop up an input form before execution. Run the same query with different values without editing SQL.
+
+  12. Schema Diff
+  Pick two connections (or two schemas on the same server) and see a side-by-side diff of tables, columns, types, and indexes — with a generated migration script to bring
+  one in sync with the other.
+
+  14. Table Data Comparison
+  Side-by-side diff of the same table across two connections. Highlight rows that exist in one but not the other, or where values diverge on matching PKs.
+
+  16. Connection Health Dashboard
+  Per-connection ping latency, uptime, current pool size, and last error. Shown as a small status screen, not a full monitoring panel. Low complexity.
