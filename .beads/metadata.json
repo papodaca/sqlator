@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "sqlator",
+  "project_id": "0004483d-b88f-4872-849f-05d124ac1a14"
+}
