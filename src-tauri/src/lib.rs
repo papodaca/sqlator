@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod terminal;
 
 use state::AppState;
 
@@ -74,6 +75,10 @@ pub fn run() {
             commands::discover_local_container,
             commands::list_local_containers,
             commands::test_local_docker_connection,
+            terminal::spawn_db_terminal,
+            terminal::send_terminal_input,
+            terminal::resize_terminal,
+            terminal::close_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

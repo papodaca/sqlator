@@ -8,6 +8,7 @@
   import { connections } from "$lib/stores/connections.svelte";
   import { tabs } from "$lib/stores/tabs.svelte";
   import { serverMode } from "$lib/stores/server-mode.svelte";
+  import { terminalStore } from "$lib/stores/terminal.svelte";
 
   // aria-live announcement text
   let announcement = $state("");
@@ -59,6 +60,12 @@
   function handleKeydown(e: KeyboardEvent) {
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
+
+    if (e.key === "`") {
+      e.preventDefault();
+      terminalStore.toggle();
+      return;
+    }
 
     if (e.key === "t" && !e.shiftKey) {
       const id = tabs.activeConnectionId;

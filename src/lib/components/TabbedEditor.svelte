@@ -3,6 +3,7 @@
   import { tabs } from "$lib/stores/tabs.svelte";
   import { connections } from "$lib/stores/connections.svelte";
   import { serverMode } from "$lib/stores/server-mode.svelte";
+  import { terminalStore } from "$lib/stores/terminal.svelte";
   import ConnectionTabBar from "./ConnectionTabBar.svelte";
   import QueryTabBar from "./QueryTabBar.svelte";
   import SqlEditor from "./SqlEditor.svelte";
@@ -10,6 +11,7 @@
   import EditorToolbar from "./EditorToolbar.svelte";
   import EnhancedGrid from "./EnhancedGrid.svelte";
   import SchemaDdlViewer from "./SchemaDdlViewer.svelte";
+  import TerminalPanel from "./TerminalPanel.svelte";
   import type { TableBrowseState } from "$lib/types";
 
   // Expose a way for the sidebar to open the connection form
@@ -156,6 +158,13 @@
           </div>
         {/if}
       </div>
+
+      {#if terminalStore.show && activeConnectionTab.status === "connected"}
+        <TerminalPanel
+          connectionId={activeConnectionTab.connectionId}
+          dbType={connections.list.find((c) => c.id === activeConnectionTab.connectionId)?.db_type ?? "postgres"}
+        />
+      {/if}
     {/if}
   {:else}
     <div class="welcome">

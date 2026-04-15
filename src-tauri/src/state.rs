@@ -1,3 +1,4 @@
+use crate::terminal::PtyHandle;
 use dashmap::DashMap;
 use sqlator_core::config::ConfigManager;
 use sqlator_core::credentials::{CredentialStore, StorageMode};
@@ -14,6 +15,7 @@ pub struct AppState {
     pub credentials: Arc<CredentialStore>,
     /// Cache: key = "connection_id:schema:table_name" → (TableMeta, expiry)
     pub schema_cache: DashMap<String, (TableMeta, Instant)>,
+    pub terminals: DashMap<String, PtyHandle>,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             tunnels: DashMap::new(),
             credentials,
             schema_cache: DashMap::new(),
+            terminals: DashMap::new(),
         })
     }
 }
