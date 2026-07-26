@@ -82,3 +82,55 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Conventions & Patterns
+
+### Temporary scratch folder
+
+If you need temp scratch folder for testing or gounding work/plans in how tools or programming packages actually work, use the tmp folder in this projects root directory.
+
+### Async Rust: Never hold a mutex across `.await`
+
+`Arc<Mutex<T>>` shared between async tasks is a deadlock risk. If one task holds the lock across a long-running `.await` (e.g., `ch.wait()`, I/O reads), other tasks needing the same lock will block forever.
+
+**Use instead:** Single-owner + `tokio::select!` + `mpsc` channels. One task owns the resource exclusively; others communicate via message passing.
+
+```rust
+// AVOID: shared mutex across async tasks
+let channel = Arc::new(Mutex::new(channel));
+
+// PREFER: single owner with select! + mpsc
+let (to_ssh_tx, mut to_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+let (from_ssh_tx, mut from_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+
+tokio::spawn(async move {
+    let mut channel = channel;
+    loop {
+        tokio::select! {
+            msg = to_ssh_rx.recv() => { /* send to channel */ }
+            msg = channel.wait() => { /* receive from channel */ }
+        }
+    }
+});
+```
+
+**Enforce:** Enable `clippy::await_holding_lock` lint in CI. See `docs/solutions/runtime-errors/ssh-tunnel-mutex-deadlock.md` for full analysis.
+
+### Bidirectional I/O: Use `tokio::select!` as the default
+
+When bridging two async streams (SSH tunnel, TCP proxy, WebSocket bridge), `select!` with exclusive ownership is the canonical pattern. Avoid `Arc<Mutex<...Channel/Stream/Socket...>>` — it's a design error for bidirectional I/O.
+
+### SSH Tunneling
+
+SSH tunnels are managed via `core/src/ssh/tunnel.rs`. Key points:
+- `forward_stream` uses the `select!` + mpsc pattern (see above)
+- Tunnels auto-create on `connect_database` when `ssh_profile_id` is set
+- `proxy_jump` is wired up for multi-hop SSH
+- Enable debug tracing: `RUST_LOG=sqlator_core::ssh=debug`
+
+## Solved Problems
+
+Documented solutions live in `docs/solutions/`. Check these before investigating similar issues:
+
+- **SSH tunnel mutex deadlock** → `docs/solutions/runtime-errors/ssh-tunnel-mutex-deadlock.md`
+  - `Arc<Mutex<Channel>>` caused deadlock; fixed with `select!` + mpsc

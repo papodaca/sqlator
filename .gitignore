@@ -7,6 +7,7 @@ node_modules
 *.swo
 .worktrees
 .claude
+tmp
 
 # Beads / Dolt files (added by bd init)
 .dolt/
