@@ -9,10 +9,27 @@ pub async fn execute_select(
     sql: &str,
     sender: tokio::sync::mpsc::Sender<QueryEvent>,
     start: Instant,
+    mut register_backend: Option<&mut (dyn FnMut(u64) + Send)>,
 ) -> Result<(), CoreError> {
     use futures::StreamExt;
 
-    let mut stream = sqlx::query(sql).fetch(pool);
+    let mut conn = pool.acquire().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "ACQUIRE".into(),
+    })?;
+
+    let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_ID".into(),
+        })?;
+    if let Some(reg) = register_backend.as_mut() {
+        reg(id);
+    }
+
+    let mut stream = sqlx::query(sql).fetch(&mut *conn);
     let mut row_count: usize = 0;
     let mut columns_sent = false;
     let max_rows: usize = 1000;
@@ -21,11 +38,8 @@ pub async fn execute_select(
         match result {
             Ok(row) => {
                 if !columns_sent {
-                    let names: Vec<String> = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
                     let _ = sender.send(QueryEvent::Columns { names }).await;
                     columns_sent = true;
                 }
@@ -42,7 +56,11 @@ pub async fn execute_select(
                 row_count += 1;
             }
             Err(e) => {
-                let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+                let _ = sender
+                    .send(QueryEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return Ok(());
             }
         }
@@ -58,17 +76,29 @@ pub async fn execute_select(
     Ok(())
 }
 
-pub async fn get_ddl(pool: &MySqlPool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+pub async fn get_ddl(
+    pool: &MySqlPool,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, CoreError> {
     let qualified = match schema {
-        Some(s) => format!("`{}`.`{}`", s.replace('`', "``"), table_name.replace('`', "``")),
+        Some(s) => format!(
+            "`{}`.`{}`",
+            s.replace('`', "``"),
+            table_name.replace('`', "``")
+        ),
         None => format!("`{}`", table_name.replace('`', "``")),
     };
     let sql = format!("SHOW CREATE TABLE {}", qualified);
     let row = sqlx::query(&sql)
         .fetch_one(pool)
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
-    Ok(row.try_get::<String, _>("Create Table")
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
+    Ok(row
+        .try_get::<String, _>("Create Table")
         .or_else(|_| row.try_get::<String, _>(1))
         .unwrap_or_default())
 }

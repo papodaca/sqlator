@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "service", "src-tauri", "tui-app", "web-server"]
+members = ["core", "service", "src-tauri", "tui-app", "web-server", "gtk"]
 resolver = "2"
 
 [workspace.lints.clippy]

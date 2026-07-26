@@ -7,8 +7,10 @@ mod postgres;
 mod sqlite;
 
 use crate::error::CoreError;
-use crate::models::{BatchResult, BatchError, ColumnMeta, PrimaryKeyMeta, QueryEvent, SqlBatch, TableMeta,
-    SchemaInfo, TableInfo, SchemaColumnInfo, FilterSpec, SortSpec, TableQueryParams, TableQueryResult};
+use crate::models::{
+    BatchError, BatchResult, ColumnMeta, FilterSpec, PrimaryKeyMeta, QueryEvent, SchemaColumnInfo,
+    SchemaInfo, SortSpec, SqlBatch, TableInfo, TableMeta, TableQueryParams, TableQueryResult,
+};
 use dashmap::DashMap;
 use sqlx::{AnyPool, MySqlPool, PgPool, Row, SqlitePool};
 use std::collections::HashMap;
@@ -35,8 +37,17 @@ pub enum DatabasePool {
     ClickHouse(clickhouse::ClickHousePool),
 }
 
+/// Server-side cancel target for an in-flight query (sqlator-9g1.4).
+#[derive(Debug, Clone, Copy)]
+enum BackendCancelId {
+    Postgres(i32),
+    MySql(u64),
+}
+
 pub struct DbManager {
     pools: DashMap<String, DatabasePool>,
+    /// Latest backend id per connection for [`Self::cancel_query`].
+    active_backends: DashMap<String, BackendCancelId>,
 }
 
 impl DbManager {
@@ -44,19 +55,58 @@ impl DbManager {
         sqlx::any::install_default_drivers();
         Self {
             pools: DashMap::new(),
+            active_backends: DashMap::new(),
         }
     }
 
+    /// Best-effort server-side cancel of the latest query on `connection_id`.
+    ///
+    /// PostgreSQL: `pg_cancel_backend`. MySQL/MariaDB: `KILL QUERY`. Other
+    /// engines: no-op (client-side cancel still drops the waiting future).
+    ///
+    /// Uses a separate pool checkout so cancel does not wait on the query's
+    /// connection (requires pool `max_connections` ≥ 2 — the default).
+    pub async fn cancel_query(&self, connection_id: &str) -> Result<(), CoreError> {
+        let Some(backend) = self.active_backends.get(connection_id).map(|v| *v) else {
+            return Ok(());
+        };
+        let Some(pool) = self.pools.get(connection_id).map(|p| p.clone()) else {
+            return Ok(());
+        };
+        match (backend, pool) {
+            (BackendCancelId::Postgres(pid), DatabasePool::Postgres(p)) => {
+                sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .execute(&p)
+                    .await
+                    .map_err(|e| CoreError {
+                        message: format!("pg_cancel_backend failed: {e}"),
+                        code: "CANCEL_FAILED".into(),
+                    })?;
+            }
+            (BackendCancelId::MySql(id), DatabasePool::MySql(p)) => {
+                // CONNECTION_ID() is a server-assigned integer; safe to embed.
+                sqlx::query(&format!("KILL QUERY {id}"))
+                    .execute(&p)
+                    .await
+                    .map_err(|e| CoreError {
+                        message: format!("KILL QUERY failed: {e}"),
+                        code: "CANCEL_FAILED".into(),
+                    })?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub async fn test_connection(url: &str) -> Result<String, CoreError> {
-        let pool = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            create_pool_for_url(url),
-        )
-        .await
-        .map_err(|_| CoreError {
-            message: "Connection timed out after 5 seconds".into(),
-            code: "TIMEOUT".into(),
-        })??;
+        let pool =
+            tokio::time::timeout(std::time::Duration::from_secs(5), create_pool_for_url(url))
+                .await
+                .map_err(|_| CoreError {
+                    message: "Connection timed out after 5 seconds".into(),
+                    code: "TIMEOUT".into(),
+                })??;
 
         close_pool(pool).await;
         Ok("Connected successfully".to_string())
@@ -67,21 +117,20 @@ impl DbManager {
             close_pool(old_pool).await;
         }
 
-        let pool = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            create_pool_for_url(url),
-        )
-        .await
-        .map_err(|_| CoreError {
-            message: "Connection timed out after 5 seconds".into(),
-            code: "TIMEOUT".into(),
-        })??;
+        let pool =
+            tokio::time::timeout(std::time::Duration::from_secs(5), create_pool_for_url(url))
+                .await
+                .map_err(|_| CoreError {
+                    message: "Connection timed out after 5 seconds".into(),
+                    code: "TIMEOUT".into(),
+                })??;
 
         self.pools.insert(connection_id.to_string(), pool);
         Ok(())
     }
 
     pub async fn disconnect(&self, connection_id: &str) {
+        self.active_backends.remove(connection_id);
         if let Some((_, pool)) = self.pools.remove(connection_id) {
             close_pool(pool).await;
         }
@@ -122,19 +171,29 @@ impl DbManager {
             })
             .unwrap_or(false);
 
-        match pool {
+        let result = match pool {
             DatabasePool::Postgres(p) => {
+                let mut register = |pid: i32| {
+                    self.active_backends
+                        .insert(connection_id.to_string(), BackendCancelId::Postgres(pid));
+                };
                 if is_select {
-                    postgres::execute_select(&p, sql_trimmed, sender, start).await
+                    postgres::execute_select(&p, sql_trimmed, sender, start, Some(&mut register))
+                        .await
                 } else {
-                    execute_statement_pg(&p, sql_trimmed, sender, start).await
+                    execute_statement_pg(&p, sql_trimmed, sender, start, Some(&mut register)).await
                 }
             }
             DatabasePool::MySql(p) => {
+                let mut register = |id: u64| {
+                    self.active_backends
+                        .insert(connection_id.to_string(), BackendCancelId::MySql(id));
+                };
                 if is_select {
-                    mysql::execute_select(&p, sql_trimmed, sender, start).await
+                    mysql::execute_select(&p, sql_trimmed, sender, start, Some(&mut register)).await
                 } else {
-                    execute_statement_mysql(&p, sql_trimmed, sender, start).await
+                    execute_statement_mysql(&p, sql_trimmed, sender, start, Some(&mut register))
+                        .await
                 }
             }
             DatabasePool::Sqlite(p) => {
@@ -172,7 +231,9 @@ impl DbManager {
                     clickhouse::execute_statement(&p, sql_trimmed, sender, start).await
                 }
             }
-        }
+        };
+        self.active_backends.remove(connection_id);
+        result
     }
 
     pub async fn fetch_schema_metadata(
@@ -184,7 +245,10 @@ impl DbManager {
         let pool = self
             .pools
             .get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
 
         match pool {
@@ -201,17 +265,22 @@ impl DbManager {
         }
     }
 
-    pub async fn get_schemas(
-        &self,
-        connection_id: &str,
-    ) -> Result<Vec<SchemaInfo>, CoreError> {
-        let pool = self.pools.get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+    pub async fn get_schemas(&self, connection_id: &str) -> Result<Vec<SchemaInfo>, CoreError> {
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
         match pool {
             DatabasePool::Postgres(p) => get_schemas_postgres(&p).await,
             DatabasePool::MySql(p) => get_schemas_mysql(&p).await,
-            DatabasePool::Sqlite(_) => Ok(vec![SchemaInfo { name: "main".into(), is_default: true }]),
+            DatabasePool::Sqlite(_) => Ok(vec![SchemaInfo {
+                name: "main".into(),
+                is_default: true,
+            }]),
             DatabasePool::Mssql(p) => mssql::get_schemas(&p).await,
             DatabasePool::Oracle(p) => oracle::get_schemas(&p).await,
             DatabasePool::ClickHouse(p) => clickhouse::get_schemas(&p).await,
@@ -227,8 +296,13 @@ impl DbManager {
         connection_id: &str,
         schema: Option<&str>,
     ) -> Result<Vec<TableInfo>, CoreError> {
-        let pool = self.pools.get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
         match pool {
             DatabasePool::Postgres(p) => get_tables_postgres(&p, schema).await,
@@ -250,8 +324,13 @@ impl DbManager {
         table_name: &str,
         schema: Option<&str>,
     ) -> Result<Vec<SchemaColumnInfo>, CoreError> {
-        let pool = self.pools.get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
         match pool {
             DatabasePool::Postgres(p) => get_columns_postgres(&p, table_name, schema).await,
@@ -272,18 +351,31 @@ impl DbManager {
         connection_id: &str,
         params: &TableQueryParams,
     ) -> Result<TableQueryResult, CoreError> {
-        let pool = self.pools.get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
 
         // First fetch column info so we can validate sort/filter column names
         let columns_info = match &pool {
-            DatabasePool::Postgres(p) => get_columns_postgres(p, &params.table_name, params.schema.as_deref()).await?,
+            DatabasePool::Postgres(p) => {
+                get_columns_postgres(p, &params.table_name, params.schema.as_deref()).await?
+            }
             DatabasePool::MySql(p) => get_columns_mysql(p, &params.table_name).await?,
             DatabasePool::Sqlite(p) => get_columns_sqlite(p, &params.table_name).await?,
-            DatabasePool::Mssql(p) => mssql::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
-            DatabasePool::ClickHouse(p) => clickhouse::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
-            DatabasePool::Oracle(p) => oracle::get_columns(p, &params.table_name, params.schema.as_deref()).await?,
+            DatabasePool::Mssql(p) => {
+                mssql::get_columns(p, &params.table_name, params.schema.as_deref()).await?
+            }
+            DatabasePool::ClickHouse(p) => {
+                clickhouse::get_columns(p, &params.table_name, params.schema.as_deref()).await?
+            }
+            DatabasePool::Oracle(p) => {
+                oracle::get_columns(p, &params.table_name, params.schema.as_deref()).await?
+            }
             DatabasePool::Any(_) => {
                 return Err(CoreError {
                     message: "Table query not supported for this connection type".into(),
@@ -297,12 +389,24 @@ impl DbManager {
         let col_types: Vec<String> = columns_info.iter().map(|c| c.data_type.clone()).collect();
 
         match pool {
-            DatabasePool::Postgres(p) => query_table_postgres(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::MySql(p) => query_table_mysql(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::Sqlite(p) => query_table_sqlite(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::Mssql(p) => mssql::query_table(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::ClickHouse(p) => clickhouse::query_table(&p, params, &valid_columns, col_names, col_types).await,
-            DatabasePool::Oracle(p) => oracle::query_table(&p, params, &valid_columns, col_names, col_types).await,
+            DatabasePool::Postgres(p) => {
+                query_table_postgres(&p, params, &valid_columns, col_names, col_types).await
+            }
+            DatabasePool::MySql(p) => {
+                query_table_mysql(&p, params, &valid_columns, col_names, col_types).await
+            }
+            DatabasePool::Sqlite(p) => {
+                query_table_sqlite(&p, params, &valid_columns, col_names, col_types).await
+            }
+            DatabasePool::Mssql(p) => {
+                mssql::query_table(&p, params, &valid_columns, col_names, col_types).await
+            }
+            DatabasePool::ClickHouse(p) => {
+                clickhouse::query_table(&p, params, &valid_columns, col_names, col_types).await
+            }
+            DatabasePool::Oracle(p) => {
+                oracle::query_table(&p, params, &valid_columns, col_names, col_types).await
+            }
             DatabasePool::Any(_) => unreachable!(),
         }
     }
@@ -313,8 +417,13 @@ impl DbManager {
         table_name: &str,
         schema: Option<&str>,
     ) -> Result<String, CoreError> {
-        let pool = self.pools.get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
         match pool {
             DatabasePool::Postgres(p) => postgres::get_ddl(&p, table_name, schema).await,
@@ -338,7 +447,10 @@ impl DbManager {
         let pool = self
             .pools
             .get(connection_id)
-            .ok_or_else(|| CoreError { message: "Not connected".into(), code: "NO_CONNECTION".into() })?
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
             .clone();
 
         match pool {
@@ -431,8 +543,25 @@ async fn execute_statement_pg(
     sql: &str,
     sender: tokio::sync::mpsc::Sender<QueryEvent>,
     start: Instant,
+    mut register_backend: Option<&mut (dyn FnMut(i32) + Send)>,
 ) -> Result<(), CoreError> {
-    match sqlx::query(sql).execute(pool).await {
+    let mut conn = pool.acquire().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "ACQUIRE".into(),
+    })?;
+
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "BACKEND_PID".into(),
+        })?;
+    if let Some(reg) = register_backend.as_mut() {
+        reg(pid);
+    }
+
+    match sqlx::query(sql).execute(&mut *conn).await {
         Ok(result) => {
             let duration_ms = start.elapsed().as_millis() as u64;
             let _ = sender
@@ -443,7 +572,11 @@ async fn execute_statement_pg(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())
@@ -454,8 +587,25 @@ async fn execute_statement_mysql(
     sql: &str,
     sender: tokio::sync::mpsc::Sender<QueryEvent>,
     start: Instant,
+    mut register_backend: Option<&mut (dyn FnMut(u64) + Send)>,
 ) -> Result<(), CoreError> {
-    match sqlx::query(sql).execute(pool).await {
+    let mut conn = pool.acquire().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "ACQUIRE".into(),
+    })?;
+
+    let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_ID".into(),
+        })?;
+    if let Some(reg) = register_backend.as_mut() {
+        reg(id);
+    }
+
+    match sqlx::query(sql).execute(&mut *conn).await {
         Ok(result) => {
             let duration_ms = start.elapsed().as_millis() as u64;
             let _ = sender
@@ -466,7 +616,11 @@ async fn execute_statement_mysql(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())
@@ -489,7 +643,11 @@ async fn execute_statement_sqlite(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())
@@ -510,10 +668,13 @@ async fn get_schemas_postgres(pool: &PgPool) -> Result<Vec<SchemaInfo>, CoreErro
     .await
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
-    Ok(rows.iter().map(|r| SchemaInfo {
-        name: r.get("schema_name"),
-        is_default: r.try_get::<bool, _>("is_default").unwrap_or(false),
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| SchemaInfo {
+            name: r.get("schema_name"),
+            is_default: r.try_get::<bool, _>("is_default").unwrap_or(false),
+        })
+        .collect())
 }
 
 async fn get_schemas_mysql(pool: &MySqlPool) -> Result<Vec<SchemaInfo>, CoreError> {
@@ -528,15 +689,27 @@ async fn get_schemas_mysql(pool: &MySqlPool) -> Result<Vec<SchemaInfo>, CoreErro
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
-    Ok(rows.iter().map(|r| SchemaInfo {
-        name: r.get("schema_name"),
-        is_default: r.try_get::<i64, _>("is_default").map(|v| v != 0).unwrap_or(false),
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| SchemaInfo {
+            name: r.get("schema_name"),
+            is_default: r
+                .try_get::<i64, _>("is_default")
+                .map(|v| v != 0)
+                .unwrap_or(false),
+        })
+        .collect())
 }
 
-async fn get_tables_postgres(pool: &PgPool, schema: Option<&str>) -> Result<Vec<TableInfo>, CoreError> {
+async fn get_tables_postgres(
+    pool: &PgPool,
+    schema: Option<&str>,
+) -> Result<Vec<TableInfo>, CoreError> {
     let schema = schema.unwrap_or("public");
     let rows = sqlx::query(
         r#"SELECT table_name, table_type
@@ -548,22 +721,35 @@ async fn get_tables_postgres(pool: &PgPool, schema: Option<&str>) -> Result<Vec<
     .bind(schema)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
-    Ok(rows.iter().map(|r| {
-        let name: String = r.get("table_name");
-        let raw_type: String = r.get("table_type");
-        let table_type = if raw_type == "VIEW" { "view".into() } else { "table".into() };
-        TableInfo {
-            full_name: format!("{}.{}", schema, name),
-            name,
-            schema: Some(schema.into()),
-            table_type,
-        }
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get("table_name");
+            let raw_type: String = r.get("table_type");
+            let table_type = if raw_type == "VIEW" {
+                "view".into()
+            } else {
+                "table".into()
+            };
+            TableInfo {
+                full_name: format!("{}.{}", schema, name),
+                name,
+                schema: Some(schema.into()),
+                table_type,
+            }
+        })
+        .collect())
 }
 
-async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<TableInfo>, CoreError> {
+async fn get_tables_mysql(
+    pool: &MySqlPool,
+    schema: Option<&str>,
+) -> Result<Vec<TableInfo>, CoreError> {
     // CAST to CHAR: MySQL 8 returns information_schema strings as VARBINARY via prepared stmts.
     let (sql, schema_val) = if let Some(s) = schema {
         (
@@ -592,20 +778,30 @@ async fn get_tables_mysql(pool: &MySqlPool, schema: Option<&str>) -> Result<Vec<
     } else {
         sqlx::query(sql).fetch_all(pool).await
     }
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
-    Ok(rows.iter().map(|r| {
-        let name: String = r.get("table_name");
-        let raw_type: String = r.get("table_type");
-        let schema_name: String = r.get("table_schema");
-        let table_type = if raw_type == "VIEW" { "view".into() } else { "table".into() };
-        TableInfo {
-            full_name: format!("`{}`.`{}`", schema_name, name),
-            name,
-            schema: Some(schema_name),
-            table_type,
-        }
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get("table_name");
+            let raw_type: String = r.get("table_type");
+            let schema_name: String = r.get("table_schema");
+            let table_type = if raw_type == "VIEW" {
+                "view".into()
+            } else {
+                "table".into()
+            };
+            TableInfo {
+                full_name: format!("`{}`.`{}`", schema_name, name),
+                name,
+                schema: Some(schema_name),
+                table_type,
+            }
+        })
+        .collect())
 }
 
 async fn get_tables_sqlite(pool: &SqlitePool) -> Result<Vec<TableInfo>, CoreError> {
@@ -617,18 +813,24 @@ async fn get_tables_sqlite(pool: &SqlitePool) -> Result<Vec<TableInfo>, CoreErro
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
-    Ok(rows.iter().map(|r| {
-        let name: String = r.get("name");
-        let table_type: String = r.get("type");
-        TableInfo {
-            full_name: format!("\"{}\"", name),
-            name: name.clone(),
-            schema: None,
-            table_type,
-        }
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get("name");
+            let table_type: String = r.get("type");
+            TableInfo {
+                full_name: format!("\"{}\"", name),
+                name: name.clone(),
+                schema: None,
+                table_type,
+            }
+        })
+        .collect())
 }
 
 async fn get_columns_postgres(
@@ -679,20 +881,26 @@ async fn get_columns_postgres(
     .await
     .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
 
-    Ok(rows.iter().map(|r| SchemaColumnInfo {
-        name: r.get("column_name"),
-        data_type: map_pg_type(&r.get::<String, _>("data_type")),
-        nullable: r.get::<&str, _>("is_nullable") == "YES",
-        default_value: r.get("column_default"),
-        is_primary_key: r.try_get("is_primary_key").unwrap_or(false),
-        is_foreign_key: r.try_get("is_foreign_key").unwrap_or(false),
-        foreign_table: r.try_get("foreign_table_name").ok().flatten(),
-        foreign_column: r.try_get("foreign_column_name").ok().flatten(),
-        ordinal_position: r.get::<i32, _>("ordinal_position"),
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| SchemaColumnInfo {
+            name: r.get("column_name"),
+            data_type: map_pg_type(&r.get::<String, _>("data_type")),
+            nullable: r.get::<&str, _>("is_nullable") == "YES",
+            default_value: r.get("column_default"),
+            is_primary_key: r.try_get("is_primary_key").unwrap_or(false),
+            is_foreign_key: r.try_get("is_foreign_key").unwrap_or(false),
+            foreign_table: r.try_get("foreign_table_name").ok().flatten(),
+            foreign_column: r.try_get("foreign_column_name").ok().flatten(),
+            ordinal_position: r.get::<i32, _>("ordinal_position"),
+        })
+        .collect())
 }
 
-async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<SchemaColumnInfo>, CoreError> {
+async fn get_columns_mysql(
+    pool: &MySqlPool,
+    table_name: &str,
+) -> Result<Vec<SchemaColumnInfo>, CoreError> {
     // CAST to CHAR: MySQL 8 returns information_schema strings as VARBINARY via prepared stmts.
     let col_rows = sqlx::query(
         r#"SELECT
@@ -710,7 +918,10 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
     // Fetch FK references
     let fk_rows = sqlx::query(
@@ -724,43 +935,61 @@ async fn get_columns_mysql(pool: &MySqlPool, table_name: &str) -> Result<Vec<Sch
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
-    let fk_map: HashMap<String, (String, String)> = fk_rows.iter().filter_map(|r| {
-        let col: String = r.get("col_name");
-        let ref_table: Option<String> = r.get("ref_table");
-        let ref_col: Option<String> = r.get("ref_col");
-        if let (Some(t), Some(c)) = (ref_table, ref_col) {
-            Some((col, (t, c)))
-        } else {
-            None
-        }
-    }).collect();
+    let fk_map: HashMap<String, (String, String)> = fk_rows
+        .iter()
+        .filter_map(|r| {
+            let col: String = r.get("col_name");
+            let ref_table: Option<String> = r.get("ref_table");
+            let ref_col: Option<String> = r.get("ref_col");
+            if let (Some(t), Some(c)) = (ref_table, ref_col) {
+                Some((col, (t, c)))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    Ok(col_rows.iter().map(|r| {
-        let col_name: String = r.get("col_name");
-        let fk = fk_map.get(&col_name);
-        SchemaColumnInfo {
-            name: col_name.clone(),
-            data_type: map_mysql_type(&r.get::<String, _>("data_type")),
-            nullable: r.get::<String, _>("is_nullable") == "YES",
-            default_value: r.get("col_default"),
-            is_primary_key: r.try_get::<i64, _>("is_primary_key").map(|v| v != 0).unwrap_or(false),
-            is_foreign_key: fk.is_some(),
-            foreign_table: fk.map(|(t, _)| t.clone()),
-            foreign_column: fk.map(|(_, c)| c.clone()),
-            ordinal_position: r.try_get::<i64, _>("ordinal_pos").unwrap_or(0) as i32,
-        }
-    }).collect())
+    Ok(col_rows
+        .iter()
+        .map(|r| {
+            let col_name: String = r.get("col_name");
+            let fk = fk_map.get(&col_name);
+            SchemaColumnInfo {
+                name: col_name.clone(),
+                data_type: map_mysql_type(&r.get::<String, _>("data_type")),
+                nullable: r.get::<String, _>("is_nullable") == "YES",
+                default_value: r.get("col_default"),
+                is_primary_key: r
+                    .try_get::<i64, _>("is_primary_key")
+                    .map(|v| v != 0)
+                    .unwrap_or(false),
+                is_foreign_key: fk.is_some(),
+                foreign_table: fk.map(|(t, _)| t.clone()),
+                foreign_column: fk.map(|(_, c)| c.clone()),
+                ordinal_position: r.try_get::<i64, _>("ordinal_pos").unwrap_or(0) as i32,
+            }
+        })
+        .collect())
 }
 
-async fn get_columns_sqlite(pool: &SqlitePool, table_name: &str) -> Result<Vec<SchemaColumnInfo>, CoreError> {
+async fn get_columns_sqlite(
+    pool: &SqlitePool,
+    table_name: &str,
+) -> Result<Vec<SchemaColumnInfo>, CoreError> {
     let safe_name = table_name.replace('"', "\"\"");
     let pragma_sql = format!("PRAGMA table_info(\"{}\")", safe_name);
     let rows = sqlx::query(&pragma_sql)
         .fetch_all(pool)
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     let fk_sql = format!("PRAGMA foreign_key_list(\"{}\")", safe_name);
     let fk_rows = sqlx::query(&fk_sql)
@@ -768,31 +997,38 @@ async fn get_columns_sqlite(pool: &SqlitePool, table_name: &str) -> Result<Vec<S
         .await
         .unwrap_or_default();
 
-    let fk_map: HashMap<String, (String, String)> = fk_rows.iter().filter_map(|r| {
-        let from: String = r.try_get("from").ok()?;
-        let table: String = r.try_get("table").ok()?;
-        let to: String = r.try_get("to").ok()?;
-        Some((from, (table, to)))
-    }).collect();
+    let fk_map: HashMap<String, (String, String)> = fk_rows
+        .iter()
+        .filter_map(|r| {
+            let from: String = r.try_get("from").ok()?;
+            let table: String = r.try_get("table").ok()?;
+            let to: String = r.try_get("to").ok()?;
+            Some((from, (table, to)))
+        })
+        .collect();
 
-    Ok(rows.iter().enumerate().map(|(i, r)| {
-        let name: String = r.get("name");
-        let type_str: String = r.try_get("type").unwrap_or_default();
-        let pk_order: i64 = r.try_get("pk").unwrap_or(0);
-        let notnull: i64 = r.try_get("notnull").unwrap_or(0);
-        let fk = fk_map.get(&name);
-        SchemaColumnInfo {
-            name: name.clone(),
-            data_type: map_sqlite_type(&type_str),
-            nullable: notnull == 0,
-            default_value: r.try_get::<Option<String>, _>("dflt_value").unwrap_or(None),
-            is_primary_key: pk_order > 0,
-            is_foreign_key: fk.is_some(),
-            foreign_table: fk.map(|(t, _)| t.clone()),
-            foreign_column: fk.map(|(_, c)| c.clone()),
-            ordinal_position: (i + 1) as i32,
-        }
-    }).collect())
+    Ok(rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let name: String = r.get("name");
+            let type_str: String = r.try_get("type").unwrap_or_default();
+            let pk_order: i64 = r.try_get("pk").unwrap_or(0);
+            let notnull: i64 = r.try_get("notnull").unwrap_or(0);
+            let fk = fk_map.get(&name);
+            SchemaColumnInfo {
+                name: name.clone(),
+                data_type: map_sqlite_type(&type_str),
+                nullable: notnull == 0,
+                default_value: r.try_get::<Option<String>, _>("dflt_value").unwrap_or(None),
+                is_primary_key: pk_order > 0,
+                is_foreign_key: fk.is_some(),
+                foreign_table: fk.map(|(t, _)| t.clone()),
+                foreign_column: fk.map(|(_, c)| c.clone()),
+                ordinal_position: (i + 1) as i32,
+            }
+        })
+        .collect())
 }
 
 // ── Query Table helpers ────────────────────────────────────────────────────────
@@ -802,23 +1038,51 @@ fn validate_column(name: &str, valid: &[&str]) -> bool {
 }
 
 fn build_order_by_pg(sort: &[SortSpec], valid: &[&str]) -> String {
-    if sort.is_empty() { return String::new(); }
-    let parts: Vec<String> = sort.iter()
+    if sort.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = sort
+        .iter()
         .filter(|s| validate_column(&s.column, valid))
-        .map(|s| format!("\"{}\" {}", s.column.replace('"', "\"\""), if s.desc { "DESC NULLS LAST" } else { "ASC NULLS LAST" }))
+        .map(|s| {
+            format!(
+                "\"{}\" {}",
+                s.column.replace('"', "\"\""),
+                if s.desc {
+                    "DESC NULLS LAST"
+                } else {
+                    "ASC NULLS LAST"
+                }
+            )
+        })
         .collect();
-    if parts.is_empty() { return String::new(); }
+    if parts.is_empty() {
+        return String::new();
+    }
     format!(" ORDER BY {}", parts.join(", "))
 }
 
 fn build_order_by_generic(sort: &[SortSpec], valid: &[&str], quote: char) -> String {
-    if sort.is_empty() { return String::new(); }
+    if sort.is_empty() {
+        return String::new();
+    }
     let q = quote;
-    let parts: Vec<String> = sort.iter()
+    let parts: Vec<String> = sort
+        .iter()
         .filter(|s| validate_column(&s.column, valid))
-        .map(|s| format!("{}{}{} {}", q, s.column.replace(q, &format!("{}{}", q, q)), q, if s.desc { "DESC" } else { "ASC" }))
+        .map(|s| {
+            format!(
+                "{}{}{} {}",
+                q,
+                s.column.replace(q, &format!("{}{}", q, q)),
+                q,
+                if s.desc { "DESC" } else { "ASC" }
+            )
+        })
         .collect();
-    if parts.is_empty() { return String::new(); }
+    if parts.is_empty() {
+        return String::new();
+    }
     format!(" ORDER BY {}", parts.join(", "))
 }
 
@@ -829,11 +1093,14 @@ fn build_where_clause(
     placeholder_start: usize,
     positional: bool, // true for PG ($1), false for ?
 ) -> (String, Vec<serde_json::Value>) {
-    let active: Vec<&FilterSpec> = filters.iter()
+    let active: Vec<&FilterSpec> = filters
+        .iter()
         .filter(|f| validate_column(&f.column, valid))
         .collect();
 
-    if active.is_empty() { return (String::new(), vec![]); }
+    if active.is_empty() {
+        return (String::new(), vec![]);
+    }
 
     let mut parts = Vec::new();
     let mut values: Vec<serde_json::Value> = Vec::new();
@@ -846,7 +1113,11 @@ fn build_where_clause(
             "isNotNull" => parts.push(format!("{} IS NOT NULL", col)),
             _ => {
                 let Some(val) = &f.value else { continue };
-                let ph = if positional { format!("${}", idx) } else { "?".into() };
+                let ph = if positional {
+                    format!("${}", idx)
+                } else {
+                    "?".into()
+                };
                 match f.operator.as_str() {
                     "contains" => {
                         let like_val = format!("%{}%", val_to_str(val));
@@ -890,7 +1161,9 @@ fn build_where_clause(
         }
     }
 
-    if parts.is_empty() { return (String::new(), vec![]); }
+    if parts.is_empty() {
+        return (String::new(), vec![]);
+    }
     (format!(" WHERE {}", parts.join(" AND ")), values)
 }
 
@@ -900,11 +1173,14 @@ fn build_where_clause_like(
     valid: &[&str],
     quote: char,
 ) -> (String, Vec<serde_json::Value>) {
-    let active: Vec<&FilterSpec> = filters.iter()
+    let active: Vec<&FilterSpec> = filters
+        .iter()
         .filter(|f| validate_column(&f.column, valid))
         .collect();
 
-    if active.is_empty() { return (String::new(), vec![]); }
+    if active.is_empty() {
+        return (String::new(), vec![]);
+    }
 
     let q = quote;
     let mut parts = Vec::new();
@@ -930,18 +1206,35 @@ fn build_where_clause_like(
                         parts.push(format!("{} LIKE ?", col));
                         values.push(serde_json::Value::String(format!("%{}", val_to_str(val))));
                     }
-                    "equals" => { parts.push(format!("{} = ?", col)); values.push(val.clone()); }
-                    "gt" => { parts.push(format!("{} > ?", col)); values.push(val.clone()); }
-                    "gte" => { parts.push(format!("{} >= ?", col)); values.push(val.clone()); }
-                    "lt" => { parts.push(format!("{} < ?", col)); values.push(val.clone()); }
-                    "lte" => { parts.push(format!("{} <= ?", col)); values.push(val.clone()); }
+                    "equals" => {
+                        parts.push(format!("{} = ?", col));
+                        values.push(val.clone());
+                    }
+                    "gt" => {
+                        parts.push(format!("{} > ?", col));
+                        values.push(val.clone());
+                    }
+                    "gte" => {
+                        parts.push(format!("{} >= ?", col));
+                        values.push(val.clone());
+                    }
+                    "lt" => {
+                        parts.push(format!("{} < ?", col));
+                        values.push(val.clone());
+                    }
+                    "lte" => {
+                        parts.push(format!("{} <= ?", col));
+                        values.push(val.clone());
+                    }
                     _ => continue,
                 }
             }
         }
     }
 
-    if parts.is_empty() { return (String::new(), vec![]); }
+    if parts.is_empty() {
+        return (String::new(), vec![]);
+    }
     (format!(" WHERE {}", parts.join(" AND ")), values)
 }
 
@@ -960,9 +1253,11 @@ async fn query_table_postgres(
     col_types: Vec<String>,
 ) -> Result<TableQueryResult, CoreError> {
     let schema = params.schema.as_deref().unwrap_or("public");
-    let table_quoted = format!("\"{}\".\"{}\"",
+    let table_quoted = format!(
+        "\"{}\".\"{}\"",
         schema.replace('"', "\"\""),
-        params.table_name.replace('"', "\"\""));
+        params.table_name.replace('"', "\"\"")
+    );
 
     let (where_clause, filter_vals) = build_where_clause(&params.filters, valid_columns, 1, true);
     let order_clause = build_order_by_pg(&params.sort, valid_columns);
@@ -981,9 +1276,13 @@ async fn query_table_postgres(
             serde_json::Value::Null => q.bind(None::<String>),
             serde_json::Value::Bool(b) => q.bind(*b),
             serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() { q.bind(i) }
-                else if let Some(f) = n.as_f64() { q.bind(f) }
-                else { q.bind(n.to_string()) }
+                if let Some(i) = n.as_i64() {
+                    q.bind(i)
+                } else if let Some(f) = n.as_f64() {
+                    q.bind(f)
+                } else {
+                    q.bind(n.to_string())
+                }
             }
             serde_json::Value::String(s) => q.bind(s.clone()),
             _ => q.bind(val.to_string()),
@@ -991,19 +1290,28 @@ async fn query_table_postgres(
     }
     q = q.bind(limit).bind(params.offset);
 
-    let rows = q.fetch_all(pool).await
-        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?;
+    let rows = q.fetch_all(pool).await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "QUERY_TABLE".into(),
+    })?;
 
     let has_more = rows.len() as i64 > params.limit.min(1000);
-    let rows_to_use = if has_more { &rows[..rows.len()-1] } else { &rows[..] };
+    let rows_to_use = if has_more {
+        &rows[..rows.len() - 1]
+    } else {
+        &rows[..]
+    };
 
-    let result_rows: Vec<serde_json::Value> = rows_to_use.iter().map(|row| {
-        let mut obj = serde_json::Map::new();
-        for (i, col) in col_names.iter().enumerate() {
-            obj.insert(col.clone(), postgres::pg_row_to_json(row, i));
-        }
-        serde_json::Value::Object(obj)
-    }).collect();
+    let result_rows: Vec<serde_json::Value> = rows_to_use
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in col_names.iter().enumerate() {
+                obj.insert(col.clone(), postgres::pg_row_to_json(row, i));
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
 
     Ok(TableQueryResult {
         columns: col_names,
@@ -1025,14 +1333,21 @@ async fn query_table_mysql(
     let table_quoted = if schema.is_empty() {
         format!("`{}`", params.table_name.replace('`', "``"))
     } else {
-        format!("`{}`.`{}`", schema.replace('`', "``"), params.table_name.replace('`', "``"))
+        format!(
+            "`{}`.`{}`",
+            schema.replace('`', "``"),
+            params.table_name.replace('`', "``")
+        )
     };
 
     let (where_clause, filter_vals) = build_where_clause_like(&params.filters, valid_columns, '`');
     let order_clause = build_order_by_generic(&params.sort, valid_columns, '`');
     let limit = params.limit.min(1000) + 1;
 
-    let sql = format!("SELECT * FROM {}{}{} LIMIT ? OFFSET ?", table_quoted, where_clause, order_clause);
+    let sql = format!(
+        "SELECT * FROM {}{}{} LIMIT ? OFFSET ?",
+        table_quoted, where_clause, order_clause
+    );
 
     let mut q = sqlx::query(&sql);
     for val in &filter_vals {
@@ -1040,9 +1355,13 @@ async fn query_table_mysql(
             serde_json::Value::Null => q.bind(None::<String>),
             serde_json::Value::Bool(b) => q.bind(*b),
             serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() { q.bind(i) }
-                else if let Some(f) = n.as_f64() { q.bind(f) }
-                else { q.bind(n.to_string()) }
+                if let Some(i) = n.as_i64() {
+                    q.bind(i)
+                } else if let Some(f) = n.as_f64() {
+                    q.bind(f)
+                } else {
+                    q.bind(n.to_string())
+                }
             }
             serde_json::Value::String(s) => q.bind(s.clone()),
             _ => q.bind(val.to_string()),
@@ -1050,19 +1369,28 @@ async fn query_table_mysql(
     }
     q = q.bind(limit).bind(params.offset);
 
-    let rows = q.fetch_all(pool).await
-        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?;
+    let rows = q.fetch_all(pool).await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "QUERY_TABLE".into(),
+    })?;
 
     let has_more = rows.len() as i64 > params.limit.min(1000);
-    let rows_to_use = if has_more { &rows[..rows.len()-1] } else { &rows[..] };
+    let rows_to_use = if has_more {
+        &rows[..rows.len() - 1]
+    } else {
+        &rows[..]
+    };
 
-    let result_rows: Vec<serde_json::Value> = rows_to_use.iter().map(|row| {
-        let mut obj = serde_json::Map::new();
-        for (i, col) in col_names.iter().enumerate() {
-            obj.insert(col.clone(), mysql::mysql_row_to_json(row, i));
-        }
-        serde_json::Value::Object(obj)
-    }).collect();
+    let result_rows: Vec<serde_json::Value> = rows_to_use
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in col_names.iter().enumerate() {
+                obj.insert(col.clone(), mysql::mysql_row_to_json(row, i));
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
 
     Ok(TableQueryResult {
         columns: col_names,
@@ -1086,7 +1414,10 @@ async fn query_table_sqlite(
     let order_clause = build_order_by_generic(&params.sort, valid_columns, '"');
     let limit = params.limit.min(1000) + 1;
 
-    let sql = format!("SELECT * FROM {}{}{} LIMIT ? OFFSET ?", table_quoted, where_clause, order_clause);
+    let sql = format!(
+        "SELECT * FROM {}{}{} LIMIT ? OFFSET ?",
+        table_quoted, where_clause, order_clause
+    );
 
     let mut q = sqlx::query(&sql);
     for val in &filter_vals {
@@ -1094,9 +1425,13 @@ async fn query_table_sqlite(
             serde_json::Value::Null => q.bind(None::<String>),
             serde_json::Value::Bool(b) => q.bind(*b),
             serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() { q.bind(i) }
-                else if let Some(f) = n.as_f64() { q.bind(f) }
-                else { q.bind(n.to_string()) }
+                if let Some(i) = n.as_i64() {
+                    q.bind(i)
+                } else if let Some(f) = n.as_f64() {
+                    q.bind(f)
+                } else {
+                    q.bind(n.to_string())
+                }
             }
             serde_json::Value::String(s) => q.bind(s.clone()),
             _ => q.bind(val.to_string()),
@@ -1104,19 +1439,28 @@ async fn query_table_sqlite(
     }
     q = q.bind(limit).bind(params.offset);
 
-    let rows = q.fetch_all(pool).await
-        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?;
+    let rows = q.fetch_all(pool).await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "QUERY_TABLE".into(),
+    })?;
 
     let has_more = rows.len() as i64 > params.limit.min(1000);
-    let rows_to_use = if has_more { &rows[..rows.len()-1] } else { &rows[..] };
+    let rows_to_use = if has_more {
+        &rows[..rows.len() - 1]
+    } else {
+        &rows[..]
+    };
 
-    let result_rows: Vec<serde_json::Value> = rows_to_use.iter().map(|row| {
-        let mut obj = serde_json::Map::new();
-        for (i, col) in col_names.iter().enumerate() {
-            obj.insert(col.clone(), sqlite::sqlite_row_to_json(row, i));
-        }
-        serde_json::Value::Object(obj)
-    }).collect();
+    let result_rows: Vec<serde_json::Value> = rows_to_use
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in col_names.iter().enumerate() {
+                obj.insert(col.clone(), sqlite::sqlite_row_to_json(row, i));
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
 
     Ok(TableQueryResult {
         columns: col_names,
@@ -1177,13 +1521,27 @@ fn map_mysql_type(type_name: &str) -> String {
 
 fn map_sqlite_type(type_name: &str) -> String {
     let t = type_name.to_uppercase();
-    if t.contains("INT") { return "integer".into(); }
-    if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") { return "text".into(); }
-    if t.contains("BLOB") || t.is_empty() { return "unknown".into(); }
-    if t.contains("REAL") || t.contains("FLOA") || t.contains("DOUB") { return "float".into(); }
-    if t.contains("BOOL") { return "boolean".into(); }
-    if t.contains("DATE") || t.contains("TIME") { return "timestamp".into(); }
-    if t.contains("NUMERIC") || t.contains("DECIMAL") { return "decimal".into(); }
+    if t.contains("INT") {
+        return "integer".into();
+    }
+    if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
+        return "text".into();
+    }
+    if t.contains("BLOB") || t.is_empty() {
+        return "unknown".into();
+    }
+    if t.contains("REAL") || t.contains("FLOA") || t.contains("DOUB") {
+        return "float".into();
+    }
+    if t.contains("BOOL") {
+        return "boolean".into();
+    }
+    if t.contains("DATE") || t.contains("TIME") {
+        return "timestamp".into();
+    }
+    if t.contains("NUMERIC") || t.contains("DECIMAL") {
+        return "decimal".into();
+    }
     "unknown".into()
 }
 
@@ -1211,14 +1569,20 @@ async fn fetch_schema_postgres(
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
     if col_rows.is_empty() {
         return Ok(TableMeta {
             table_name: table_name.to_string(),
             schema: Some(schema.to_string()),
             columns: vec![],
-            primary_key: PrimaryKeyMeta { columns: vec![], exists: false },
+            primary_key: PrimaryKeyMeta {
+                columns: vec![],
+                exists: false,
+            },
             is_editable: false,
             editability_reason: Some("Table not found or no columns".into()),
         });
@@ -1259,12 +1623,18 @@ async fn fetch_schema_postgres(
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
     let pk_columns: Vec<String> = pk_rows.iter().map(|r| r.get("column_name")).collect();
     let pk_exists = !pk_columns.is_empty();
 
-    let primary_key = PrimaryKeyMeta { columns: pk_columns, exists: pk_exists };
+    let primary_key = PrimaryKeyMeta {
+        columns: pk_columns,
+        exists: pk_exists,
+    };
 
     // Mark PK columns as not updatable
     for col in &mut columns {
@@ -1279,7 +1649,11 @@ async fn fetch_schema_postgres(
         columns,
         primary_key,
         is_editable: pk_exists,
-        editability_reason: if pk_exists { None } else { Some("No primary key detected".into()) },
+        editability_reason: if pk_exists {
+            None
+        } else {
+            Some("No primary key detected".into())
+        },
     })
 }
 
@@ -1299,14 +1673,20 @@ async fn fetch_schema_mysql(pool: &MySqlPool, table_name: &str) -> Result<TableM
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
     if col_rows.is_empty() {
         return Ok(TableMeta {
             table_name: table_name.to_string(),
             schema: None,
             columns: vec![],
-            primary_key: PrimaryKeyMeta { columns: vec![], exists: false },
+            primary_key: PrimaryKeyMeta {
+                columns: vec![],
+                exists: false,
+            },
             is_editable: false,
             editability_reason: Some("Table not found or no columns".into()),
         });
@@ -1344,11 +1724,17 @@ async fn fetch_schema_mysql(pool: &MySqlPool, table_name: &str) -> Result<TableM
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "SCHEMA_QUERY".into(),
+    })?;
 
     let pk_columns: Vec<String> = pk_rows.iter().map(|r| r.get("COLUMN_NAME")).collect();
     let pk_exists = !pk_columns.is_empty();
-    let primary_key = PrimaryKeyMeta { columns: pk_columns, exists: pk_exists };
+    let primary_key = PrimaryKeyMeta {
+        columns: pk_columns,
+        exists: pk_exists,
+    };
 
     for col in &mut columns {
         if primary_key.columns.contains(&col.name) {
@@ -1362,7 +1748,11 @@ async fn fetch_schema_mysql(pool: &MySqlPool, table_name: &str) -> Result<TableM
         columns,
         primary_key,
         is_editable: pk_exists,
-        editability_reason: if pk_exists { None } else { Some("No primary key detected".into()) },
+        editability_reason: if pk_exists {
+            None
+        } else {
+            Some("No primary key detected".into())
+        },
     })
 }
 
@@ -1372,14 +1762,20 @@ async fn fetch_schema_sqlite(pool: &SqlitePool, table_name: &str) -> Result<Tabl
     let rows = sqlx::query(&pragma_sql)
         .fetch_all(pool)
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     if rows.is_empty() {
         return Ok(TableMeta {
             table_name: table_name.to_string(),
             schema: None,
             columns: vec![],
-            primary_key: PrimaryKeyMeta { columns: vec![], exists: false },
+            primary_key: PrimaryKeyMeta {
+                columns: vec![],
+                exists: false,
+            },
             is_editable: false,
             editability_reason: Some("Table not found or no columns".into()),
         });
@@ -1413,7 +1809,10 @@ async fn fetch_schema_sqlite(pool: &SqlitePool, table_name: &str) -> Result<Tabl
     pk_columns.sort_by_key(|(order, _)| *order);
     let pk_col_names: Vec<String> = pk_columns.into_iter().map(|(_, n)| n).collect();
     let pk_exists = !pk_col_names.is_empty();
-    let primary_key = PrimaryKeyMeta { columns: pk_col_names, exists: pk_exists };
+    let primary_key = PrimaryKeyMeta {
+        columns: pk_col_names,
+        exists: pk_exists,
+    };
 
     for col in &mut columns {
         if primary_key.columns.contains(&col.name) {
@@ -1427,7 +1826,11 @@ async fn fetch_schema_sqlite(pool: &SqlitePool, table_name: &str) -> Result<Tabl
         columns,
         primary_key,
         is_editable: pk_exists,
-        editability_reason: if pk_exists { None } else { Some("No primary key detected".into()) },
+        editability_reason: if pk_exists {
+            None
+        } else {
+            Some("No primary key detected".into())
+        },
     })
 }
 
@@ -1451,18 +1854,19 @@ fn bind_params_to_query<'q>(
                 }
             }
             serde_json::Value::String(s) => q = q.bind(s.as_str()),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                q = q.bind(p.to_string())
-            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => q = q.bind(p.to_string()),
         }
     }
     q
 }
 
 async fn execute_batch_postgres(pool: &PgPool, batch: &SqlBatch) -> Result<BatchResult, CoreError> {
-    let mut tx = pool.begin().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_BEGIN".into() })?;
+    let mut tx = pool.begin().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_BEGIN".into(),
+    })?;
     let mut executed = 0;
-    let mut inserted_ids: HashMap<String, serde_json::Value> = HashMap::new();
+    let inserted_ids: HashMap<String, serde_json::Value> = HashMap::new();
     let total = batch.statements.len();
 
     for stmt in &batch.statements {
@@ -1472,9 +1876,13 @@ async fn execute_batch_postgres(pool: &PgPool, batch: &SqlBatch) -> Result<Batch
                 serde_json::Value::Null => q = q.bind(None::<String>),
                 serde_json::Value::Bool(b) => q = q.bind(*b),
                 serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() { q = q.bind(i); }
-                    else if let Some(f) = n.as_f64() { q = q.bind(f); }
-                    else { q = q.bind(n.to_string()); }
+                    if let Some(i) = n.as_i64() {
+                        q = q.bind(i);
+                    } else if let Some(f) = n.as_f64() {
+                        q = q.bind(f);
+                    } else {
+                        q = q.bind(n.to_string());
+                    }
                 }
                 serde_json::Value::String(s) => q = q.bind(s.as_str()),
                 _ => q = q.bind(p.to_string()),
@@ -1503,12 +1911,24 @@ async fn execute_batch_postgres(pool: &PgPool, batch: &SqlBatch) -> Result<Batch
         }
     }
 
-    tx.commit().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_COMMIT".into() })?;
-    Ok(BatchResult { success: true, executed_count: executed, total_statements: total, error: None, inserted_ids })
+    tx.commit().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_COMMIT".into(),
+    })?;
+    Ok(BatchResult {
+        success: true,
+        executed_count: executed,
+        total_statements: total,
+        error: None,
+        inserted_ids,
+    })
 }
 
 async fn execute_batch_mysql(pool: &MySqlPool, batch: &SqlBatch) -> Result<BatchResult, CoreError> {
-    let mut tx = pool.begin().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_BEGIN".into() })?;
+    let mut tx = pool.begin().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_BEGIN".into(),
+    })?;
     let mut executed = 0;
     let total = batch.statements.len();
 
@@ -1519,9 +1939,13 @@ async fn execute_batch_mysql(pool: &MySqlPool, batch: &SqlBatch) -> Result<Batch
                 serde_json::Value::Null => q = q.bind(None::<String>),
                 serde_json::Value::Bool(b) => q = q.bind(*b),
                 serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() { q = q.bind(i); }
-                    else if let Some(f) = n.as_f64() { q = q.bind(f); }
-                    else { q = q.bind(n.to_string()); }
+                    if let Some(i) = n.as_i64() {
+                        q = q.bind(i);
+                    } else if let Some(f) = n.as_f64() {
+                        q = q.bind(f);
+                    } else {
+                        q = q.bind(n.to_string());
+                    }
                 }
                 serde_json::Value::String(s) => q = q.bind(s.as_str()),
                 _ => q = q.bind(p.to_string()),
@@ -1546,12 +1970,27 @@ async fn execute_batch_mysql(pool: &MySqlPool, batch: &SqlBatch) -> Result<Batch
         }
     }
 
-    tx.commit().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_COMMIT".into() })?;
-    Ok(BatchResult { success: true, executed_count: executed, total_statements: total, error: None, inserted_ids: HashMap::new() })
+    tx.commit().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_COMMIT".into(),
+    })?;
+    Ok(BatchResult {
+        success: true,
+        executed_count: executed,
+        total_statements: total,
+        error: None,
+        inserted_ids: HashMap::new(),
+    })
 }
 
-async fn execute_batch_sqlite(pool: &SqlitePool, batch: &SqlBatch) -> Result<BatchResult, CoreError> {
-    let mut tx = pool.begin().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_BEGIN".into() })?;
+async fn execute_batch_sqlite(
+    pool: &SqlitePool,
+    batch: &SqlBatch,
+) -> Result<BatchResult, CoreError> {
+    let mut tx = pool.begin().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_BEGIN".into(),
+    })?;
     let mut executed = 0;
     let total = batch.statements.len();
 
@@ -1562,9 +2001,13 @@ async fn execute_batch_sqlite(pool: &SqlitePool, batch: &SqlBatch) -> Result<Bat
                 serde_json::Value::Null => q = q.bind(None::<String>),
                 serde_json::Value::Bool(b) => q = q.bind(*b),
                 serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() { q = q.bind(i); }
-                    else if let Some(f) = n.as_f64() { q = q.bind(f); }
-                    else { q = q.bind(n.to_string()); }
+                    if let Some(i) = n.as_i64() {
+                        q = q.bind(i);
+                    } else if let Some(f) = n.as_f64() {
+                        q = q.bind(f);
+                    } else {
+                        q = q.bind(n.to_string());
+                    }
                 }
                 serde_json::Value::String(s) => q = q.bind(s.as_str()),
                 _ => q = q.bind(p.to_string()),
@@ -1589,12 +2032,24 @@ async fn execute_batch_sqlite(pool: &SqlitePool, batch: &SqlBatch) -> Result<Bat
         }
     }
 
-    tx.commit().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_COMMIT".into() })?;
-    Ok(BatchResult { success: true, executed_count: executed, total_statements: total, error: None, inserted_ids: HashMap::new() })
+    tx.commit().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_COMMIT".into(),
+    })?;
+    Ok(BatchResult {
+        success: true,
+        executed_count: executed,
+        total_statements: total,
+        error: None,
+        inserted_ids: HashMap::new(),
+    })
 }
 
 async fn execute_batch_any(pool: &AnyPool, batch: &SqlBatch) -> Result<BatchResult, CoreError> {
-    let mut tx = pool.begin().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_BEGIN".into() })?;
+    let mut tx = pool.begin().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_BEGIN".into(),
+    })?;
     let mut executed = 0;
     let total = batch.statements.len();
 
@@ -1619,8 +2074,17 @@ async fn execute_batch_any(pool: &AnyPool, batch: &SqlBatch) -> Result<BatchResu
         }
     }
 
-    tx.commit().await.map_err(|e| CoreError { message: e.to_string(), code: "TX_COMMIT".into() })?;
-    Ok(BatchResult { success: true, executed_count: executed, total_statements: total, error: None, inserted_ids: HashMap::new() })
+    tx.commit().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "TX_COMMIT".into(),
+    })?;
+    Ok(BatchResult {
+        success: true,
+        executed_count: executed,
+        total_statements: total,
+        error: None,
+        inserted_ids: HashMap::new(),
+    })
 }
 
 fn format_db_error(e: &sqlx::Error) -> String {
@@ -1671,7 +2135,11 @@ async fn execute_statement_any(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())

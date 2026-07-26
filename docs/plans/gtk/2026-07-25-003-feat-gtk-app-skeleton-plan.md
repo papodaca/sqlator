@@ -1,7 +1,7 @@
 ---
 title: "feat: sqlator-gtk crate, build pipeline and application shell"
 type: feat
-status: active
+status: completed
 date: 2026-07-25
 ---
 

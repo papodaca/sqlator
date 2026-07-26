@@ -19,7 +19,7 @@ use std::time::Instant;
 /// Central application layer between `sqlator-core` and frontends.
 pub struct AppService {
     pub(crate) config: Arc<ConfigManager>,
-    pub(crate) db: DbManager,
+    pub(crate) db: Arc<DbManager>,
     /// Tunnel registry keyed by [`TunnelKey`] `(profile_id, target_host, target_port)`.
     pub(crate) tunnels: DashMap<TunnelKey, ManagedTunnel>,
     /// Reverse index: connection id → registry key (for disconnect / VTE lookup).
@@ -87,7 +87,7 @@ impl AppService {
 
         Ok(Self {
             config,
-            db: DbManager::new(),
+            db: Arc::new(DbManager::new()),
             tunnels: DashMap::new(),
             connection_tunnels: DashMap::new(),
             credentials,
@@ -102,6 +102,11 @@ impl AppService {
 
     pub fn db(&self) -> &DbManager {
         &self.db
+    }
+
+    /// Cloneable handle for concurrent execute + cancel tasks.
+    pub fn db_handle(&self) -> Arc<DbManager> {
+        Arc::clone(&self.db)
     }
 
     pub fn tunnels(&self) -> &DashMap<TunnelKey, ManagedTunnel> {

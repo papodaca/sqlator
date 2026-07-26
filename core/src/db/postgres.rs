@@ -9,10 +9,27 @@ pub async fn execute_select(
     sql: &str,
     sender: tokio::sync::mpsc::Sender<QueryEvent>,
     start: Instant,
+    mut register_backend: Option<&mut (dyn FnMut(i32) + Send)>,
 ) -> Result<(), CoreError> {
     use futures::StreamExt;
 
-    let mut stream = sqlx::query(sql).fetch(pool);
+    let mut conn = pool.acquire().await.map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "ACQUIRE".into(),
+    })?;
+
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "BACKEND_PID".into(),
+        })?;
+    if let Some(reg) = register_backend.as_mut() {
+        reg(pid);
+    }
+
+    let mut stream = sqlx::query(sql).fetch(&mut *conn);
     let mut row_count: usize = 0;
     let mut columns_sent = false;
     let max_rows: usize = 1000;
@@ -21,11 +38,8 @@ pub async fn execute_select(
         match result {
             Ok(row) => {
                 if !columns_sent {
-                    let names: Vec<String> = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
                     let _ = sender.send(QueryEvent::Columns { names }).await;
                     columns_sent = true;
                 }
@@ -42,7 +56,11 @@ pub async fn execute_select(
                 row_count += 1;
             }
             Err(e) => {
-                let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+                let _ = sender
+                    .send(QueryEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return Ok(());
             }
         }
@@ -58,7 +76,11 @@ pub async fn execute_select(
     Ok(())
 }
 
-pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+pub async fn get_ddl(
+    pool: &PgPool,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, CoreError> {
     let schema = schema.unwrap_or("public");
     let safe_table = table_name.replace('"', "\"\"");
     let safe_schema = schema.replace('"', "\"\"");
@@ -78,11 +100,17 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "DDL_QUERY".into(),
+    })?;
 
     if col_rows.is_empty() {
         return Err(CoreError {
-            message: format!("Table {}.{} not found. It may have been dropped.", schema, table_name),
+            message: format!(
+                "Table {}.{} not found. It may have been dropped.",
+                schema, table_name
+            ),
             code: "TABLE_NOT_FOUND".into(),
         });
     }
@@ -97,7 +125,13 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
         let num_scale: Option<i32> = row.try_get("numeric_scale").ok().flatten();
         let udt_name: Option<String> = row.try_get("udt_name").ok().flatten();
 
-        let full_type = resolve_pg_type(&data_type, &udt_name, char_max_len, num_precision, num_scale);
+        let full_type = resolve_pg_type(
+            &data_type,
+            &udt_name,
+            char_max_len,
+            num_precision,
+            num_scale,
+        );
 
         let mut col_def = format!("  \"{}\" {}", col_name.replace('"', "\"\""), full_type);
         if is_nullable == "NO" {
@@ -123,17 +157,28 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "DDL_QUERY".into(),
+    })?;
 
-    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &pk_rows {
         let cname: String = row.get("constraint_name");
         let col: String = row.get("column_name");
         pk_by_constraint.entry(cname).or_default().push(col);
     }
     for (cname, cols) in &pk_by_constraint {
-        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" PRIMARY KEY ({})", cname.replace('"', "\"\""), quoted_cols.join(", ")));
+        let quoted_cols: Vec<String> = cols
+            .iter()
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" PRIMARY KEY ({})",
+            cname.replace('"', "\"\""),
+            quoted_cols.join(", ")
+        ));
     }
 
     let fk_rows = sqlx::query(
@@ -160,22 +205,43 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
     .await
     .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
 
-    let mut fk_by_constraint: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> = std::collections::BTreeMap::new();
+    let mut fk_by_constraint: std::collections::BTreeMap<
+        String,
+        Vec<(String, String, String, String)>,
+    > = std::collections::BTreeMap::new();
     for row in &fk_rows {
         let cname: String = row.get("constraint_name");
         let col: String = row.get("column_name");
         let ref_schema: String = row.get("ref_schema");
         let ref_table: String = row.get("ref_table");
         let ref_col: String = row.get("ref_column");
-        fk_by_constraint.entry(cname).or_default().push((col, ref_schema, ref_table, ref_col));
+        fk_by_constraint
+            .entry(cname)
+            .or_default()
+            .push((col, ref_schema, ref_table, ref_col));
     }
     for (cname, refs) in &fk_by_constraint {
-        let from_cols: Vec<String> = refs.iter().map(|(c, _, _, _)| format!("\"{}\"", c.replace('"', "\"\""))).collect();
+        let from_cols: Vec<String> = refs
+            .iter()
+            .map(|(c, _, _, _)| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
         let first = refs.first().unwrap();
-        let ref_qualified = format!("\"{}\".\"{}\"", first.1.replace('"', "\"\""), first.2.replace('"', "\"\""));
-        let to_cols: Vec<String> = refs.iter().map(|(_, _, _, c)| format!("\"{}\"", c.replace('"', "\"\""))).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES {} ({})",
-            cname.replace('"', "\"\""), from_cols.join(", "), ref_qualified, to_cols.join(", ")));
+        let ref_qualified = format!(
+            "\"{}\".\"{}\"",
+            first.1.replace('"', "\"\""),
+            first.2.replace('"', "\"\"")
+        );
+        let to_cols: Vec<String> = refs
+            .iter()
+            .map(|(_, _, _, c)| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES {} ({})",
+            cname.replace('"', "\"\""),
+            from_cols.join(", "),
+            ref_qualified,
+            to_cols.join(", ")
+        ));
     }
 
     let uq_rows = sqlx::query(
@@ -192,17 +258,28 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "DDL_QUERY".into(),
+    })?;
 
-    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &uq_rows {
         let cname: String = row.get("constraint_name");
         let col: String = row.get("column_name");
         uq_by_constraint.entry(cname).or_default().push(col);
     }
     for (cname, cols) in &uq_by_constraint {
-        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" UNIQUE ({})", cname.replace('"', "\"\""), quoted_cols.join(", ")));
+        let quoted_cols: Vec<String> = cols
+            .iter()
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" UNIQUE ({})",
+            cname.replace('"', "\"\""),
+            quoted_cols.join(", ")
+        ));
     }
 
     let ck_rows = sqlx::query(
@@ -219,15 +296,26 @@ pub async fn get_ddl(pool: &PgPool, table_name: &str, schema: Option<&str>) -> R
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+    .map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "DDL_QUERY".into(),
+    })?;
 
     for row in &ck_rows {
         let cname: String = row.get("constraint_name");
         let check_clause: String = row.get("check_clause");
-        parts.push(format!("  CONSTRAINT \"{}\" CHECK ({})", cname.replace('"', "\"\""), check_clause));
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" CHECK ({})",
+            cname.replace('"', "\"\""),
+            check_clause
+        ));
     }
 
-    Ok(format!("CREATE TABLE {} (\n{}\n);", qualified, parts.join(",\n")))
+    Ok(format!(
+        "CREATE TABLE {} (\n{}\n);",
+        qualified,
+        parts.join(",\n")
+    ))
 }
 
 fn resolve_pg_type(

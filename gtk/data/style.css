@@ -1,0 +1,22 @@
+/* Single stylesheet — prefer media queries over style-dark.css / style-hc.css. */
+
+.results-placeholder {
+  font-family: monospace;
+  padding: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .results-placeholder {
+    color: var(--accent-fg-color, inherit);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .results-placeholder {
+    font-weight: bold;
+  }
+}
+
+.dimmed {
+  opacity: 0.7;
+}

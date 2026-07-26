@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<schemalist gettext-domain="sqlator-gtk">
+  <schema id="im.apodaca.SqlatorGtk" path="/im/apodaca/SqlatorGtk/">
+    <key name="window-width" type="i">
+      <default>1280</default>
+      <summary>Default window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>800</default>
+      <summary>Default window height</summary>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Whether the window is maximized</summary>
+    </key>
+    <key name="sidebar-visible" type="b">
+      <default>true</default>
+      <summary>Whether the sidebar is visible</summary>
+    </key>
+    <key name="sidebar-width" type="i">
+      <default>280</default>
+      <summary>Sidebar width in pixels</summary>
+    </key>
+    <key name="editor-results-position" type="i">
+      <default>400</default>
+      <summary>Vertical paned position between editor and results</summary>
+    </key>
+    <key name="editor-font" type="s">
+      <default>'Monospace 11'</default>
+      <summary>Editor font description</summary>
+    </key>
+    <key name="confirm-destructive" type="b">
+      <default>true</default>
+      <summary>Confirm destructive SQL statements</summary>
+    </key>
+    <key name="max-rows" type="i">
+      <default>1000</default>
+      <summary>Maximum rows to fetch for SELECT results</summary>
+    </key>
+  </schema>
+</schemalist>

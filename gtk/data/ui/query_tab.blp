@@ -1,0 +1,59 @@
+using Gtk 4.0;
+using Adw 1;
+using GtkSource 5;
+
+template $QueryTab: Adw.Bin {
+  child: Paned editor_paned {
+    orientation: vertical;
+    wide-handle: true;
+    resize-start-child: true;
+    resize-end-child: true;
+    position: 400;
+
+    start-child: ScrolledWindow {
+      hexpand: true;
+      vexpand: true;
+      min-content-height: 120;
+
+      child: GtkSource.View editor {
+        hexpand: true;
+        vexpand: true;
+        monospace: true;
+        auto-indent: true;
+        highlight-current-line: true;
+        show-line-numbers: true;
+        tab-width: 2;
+        insert-spaces-instead-of-tabs: true;
+      };
+    };
+
+    end-child: Adw.ToastOverlay toast_overlay {
+      child: Stack results_stack {
+        hexpand: true;
+        vexpand: true;
+        transition-type: crossfade;
+
+        ScrolledWindow {
+          name: "results";
+          child: TextView results_view {
+            editable: false;
+            monospace: true;
+            wrap-mode: word_char;
+            styles [
+              "results-placeholder",
+            ]
+          };
+        }
+
+        ScrolledWindow {
+          name: "messages";
+          child: TextView messages_view {
+            editable: false;
+            monospace: true;
+            wrap-mode: word_char;
+          };
+        }
+      };
+    };
+  };
+}

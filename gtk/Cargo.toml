@@ -1,0 +1,37 @@
+[package]
+name = "sqlator-gtk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+[dependencies]
+sqlator-core = { path = "../core" }
+sqlator-service = { path = "../service" }
+
+gtk = { package = "gtk4", version = "0.11.4", features = ["gnome_50"] }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_9", "gtk_v4_22"] }
+sourceview = { package = "sourceview5", version = "0.11.2", features = ["v5_18"] }
+vte = { package = "vte4", version = "0.10.0", features = ["v0_84"], optional = true }
+
+glib = "0.22.8"
+gio = "0.22.8"
+
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = "0.7.19"
+async-channel = "2.5"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+
+[build-dependencies]
+glib-build-tools = "0.22.8"
+
+[features]
+default = []
+terminal = ["dep:vte"]
+
+[lints]
+workspace = true

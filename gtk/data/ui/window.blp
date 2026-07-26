@@ -1,0 +1,146 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $SqlatorWindow: Adw.ApplicationWindow {
+  default-width: 1280;
+  default-height: 800;
+  title: _("SQLator");
+
+  Adw.Breakpoint {
+    condition ("max-width: 800sp")
+
+    setters {
+      split_view.collapsed: true;
+      tab_bar.visible: false;
+      overview_button.visible: true;
+    }
+  }
+
+  content: Adw.TabOverview tab_overview {
+    view: tab_view;
+    enable-new-tab: true;
+
+    child: Adw.ToolbarView {
+      top-bar-style: raised;
+
+      [top]
+      Adw.HeaderBar {
+        [start]
+        Button {
+          action-name: "win.toggle-sidebar";
+          icon-name: "sidebar-show-symbolic";
+          tooltip-text: _("Toggle Sidebar");
+        }
+
+        [start]
+        Button {
+          action-name: "tab.run";
+          icon-name: "media-playback-start-symbolic";
+          tooltip-text: _("Run Query");
+        }
+
+        [start]
+        Button {
+          action-name: "tab.cancel";
+          icon-name: "media-playback-stop-symbolic";
+          tooltip-text: _("Cancel Query");
+        }
+
+        [end]
+        Button overview_button {
+          visible: false;
+          action-name: "win.tab-overview";
+          icon-name: "view-grid-symbolic";
+          tooltip-text: _("Tab Overview");
+        }
+
+        [end]
+        MenuButton {
+          icon-name: "open-menu-symbolic";
+          primary: true;
+          tooltip-text: _("Main Menu");
+          menu-model: primary_menu;
+        }
+
+        title-widget: Adw.WindowTitle {
+          title: _("SQLator");
+        };
+      }
+
+      [top]
+      Adw.TabBar tab_bar {
+        view: tab_view;
+        autohide: false;
+      }
+
+      content: Adw.OverlaySplitView split_view {
+        show-sidebar: true;
+        sidebar-width-fraction: 0.22;
+        min-sidebar-width: 200;
+        max-sidebar-width: 420;
+
+        sidebar: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            show-end-title-buttons: false;
+
+            [end]
+            Button {
+              action-name: "app.new-connection";
+              icon-name: "list-add-symbolic";
+              tooltip-text: _("New Connection");
+            }
+
+            title-widget: Adw.WindowTitle {
+              title: _("Connections");
+            };
+          }
+
+          content: ScrolledWindow {
+            hexpand: true;
+            vexpand: true;
+
+            child: ListView connection_list {
+              styles [
+                "navigation-sidebar",
+              ]
+            };
+          };
+        };
+
+        content: Adw.TabView tab_view {
+          hexpand: true;
+          vexpand: true;
+        };
+      };
+    };
+  };
+}
+
+menu primary_menu {
+  section {
+    item {
+      label: _("New Tab");
+      action: "win.new-tab";
+    }
+
+    item {
+      label: _("Close Tab");
+      action: "win.close-tab";
+    }
+  }
+
+  section {
+    item {
+      label: _("Preferences");
+      action: "app.preferences";
+    }
+  }
+
+  section {
+    item {
+      label: _("Quit");
+      action: "app.quit";
+    }
+  }
+}
