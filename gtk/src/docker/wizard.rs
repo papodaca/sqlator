@@ -149,7 +149,9 @@ pub fn present_new_connection_chooser(window: &SqlatorWindow, app: &SqlatorAppli
 pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let service = app.service();
     let dialog = adw::Dialog::new();
-    // Track natural size so step changes (esp. container list) resize the dialog.
+    // Match direct-connection form width so color swatches don't wrap the title.
+    dialog.set_content_width(560);
+    // Track natural height so step changes (esp. container list) resize the dialog.
     dialog.set_follows_content_size(true);
     dialog.set_title("New Docker Container Connection");
 
