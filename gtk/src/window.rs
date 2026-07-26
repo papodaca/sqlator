@@ -2,7 +2,8 @@ use crate::application::SqlatorApplication;
 use crate::connection::{status_map_from_service, ConnectionList, ConnectionStatus};
 use crate::query_tab::QueryTab;
 use crate::schema::{
-    replace_store_with_columns, replace_store_with_error, replace_store_with_tables, SchemaTree,
+    replace_store_with_columns, replace_store_with_error, replace_store_with_tables, SchemaDdlTab,
+    SchemaTree, TableBrowseTab,
 };
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -13,17 +14,62 @@ mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    /// One query tab detached from `tab_view` while its connection is inactive.
+    /// One workspace page detached from `tab_view` while its connection is inactive.
     #[derive(Debug, Clone)]
-    pub struct StashedQueryTab {
-        pub title: String,
-        pub tab: QueryTab,
+    pub enum StashedPage {
+        Query(QueryTab),
+        TableBrowse(TableBrowseTab),
+        SchemaDdl(SchemaDdlTab),
     }
 
-    /// Full query-tab set for a connection that is not the active workspace.
+    impl StashedPage {
+        pub fn widget(&self) -> gtk::Widget {
+            match self {
+                Self::Query(t) => t.clone().upcast(),
+                Self::TableBrowse(t) => t.clone().upcast(),
+                Self::SchemaDdl(t) => t.clone().upcast(),
+            }
+        }
+
+        pub fn set_connection_id(&self, id: Option<String>) {
+            match self {
+                Self::Query(t) => t.set_connection_id(id),
+                Self::TableBrowse(t) => t.set_connection_id(id),
+                Self::SchemaDdl(t) => t.set_connection_id(id),
+            }
+        }
+
+        pub fn as_query(&self) -> Option<&QueryTab> {
+            match self {
+                Self::Query(t) => Some(t),
+                _ => None,
+            }
+        }
+
+        pub fn has_unsaved_edits(&self) -> bool {
+            self.as_query().is_some_and(|t| t.has_unsaved_edits())
+        }
+
+        pub fn connection_matches(&self, id: &str) -> bool {
+            match self {
+                Self::Query(t) => t.connection_id().as_deref() == Some(id),
+                Self::TableBrowse(t) => t.connection_id() == id,
+                Self::SchemaDdl(t) => t.connection_id() == id,
+            }
+        }
+    }
+
+    /// One page detached from `tab_view` while its connection is inactive.
+    #[derive(Debug, Clone)]
+    pub struct StashedTab {
+        pub title: String,
+        pub page: StashedPage,
+    }
+
+    /// Full tab set for a connection that is not the active workspace.
     #[derive(Debug, Clone)]
     pub struct StashedWorkspace {
-        pub tabs: Vec<StashedQueryTab>,
+        pub tabs: Vec<StashedTab>,
         pub selected_index: u32,
     }
 
@@ -367,73 +413,77 @@ impl SqlatorWindow {
                     return glib::Propagation::Stop;
                 }
 
-                let Some(tab) = page.child().downcast::<QueryTab>().ok() else {
-                    return glib::Propagation::Proceed;
-                };
-                if tab.is_busy() {
-                    let dialog = adw::AlertDialog::new(
-                        Some("Query running"),
-                        Some("A query is still running in this tab. Cancel it and close?"),
-                    );
-                    dialog.add_response("keep", "Keep Open");
-                    dialog.add_response("close", "Cancel & Close");
-                    dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
-                    dialog.set_default_response(Some("keep"));
-                    dialog.set_close_response("keep");
+                let child = page.child();
+                if let Ok(tab) = child.clone().downcast::<QueryTab>() {
+                    if tab.is_busy() {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Query running"),
+                            Some("A query is still running in this tab. Cancel it and close?"),
+                        );
+                        dialog.add_response("keep", "Keep Open");
+                        dialog.add_response("close", "Cancel & Close");
+                        dialog
+                            .set_response_appearance("close", adw::ResponseAppearance::Destructive);
+                        dialog.set_default_response(Some("keep"));
+                        dialog.set_close_response("keep");
 
-                    let page = page.clone();
-                    let tab_view = tab_view.clone();
-                    dialog.connect_response(
-                        None,
-                        glib::clone!(
-                            #[weak]
-                            tab,
-                            move |_, response| {
-                                if response == "close" {
-                                    tab.cancel_query();
-                                    if tab.has_unsaved_edits() {
-                                        tab.discard_edits();
+                        let page = page.clone();
+                        let tab_view = tab_view.clone();
+                        dialog.connect_response(
+                            None,
+                            glib::clone!(
+                                #[weak]
+                                tab,
+                                move |_, response| {
+                                    if response == "close" {
+                                        tab.cancel_query();
+                                        if tab.has_unsaved_edits() {
+                                            tab.discard_edits();
+                                        }
+                                        tab_view.close_page_finish(&page, true);
+                                    } else {
+                                        tab_view.close_page_finish(&page, false);
                                     }
-                                    tab_view.close_page_finish(&page, true);
-                                } else {
-                                    tab_view.close_page_finish(&page, false);
                                 }
-                            }
-                        ),
-                    );
-                    dialog.present(Some(&window));
-                    return glib::Propagation::Stop;
-                }
-                if tab.has_unsaved_edits() {
-                    let dialog = adw::AlertDialog::new(
-                        Some("Unsaved changes"),
-                        Some("This tab has unsaved result edits. Discard them and close?"),
-                    );
-                    dialog.add_response("keep", "Keep Open");
-                    dialog.add_response("discard", "Discard & Close");
-                    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-                    dialog.set_default_response(Some("keep"));
-                    dialog.set_close_response("keep");
+                            ),
+                        );
+                        dialog.present(Some(&window));
+                        return glib::Propagation::Stop;
+                    }
+                    if tab.has_unsaved_edits() {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Unsaved changes"),
+                            Some("This tab has unsaved result edits. Discard them and close?"),
+                        );
+                        dialog.add_response("keep", "Keep Open");
+                        dialog.add_response("discard", "Discard & Close");
+                        dialog.set_response_appearance(
+                            "discard",
+                            adw::ResponseAppearance::Destructive,
+                        );
+                        dialog.set_default_response(Some("keep"));
+                        dialog.set_close_response("keep");
 
-                    let page = page.clone();
-                    let tab_view = tab_view.clone();
-                    dialog.connect_response(
-                        None,
-                        glib::clone!(
-                            #[weak]
-                            tab,
-                            move |_, response| {
-                                if response == "discard" {
-                                    tab.discard_edits();
-                                    tab_view.close_page_finish(&page, true);
-                                } else {
-                                    tab_view.close_page_finish(&page, false);
+                        let page = page.clone();
+                        let tab_view = tab_view.clone();
+                        dialog.connect_response(
+                            None,
+                            glib::clone!(
+                                #[weak]
+                                tab,
+                                move |_, response| {
+                                    if response == "discard" {
+                                        tab.discard_edits();
+                                        tab_view.close_page_finish(&page, true);
+                                    } else {
+                                        tab_view.close_page_finish(&page, false);
+                                    }
                                 }
-                            }
-                        ),
-                    );
-                    dialog.present(Some(&window));
-                    return glib::Propagation::Stop;
+                            ),
+                        );
+                        dialog.present(Some(&window));
+                        return glib::Propagation::Stop;
+                    }
                 }
                 glib::Propagation::Proceed
             }
@@ -1225,11 +1275,20 @@ impl SqlatorWindow {
         for i in 0..tab_view.n_pages() {
             let page = tab_view.nth_page(i);
             let title = page.title().to_string();
-            let tab = page
-                .child()
-                .downcast::<QueryTab>()
-                .expect("tab_view pages are QueryTab");
-            tabs.push(imp::StashedQueryTab { title, tab });
+            let child = page.child();
+            let stashed = if let Ok(tab) = child.clone().downcast::<QueryTab>() {
+                imp::StashedPage::Query(tab)
+            } else if let Ok(tab) = child.clone().downcast::<TableBrowseTab>() {
+                imp::StashedPage::TableBrowse(tab)
+            } else if let Ok(tab) = child.downcast::<SchemaDdlTab>() {
+                imp::StashedPage::SchemaDdl(tab)
+            } else {
+                panic!("tab_view page is not a known workspace tab type");
+            };
+            tabs.push(imp::StashedTab {
+                title,
+                page: stashed,
+            });
         }
         // Detach without cancelling in-flight queries — inactive workspaces keep running.
         self.drain_tab_view(false);
@@ -1246,12 +1305,12 @@ impl SqlatorWindow {
         let mut selected_page = None;
         for (i, stashed) in workspace.tabs.into_iter().enumerate() {
             // Keep connection_id in sync if the tab was created before wiring existed.
-            if stashed.tab.connection_id().as_deref() != Some(connection_id) {
+            if !stashed.page.connection_matches(connection_id) {
                 stashed
-                    .tab
+                    .page
                     .set_connection_id(Some(connection_id.to_string()));
             }
-            let page = tab_view.append(&stashed.tab);
+            let page = tab_view.append(&stashed.page.widget());
             page.set_title(&stashed.title);
             page.set_live_thumbnail(true);
             if i as u32 == workspace.selected_index {
@@ -1285,9 +1344,9 @@ impl SqlatorWindow {
         let tab = QueryTab::new(&app, self);
         tab.set_connection_id(Some(connection_id.to_string()));
         imp::StashedWorkspace {
-            tabs: vec![imp::StashedQueryTab {
+            tabs: vec![imp::StashedTab {
                 title: "Query".to_string(),
-                tab,
+                page: imp::StashedPage::Query(tab),
             }],
             selected_index: 0,
         }
@@ -1392,6 +1451,76 @@ impl SqlatorWindow {
         let _ = self.settings().set("editor-results-position", pos);
     }
 
+    /// Open or focus a table-browse tab for the schema connection (Svelte `tabs.openTableBrowse`).
+    pub fn open_table_browse(&self, table_name: &str, schema: Option<String>) {
+        let Some(connection_id) = self.schema_connection_id() else {
+            return;
+        };
+        if self.imp().active_workspace_id.borrow().as_deref() != Some(connection_id.as_str()) {
+            self.open_connection_workspace(&connection_id);
+        }
+
+        let tab_view = &self.imp().tab_view;
+        for i in 0..tab_view.n_pages() {
+            let page = tab_view.nth_page(i);
+            if let Ok(tab) = page.child().downcast::<TableBrowseTab>() {
+                if tab.matches_table(table_name, schema.as_deref()) {
+                    tab_view.set_selected_page(&page);
+                    return;
+                }
+            }
+        }
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let tab = TableBrowseTab::new(&app, self, connection_id, table_name, schema.clone());
+        let title = match schema.as_deref() {
+            Some(s) if !s.is_empty() => format!("{s}.{table_name}"),
+            _ => table_name.to_string(),
+        };
+        let page = tab_view.append(&tab);
+        page.set_title(&title);
+        page.set_live_thumbnail(true);
+        tab_view.set_selected_page(&page);
+    }
+
+    /// Open or focus a DDL viewer tab for the schema connection (Svelte `tabs.openSchemaDdl`).
+    pub fn open_schema_ddl(&self, table_name: &str, schema: Option<String>) {
+        let Some(connection_id) = self.schema_connection_id() else {
+            return;
+        };
+        if self.imp().active_workspace_id.borrow().as_deref() != Some(connection_id.as_str()) {
+            self.open_connection_workspace(&connection_id);
+        }
+
+        let tab_view = &self.imp().tab_view;
+        for i in 0..tab_view.n_pages() {
+            let page = tab_view.nth_page(i);
+            if let Ok(tab) = page.child().downcast::<SchemaDdlTab>() {
+                if tab.matches_table(table_name, schema.as_deref()) {
+                    tab_view.set_selected_page(&page);
+                    return;
+                }
+            }
+        }
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let tab = SchemaDdlTab::new(&app, self, connection_id, table_name, schema.clone());
+        let title = match schema.as_deref() {
+            Some(s) if !s.is_empty() => format!("DDL: {s}.{table_name}"),
+            _ => format!("DDL: {table_name}"),
+        };
+        let page = tab_view.append(&tab);
+        page.set_title(&title);
+        page.set_live_thumbnail(true);
+        tab_view.set_selected_page(&page);
+    }
+
     /// True when any mounted or stashed query tab has pending result edits.
     fn has_any_unsaved_edits(&self) -> bool {
         let tab_view = &self.imp().tab_view;
@@ -1407,7 +1536,7 @@ impl SqlatorWindow {
             .borrow()
             .values()
             .flat_map(|ws| ws.tabs.iter())
-            .any(|stashed| stashed.tab.has_unsaved_edits())
+            .any(|stashed| stashed.page.has_unsaved_edits())
     }
 
     /// Discard pending result edits across mounted and stashed query tabs.
@@ -1420,14 +1549,15 @@ impl SqlatorWindow {
                 }
             }
         }
-        let stashed_tabs: Vec<QueryTab> = self
+        let stashed_queries: Vec<QueryTab> = self
             .imp()
             .stashed_workspaces
             .borrow()
             .values()
-            .flat_map(|ws| ws.tabs.iter().map(|s| s.tab.clone()))
+            .flat_map(|ws| ws.tabs.iter())
+            .filter_map(|s| s.page.as_query().cloned())
             .collect();
-        for tab in stashed_tabs {
+        for tab in stashed_queries {
             if tab.has_unsaved_edits() {
                 tab.discard_edits();
             }

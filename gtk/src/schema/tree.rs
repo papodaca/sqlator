@@ -3,7 +3,7 @@
 use super::item::{SchemaItem, SchemaKind};
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
-use gtk::{gio, pango};
+use gtk::{gdk, gio, glib, pango};
 use sqlator_core::models::{SchemaColumnInfo, SchemaInfo, TableInfo};
 use std::cell::RefCell;
 
@@ -53,16 +53,21 @@ impl SchemaTree {
 
         let selection = gtk::NoSelection::new(Some(tree_model));
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let list_item = item
-                .downcast_ref::<gtk::ListItem>()
-                .expect("ListItem in schema factory setup");
-            let row = build_row_widget();
-            list_item.set_child(Some(&row.root));
-            unsafe {
-                list_item.set_data(ROW_DATA_KEY, row);
+        factory.connect_setup(glib::clone!(
+            #[weak]
+            window,
+            move |_, item| {
+                let list_item = item
+                    .downcast_ref::<gtk::ListItem>()
+                    .expect("ListItem in schema factory setup");
+                let row = build_row_widget();
+                install_table_context_menu(&window, &row.root);
+                list_item.set_child(Some(&row.root));
+                unsafe {
+                    list_item.set_data(ROW_DATA_KEY, row);
+                }
             }
-        });
+        ));
         factory.connect_bind(|_, item| {
             let list_item = item
                 .downcast_ref::<gtk::ListItem>()
@@ -100,6 +105,26 @@ impl SchemaTree {
 
         list_view.set_factory(Some(&factory));
         list_view.set_model(Some(&selection));
+        // Double-click / Enter opens table browse (Svelte SchemaNode dblclick).
+        list_view.set_single_click_activate(false);
+        list_view.connect_activate(glib::clone!(
+            #[weak]
+            window,
+            move |list, position| {
+                let Some(model) = list.model() else {
+                    return;
+                };
+                let Some(tree_row) = model.item(position).and_downcast::<gtk::TreeListRow>() else {
+                    return;
+                };
+                let Some(item) = tree_row.item().and_downcast::<SchemaItem>() else {
+                    return;
+                };
+                if let SchemaKind::Table { name, schema, .. } = item.kind() {
+                    window.open_table_browse(&name, schema);
+                }
+            }
+        ));
 
         Self {
             root,
@@ -287,6 +312,113 @@ fn bind_row(row: &RowWidgets, item: &SchemaItem) {
             row.root.add_css_class("schema-placeholder");
             row.root.set_tooltip_text(Some(&message));
         }
+    }
+}
+
+fn install_table_context_menu(window: &SqlatorWindow, expander: &gtk::TreeExpander) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_SECONDARY);
+    gesture.connect_released(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        expander,
+        move |gesture, _, x, y| {
+            let Some(tree_row) = expander.list_row() else {
+                return;
+            };
+            let Some(item) = tree_row.item().and_downcast::<SchemaItem>() else {
+                return;
+            };
+            let SchemaKind::Table {
+                name,
+                schema,
+                table_type,
+                ..
+            } = item.kind()
+            else {
+                return;
+            };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let popover = build_table_context_popover(&window, name, schema, table_type);
+            popover.set_parent(&expander);
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.connect_closed(|p| {
+                p.unparent();
+            });
+            popover.popup();
+        }
+    ));
+    expander.add_controller(gesture);
+}
+
+fn build_table_context_popover(
+    window: &SqlatorWindow,
+    name: String,
+    schema: Option<String>,
+    table_type: String,
+) -> gtk::Popover {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    box_.add_css_class("connection-menu");
+
+    let open_label = if table_type.eq_ignore_ascii_case("view") {
+        "Open View Data"
+    } else {
+        "Open Table"
+    };
+    let open_btn = menu_button(open_label);
+    open_btn.connect_clicked(glib::clone!(
+        #[weak]
+        window,
+        #[strong]
+        name,
+        #[strong]
+        schema,
+        move |btn| {
+            close_popover(btn);
+            window.open_table_browse(&name, schema.clone());
+        }
+    ));
+    box_.append(&open_btn);
+
+    let ddl_btn = menu_button("Open Schema");
+    ddl_btn.connect_clicked(glib::clone!(
+        #[weak]
+        window,
+        #[strong]
+        name,
+        #[strong]
+        schema,
+        move |btn| {
+            close_popover(btn);
+            window.open_schema_ddl(&name, schema.clone());
+        }
+    ));
+    box_.append(&ddl_btn);
+
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&box_));
+    popover.set_has_arrow(false);
+    popover.add_css_class("menu");
+    popover
+}
+
+fn menu_button(label: &str) -> gtk::Button {
+    let btn = gtk::Button::with_label(label);
+    btn.set_halign(gtk::Align::Fill);
+    btn.add_css_class("flat");
+    btn.add_css_class("connection-menu-item");
+    btn
+}
+
+fn close_popover(from: &impl IsA<gtk::Widget>) {
+    let mut widget = from.clone().upcast::<gtk::Widget>();
+    while let Some(parent) = widget.parent() {
+        if let Ok(popover) = parent.clone().downcast::<gtk::Popover>() {
+            popover.popdown();
+            return;
+        }
+        widget = parent;
     }
 }
 

@@ -6,8 +6,8 @@ use crate::results::row::RowObject;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{
-    glib, ColumnView, ColumnViewCell, ColumnViewColumn, CustomSorter, GestureClick, Inscription,
-    MultiSelection, SignalListItemFactory, SortListModel,
+    glib, ColumnView, ColumnViewCell, ColumnViewColumn, ColumnViewSorter, CustomSorter,
+    GestureClick, Inscription, MultiSelection, SignalListItemFactory, SortListModel, SortType,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -39,6 +39,8 @@ pub struct EditToolbarState {
 
 type SimpleCb = Rc<dyn Fn()>;
 type EditRowCb = Rc<dyn Fn(u32)>;
+/// Server-side sort callback: `None` clears sort; `Some((column, desc))` sets it.
+type ServerSortCb = Rc<dyn Fn(Option<(String, bool)>)>;
 
 mod imp {
     use super::*;
@@ -68,6 +70,10 @@ mod imp {
         pub on_discard: RefCell<Option<SimpleCb>>,
         pub on_delete_selected: RefCell<Option<SimpleCb>>,
         pub on_edit_row: RefCell<Option<EditRowCb>>,
+        /// When false, column-header clicks drive server-side sort (no client reorder).
+        pub client_sorting: Cell<bool>,
+        pub on_server_sort: RefCell<Option<ServerSortCb>>,
+        pub server_sort_wired: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -172,6 +178,9 @@ mod imp {
                 on_discard: RefCell::new(None),
                 on_delete_selected: RefCell::new(None),
                 on_edit_row: RefCell::new(None),
+                client_sorting: Cell::new(true),
+                on_server_sort: RefCell::new(None),
+                server_sort_wired: Cell::new(false),
             }
         }
     }
@@ -300,6 +309,85 @@ impl ResultsGrid {
         *self.imp().on_discard.borrow_mut() = Some(Rc::new(on_discard));
         *self.imp().on_delete_selected.borrow_mut() = Some(Rc::new(on_delete_selected));
         *self.imp().on_edit_row.borrow_mut() = Some(Rc::new(on_edit_row));
+    }
+
+    /// When `enabled` is false, column-header clicks emit [`Self::connect_server_sort`]
+    /// instead of reordering the local model (table-browse parity with EnhancedGrid).
+    pub fn set_client_sorting(&self, enabled: bool) {
+        self.imp().client_sorting.set(enabled);
+        self.sync_sort_model_link();
+        if !enabled {
+            self.ensure_server_sort_wired();
+        }
+    }
+
+    pub fn connect_server_sort(&self, on_sort: impl Fn(Option<(String, bool)>) + 'static) {
+        *self.imp().on_server_sort.borrow_mut() = Some(Rc::new(on_sort));
+        self.ensure_server_sort_wired();
+    }
+
+    fn ensure_server_sort_wired(&self) {
+        if self.imp().server_sort_wired.get() {
+            return;
+        }
+        self.imp().server_sort_wired.set(true);
+        let Some(sorter) = self
+            .imp()
+            .column_view
+            .sorter()
+            .and_downcast::<ColumnViewSorter>()
+        else {
+            tracing::warn!("ColumnView sorter is not a ColumnViewSorter; server sort disabled");
+            return;
+        };
+
+        let emit = glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move || {
+                if grid.imp().client_sorting.get() {
+                    return;
+                }
+                let Some(cb) = grid.imp().on_server_sort.borrow().clone() else {
+                    return;
+                };
+                let Some(sorter) = grid
+                    .imp()
+                    .column_view
+                    .sorter()
+                    .and_downcast::<ColumnViewSorter>()
+                else {
+                    return;
+                };
+                let spec = sorter.primary_sort_column().map(|col| {
+                    let name = col.title().map(|t| t.to_string()).unwrap_or_default();
+                    let desc = sorter.primary_sort_order() == SortType::Descending;
+                    (name, desc)
+                });
+                cb(spec);
+            }
+        );
+
+        sorter.connect_primary_sort_column_notify(glib::clone!(
+            #[strong]
+            emit,
+            move |_| emit()
+        ));
+        sorter.connect_primary_sort_order_notify(move |_| emit());
+    }
+
+    fn sync_sort_model_link(&self) {
+        let selection = self.selection();
+        let Some(sort_model) = selection.model().and_downcast::<SortListModel>() else {
+            return;
+        };
+        if self.imp().client_sorting.get() {
+            if let Some(sorter) = self.imp().column_view.sorter() {
+                sort_model.set_sorter(Some(&sorter));
+            }
+        } else {
+            sort_model.set_sorter(gtk::Sorter::NONE);
+        }
     }
 
     pub fn set_edit_toolbar(&self, state: &EditToolbarState) {
@@ -674,12 +762,8 @@ impl ResultsGrid {
             column_view.append_column(&column);
         }
 
-        // Keep SortListModel sorter linked after column rebuild.
-        if let Some(sorter) = column_view.sorter() {
-            if let Some(sort_model) = selection.model().and_downcast::<SortListModel>() {
-                sort_model.set_sorter(Some(&sorter));
-            }
-        }
+        // Re-apply client vs server sort linking after column rebuild.
+        self.sync_sort_model_link();
     }
 }
 
