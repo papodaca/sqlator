@@ -1,7 +1,7 @@
 use crate::ssh::auth::{AuthMethod, SshAuthConfig, SshHostConfig};
 use crate::ssh::error::{SshError, SshResult};
-use russh::*;
 use russh::keys::*;
+use russh::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,10 +28,10 @@ impl SshTunnel {
     pub async fn create(
         profile_id: String,
         ssh_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
         target_host: String,
         target_port: u16,
-        jump_hosts: Vec<(SshHostConfig, SshAuthConfig)>,
+        jump_hosts: &[(SshHostConfig, SshAuthConfig)],
     ) -> SshResult<TunnelHandle> {
         let cancel_token = CancellationToken::new();
 
@@ -45,14 +45,17 @@ impl SshTunnel {
         );
 
         let session = if jump_hosts.is_empty() {
-            debug!("SSH tunnel: direct connection to {}:{}", ssh_config.host, ssh_config.port);
+            debug!(
+                "SSH tunnel: direct connection to {}:{}",
+                ssh_config.host, ssh_config.port
+            );
             Self::connect_direct(ssh_config, auth_config).await?
         } else {
             debug!(
                 "SSH tunnel: connecting via {} jump host(s)",
                 jump_hosts.len()
             );
-            Self::connect_via_jump(ssh_config, auth_config, &jump_hosts).await?
+            Self::connect_via_jump(ssh_config, auth_config, jump_hosts).await?
         };
 
         info!("SSH tunnel: SSH session established");
@@ -201,31 +204,25 @@ impl SshTunnel {
 
     async fn connect_direct(
         config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
     ) -> SshResult<client::Handle<Client>> {
         let ssh_config = client::Config::default();
         let config_arc = Arc::new(ssh_config);
 
-        debug!(
-            "SSH tunnel: TCP connect to {}:{}",
-            config.host, config.port
-        );
-        let mut session = client::connect(
-            config_arc,
-            (config.host.as_str(), config.port),
-            Client {},
-        )
-        .await
-        .map_err(|e| {
-            error!(
-                "SSH tunnel: TCP connect failed to {}:{}: {}",
-                config.host, config.port, e
-            );
-            SshError::ConnectionFailed(e.to_string())
-        })?;
+        debug!("SSH tunnel: TCP connect to {}:{}", config.host, config.port);
+        let mut session =
+            client::connect(config_arc, (config.host.as_str(), config.port), Client {})
+                .await
+                .map_err(|e| {
+                    error!(
+                        "SSH tunnel: TCP connect failed to {}:{}: {}",
+                        config.host, config.port, e
+                    );
+                    SshError::ConnectionFailed(e.to_string())
+                })?;
 
         debug!("SSH tunnel: authenticating as '{}'", auth_config.username);
-        Self::authenticate(&mut session, &auth_config).await?;
+        Self::authenticate(&mut session, auth_config).await?;
         debug!("SSH tunnel: authenticated");
 
         Ok(session)
@@ -233,7 +230,7 @@ impl SshTunnel {
 
     async fn connect_via_jump(
         target_config: &SshHostConfig,
-        target_auth: SshAuthConfig,
+        target_auth: &SshAuthConfig,
         jump_hosts: &[(SshHostConfig, SshAuthConfig)],
     ) -> SshResult<client::Handle<Client>> {
         if jump_hosts.is_empty() {
@@ -245,7 +242,7 @@ impl SshTunnel {
             "SSH tunnel: connecting to first jump host {}:{}",
             first_host.host, first_host.port
         );
-        let mut current_session = Self::connect_direct(first_host, first_auth.clone()).await?;
+        let mut current_session = Self::connect_direct(first_host, first_auth).await?;
 
         for (i, (jump_config, jump_auth)) in jump_hosts.iter().skip(1).enumerate() {
             debug!(
@@ -256,7 +253,7 @@ impl SshTunnel {
                 jump_config.port
             );
             current_session =
-                Self::connect_through_jump(&current_session, jump_config, jump_auth.clone()).await?;
+                Self::connect_through_jump(&current_session, jump_config, jump_auth).await?;
         }
 
         debug!(
@@ -271,7 +268,7 @@ impl SshTunnel {
     async fn connect_through_jump(
         jump_session: &client::Handle<Client>,
         target_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
     ) -> SshResult<client::Handle<Client>> {
         debug!(
             "SSH tunnel: opening direct-tcpip channel to {}:{}",
@@ -310,7 +307,7 @@ impl SshTunnel {
             "SSH tunnel: authenticating through jump as '{}'",
             auth_config.username
         );
-        Self::authenticate(&mut session, &auth_config).await?;
+        Self::authenticate(&mut session, auth_config).await?;
         debug!(
             "SSH tunnel: authenticated through jump to {}:{}",
             target_config.host, target_config.port
@@ -353,7 +350,10 @@ impl SshTunnel {
                     .success()
             }
             AuthMethod::Password => {
-                debug!("SSH tunnel: authenticating user '{}' with password", username);
+                debug!(
+                    "SSH tunnel: authenticating user '{}' with password",
+                    username
+                );
                 let password = auth_config
                     .password
                     .as_ref()
@@ -376,7 +376,10 @@ impl SshTunnel {
         };
 
         if !success {
-            error!("SSH tunnel: authentication rejected for user '{}'", username);
+            error!(
+                "SSH tunnel: authentication rejected for user '{}'",
+                username
+            );
             return Err(SshError::AuthFailed("Authentication rejected".into()));
         }
 
@@ -386,8 +389,8 @@ impl SshTunnel {
     fn load_key_pair(path: &Path, _passphrase: Option<&str>) -> SshResult<PrivateKey> {
         let key_data = std::fs::read(path).map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
 
-        let key_pair =
-            PrivateKey::from_openssh(&key_data).map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
+        let key_pair = PrivateKey::from_openssh(&key_data)
+            .map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
 
         Ok(key_pair)
     }
@@ -395,9 +398,8 @@ impl SshTunnel {
     fn find_available_port() -> SshResult<u16> {
         use std::net::TcpListener as StdTcpListener;
 
-        let listener =
-            StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-                .map_err(|e| SshError::PortBindFailed(e.to_string()))?;
+        let listener = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .map_err(|e| SshError::PortBindFailed(e.to_string()))?;
 
         let port = listener
             .local_addr()

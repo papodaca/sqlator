@@ -55,11 +55,11 @@ impl AppService {
             })?;
 
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
         let info =
-            ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, container_name)
+            ContainerInspector::inspect(&ssh_config, &auth_config, &jump_hosts, container_name)
                 .await?;
 
         Ok(DockerContainerInfo {
@@ -92,11 +92,11 @@ impl AppService {
             })?;
 
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
         let containers =
-            ContainerInspector::list_running(&ssh_config, auth_config, jump_hosts).await?;
+            ContainerInspector::list_running(&ssh_config, &auth_config, &jump_hosts).await?;
 
         Ok(containers
             .into_iter()

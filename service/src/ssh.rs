@@ -84,8 +84,8 @@ pub fn build_jump_hosts_for_profile(
                     ));
                 }
             };
-            // SshAuthConfig still derives Clone today (ledger row 10 / sqlator-33j).
-            let config = SshHostConfig::new(&jump.host, jump.port, auth.clone());
+            // Metadata only — secrets stay in `auth` (no Clone on SshAuthConfig).
+            let config = SshHostConfig::new(&jump.host, jump.port, &auth);
             Ok((config, auth))
         })
         .collect()
@@ -250,15 +250,15 @@ impl AppService {
             }
         };
 
-        let ssh_config = SshHostConfig::new(&request.host, request.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&request.host, request.port, &auth_config);
         // Standalone create historically passed no jump hosts (UI path).
         let tunnel = SshTunnel::create(
             request.profile_id.clone(),
             &ssh_config,
-            auth_config,
+            &auth_config,
             request.target_host.clone(),
             request.target_port,
-            vec![],
+            &[],
         )
         .await?;
         SshTunnel::start_forwarding(&tunnel).await?;

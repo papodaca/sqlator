@@ -88,17 +88,17 @@ impl AppService {
 
         let (target_host, target_port) = target_from_db_url(url)?;
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
         let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
 
         let tunnel = SshTunnel::create(
             tunnel_id,
             &ssh_config,
-            auth_config,
+            &auth_config,
             target_host,
             target_port,
-            jump_hosts,
+            &jump_hosts,
         )
         .await?;
 
@@ -131,16 +131,12 @@ impl AppService {
             })?;
 
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
-        let container_info = ContainerInspector::inspect(
-            &ssh_config,
-            auth_config.clone(),
-            jump_hosts.clone(),
-            container_name,
-        )
-        .await?;
+        let container_info =
+            ContainerInspector::inspect(&ssh_config, &auth_config, &jump_hosts, container_name)
+                .await?;
 
         if container_info.status != ContainerStatus::Running {
             return Err(ServiceError::app(
@@ -154,10 +150,10 @@ impl AppService {
         let tunnel = SshTunnel::create(
             tunnel_id,
             &ssh_config,
-            auth_config,
+            &auth_config,
             container_info.ip_address.clone(),
             port,
-            jump_hosts,
+            &jump_hosts,
         )
         .await?;
 
@@ -257,11 +253,11 @@ impl AppService {
             })?;
 
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
         let container_info =
-            ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, container_name)
+            ContainerInspector::inspect(&ssh_config, &auth_config, &jump_hosts, container_name)
                 .await?;
 
         if container_info.status != ContainerStatus::Running {
@@ -379,16 +375,16 @@ impl AppService {
             )
         })?;
         let auth_config = build_auth_config_for_profile(&profile, &self.credentials)?;
-        let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
+        let ssh_config = SshHostConfig::new(&profile.host, profile.port, &auth_config);
         let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
         let tunnel = SshTunnel::create(
             profile_id.to_string(),
             &ssh_config,
-            auth_config,
+            &auth_config,
             target_host.to_string(),
             target_port,
-            jump_hosts,
+            &jump_hosts,
         )
         .await?;
         SshTunnel::start_forwarding(&tunnel).await?;

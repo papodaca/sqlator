@@ -1,7 +1,7 @@
 use crate::ssh::auth::{AuthMethod, SshAuthConfig, SshHostConfig};
 use crate::ssh::error::{SshError, SshResult};
-use russh::*;
 use russh::keys::*;
+use russh::*;
 use std::sync::Arc;
 use tracing::{debug, error};
 
@@ -16,11 +16,14 @@ pub struct SshCommand;
 impl SshCommand {
     pub async fn exec(
         ssh_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
         command: &str,
         timeout: std::time::Duration,
     ) -> SshResult<SshCommandResult> {
-        debug!("SSH command: connecting to {}:{}", ssh_config.host, ssh_config.port);
+        debug!(
+            "SSH command: connecting to {}:{}",
+            ssh_config.host, ssh_config.port
+        );
         let mut session = Self::connect(ssh_config, auth_config).await?;
         debug!("SSH command: authenticated, executing: {}", command);
 
@@ -40,7 +43,7 @@ impl SshCommand {
 
     pub async fn exec_via_jump(
         target_config: &SshHostConfig,
-        target_auth: SshAuthConfig,
+        target_auth: &SshAuthConfig,
         jump_hosts: &[(SshHostConfig, SshAuthConfig)],
         command: &str,
         timeout: std::time::Duration,
@@ -50,11 +53,11 @@ impl SshCommand {
         }
 
         let (first_host, first_auth) = &jump_hosts[0];
-        let mut current_session = Self::connect(first_host, first_auth.clone()).await?;
+        let mut current_session = Self::connect(first_host, first_auth).await?;
 
         for (jump_config, jump_auth) in jump_hosts.iter().skip(1) {
             current_session =
-                Self::connect_through_jump(&current_session, jump_config, jump_auth.clone()).await?;
+                Self::connect_through_jump(&current_session, jump_config, jump_auth).await?;
         }
 
         let mut session =
@@ -78,21 +81,15 @@ impl SshCommand {
         session: &mut client::Handle<CommandClient>,
         command: &str,
     ) -> SshResult<SshCommandResult> {
-        let mut channel = session
-            .channel_open_session()
-            .await
-            .map_err(|e| {
-                error!("SSH command: failed to open session channel: {}", e);
-                SshError::Other(format!("Failed to open session channel: {}", e))
-            })?;
+        let mut channel = session.channel_open_session().await.map_err(|e| {
+            error!("SSH command: failed to open session channel: {}", e);
+            SshError::Other(format!("Failed to open session channel: {}", e))
+        })?;
 
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|e| {
-                error!("SSH command: failed to exec: {}", e);
-                SshError::Other(format!("Failed to execute command: {}", e))
-            })?;
+        channel.exec(true, command).await.map_err(|e| {
+            error!("SSH command: failed to exec: {}", e);
+            SshError::Other(format!("Failed to execute command: {}", e))
+        })?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -127,7 +124,7 @@ impl SshCommand {
 
     async fn connect(
         config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
     ) -> SshResult<client::Handle<CommandClient>> {
         let ssh_config = client::Config::default();
         let config_arc = Arc::new(ssh_config);
@@ -139,18 +136,21 @@ impl SshCommand {
         )
         .await
         .map_err(|e| {
-            error!("SSH command: connect failed to {}:{}: {}", config.host, config.port, e);
+            error!(
+                "SSH command: connect failed to {}:{}: {}",
+                config.host, config.port, e
+            );
             SshError::ConnectionFailed(e.to_string())
         })?;
 
-        Self::authenticate(&mut session, &auth_config).await?;
+        Self::authenticate(&mut session, auth_config).await?;
         Ok(session)
     }
 
     async fn connect_through_jump(
         jump_session: &client::Handle<CommandClient>,
         target_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
+        auth_config: &SshAuthConfig,
     ) -> SshResult<client::Handle<CommandClient>> {
         let channel = jump_session
             .channel_open_direct_tcpip(
@@ -171,17 +171,18 @@ impl SshCommand {
         let ssh_config = client::Config::default();
         let config_arc = Arc::new(ssh_config);
 
-        let mut session = client::connect_stream(config_arc, channel.into_stream(), CommandClient {})
-            .await
-            .map_err(|e| {
-                error!(
-                    "SSH command: connect_stream failed for {}:{}: {}",
-                    target_config.host, target_config.port, e
-                );
-                SshError::JumpHostFailed(e.to_string())
-            })?;
+        let mut session =
+            client::connect_stream(config_arc, channel.into_stream(), CommandClient {})
+                .await
+                .map_err(|e| {
+                    error!(
+                        "SSH command: connect_stream failed for {}:{}: {}",
+                        target_config.host, target_config.port, e
+                    );
+                    SshError::JumpHostFailed(e.to_string())
+                })?;
 
-        Self::authenticate(&mut session, &auth_config).await?;
+        Self::authenticate(&mut session, auth_config).await?;
         Ok(session)
     }
 
@@ -198,8 +199,8 @@ impl SshCommand {
                     .as_ref()
                     .ok_or_else(|| SshError::AuthFailed("Key path not provided".into()))?;
 
-                let key_data = std::fs::read(key_path)
-                    .map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
+                let key_data =
+                    std::fs::read(key_path).map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
                 let key_pair = PrivateKey::from_openssh(&key_data)
                     .map_err(|e| SshError::KeyLoadFailed(e.to_string()))?;
 

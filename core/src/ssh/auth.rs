@@ -19,7 +19,17 @@ pub struct SshAuthConfigData {
     pub has_password: bool,
 }
 
-#[derive(Debug, Clone)]
+/// SSH authentication material. Secrets are zeroized on [`Drop`].
+///
+/// Intentionally does **not** implement [`Clone`] so passwords/passphrases
+/// cannot be accidentally retained via copies (sqlator-33j).
+///
+/// ```compile_fail
+/// use sqlator_core::SshAuthConfig;
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<SshAuthConfig>();
+/// ```
+#[derive(Debug)]
 pub struct SshAuthConfig {
     pub method: AuthMethod,
     pub username: String,
@@ -106,7 +116,7 @@ pub struct SshHostConfig {
 }
 
 impl SshHostConfig {
-    pub fn new(host: impl Into<String>, port: u16, auth: SshAuthConfig) -> Self {
+    pub fn new(host: impl Into<String>, port: u16, auth: &SshAuthConfig) -> Self {
         Self {
             host: host.into(),
             port,
@@ -172,16 +182,15 @@ mod group_b_tests {
         drop(SshAuthConfig::with_key_and_passphrase("u", "/tmp/k", "y"));
     }
 
-    /// Plan Group B asked for a "does NOT implement Clone" guard.
-    /// Current production code `#[derive(Clone)]` on `SshAuthConfig` — characterization
-    /// pins that fact. Removing Clone (so Drop zeroization cannot be defeated by
-    /// copies) is a production change deferred to phase 1 / a follow-up issue.
+    /// sqlator-33j: Clone removed so Drop zeroization cannot be defeated by copies.
+    /// Stable Rust has no `T: !Clone` bound; the `compile_fail` doctest on
+    /// [`SshAuthConfig`] is the compile-time guard. This test documents the
+    /// invariant and exercises construction/drop without cloning.
     #[test]
-    fn ssh_auth_config_currently_implements_clone() {
-        fn assert_clone<T: Clone>() {}
-        assert_clone::<SshAuthConfig>();
+    fn ssh_auth_config_does_not_rely_on_clone() {
         let a = SshAuthConfig::with_password("u", "secret");
-        let b = a.clone();
-        assert_eq!(b.password.as_deref(), Some("secret"));
+        assert_eq!(a.password.as_deref(), Some("secret"));
+        assert_eq!(a.username, "u");
+        drop(a);
     }
 }

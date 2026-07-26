@@ -73,7 +73,9 @@ fn validate_container_name(name: &str) -> Result<(), DockerError> {
     if name.is_empty() {
         return Err(DockerError::InvalidContainerName);
     }
-    let forbidden = [';', '&', '|', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r', '\\', '\''];
+    let forbidden = [
+        ';', '&', '|', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r', '\\', '\'',
+    ];
     if name.chars().any(|c| forbidden.contains(&c)) {
         return Err(DockerError::InvalidContainerName);
     }
@@ -85,8 +87,8 @@ pub struct ContainerInspector;
 impl ContainerInspector {
     pub async fn inspect(
         ssh_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
-        jump_hosts: Vec<(SshHostConfig, SshAuthConfig)>,
+        auth_config: &SshAuthConfig,
+        jump_hosts: &[(SshHostConfig, SshAuthConfig)],
         container_name: &str,
     ) -> Result<ContainerInfo, DockerError> {
         validate_container_name(container_name)?;
@@ -96,7 +98,10 @@ impl ContainerInspector {
             shell_escape(container_name)
         );
 
-        info!("ContainerInspector: inspecting '{}' over SSH", container_name);
+        info!(
+            "ContainerInspector: inspecting '{}' over SSH",
+            container_name
+        );
         debug!("ContainerInspector: command: {}", command);
 
         let result = if jump_hosts.is_empty() {
@@ -111,7 +116,7 @@ impl ContainerInspector {
             SshCommand::exec_via_jump(
                 ssh_config,
                 auth_config,
-                &jump_hosts,
+                jump_hosts,
                 &command,
                 std::time::Duration::from_secs(30),
             )
@@ -123,8 +128,8 @@ impl ContainerInspector {
 
     pub async fn list_running(
         ssh_config: &SshHostConfig,
-        auth_config: SshAuthConfig,
-        jump_hosts: Vec<(SshHostConfig, SshAuthConfig)>,
+        auth_config: &SshAuthConfig,
+        jump_hosts: &[(SshHostConfig, SshAuthConfig)],
     ) -> Result<Vec<ContainerSummary>, DockerError> {
         let command = r#"docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}'"#;
 
@@ -142,7 +147,7 @@ impl ContainerInspector {
             SshCommand::exec_via_jump(
                 ssh_config,
                 auth_config,
-                &jump_hosts,
+                jump_hosts,
                 command,
                 std::time::Duration::from_secs(30),
             )
@@ -151,10 +156,15 @@ impl ContainerInspector {
 
         if let Some(code) = result.exit_code {
             if code != 0 {
-                if result.stderr.contains("permission denied") || result.stderr.contains("Got permission denied") {
+                if result.stderr.contains("permission denied")
+                    || result.stderr.contains("Got permission denied")
+                {
                     return Err(DockerError::PermissionDenied);
                 }
-                if result.stderr.contains("Cannot connect to the Docker daemon") {
+                if result
+                    .stderr
+                    .contains("Cannot connect to the Docker daemon")
+                {
                     return Err(DockerError::DaemonUnreachable);
                 }
                 return Err(DockerError::Other(result.stderr.trim().to_string()));
@@ -195,7 +205,8 @@ impl ContainerInspector {
                 if stderr.contains("No such object") || stderr.contains("No such container") {
                     return Err(DockerError::ContainerNotFound(container_name.to_string()));
                 }
-                if stderr.contains("permission denied") || stderr.contains("Got permission denied") {
+                if stderr.contains("permission denied") || stderr.contains("Got permission denied")
+                {
                     return Err(DockerError::PermissionDenied);
                 }
                 if stderr.contains("Cannot connect to the Docker daemon") {
@@ -213,7 +224,8 @@ impl ContainerInspector {
         let parts: Vec<&str> = output.splitn(5, '|').collect();
         if parts.len() < 2 {
             return Err(DockerError::ParseError(format!(
-                "Unexpected docker inspect output: {}", output
+                "Unexpected docker inspect output: {}",
+                output
             )));
         }
 
@@ -240,7 +252,10 @@ impl ContainerInspector {
         let database_type_hint = detect_db_type(&image, &labels);
 
         if ip_address.is_empty() {
-            warn!("Container '{}' is running but has no IP address (may be on an isolated network)", container_name);
+            warn!(
+                "Container '{}' is running but has no IP address (may be on an isolated network)",
+                container_name
+            );
             return Err(DockerError::NetworkIsolated);
         }
 

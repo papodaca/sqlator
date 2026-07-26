@@ -443,15 +443,15 @@ async fn ssh_tunnel_two_simultaneous_streams_complete() {
     }
 
     let auth = SshAuthConfig::with_password(SSH_USER, SSH_PASSWORD);
-    let host = SshHostConfig::new(SSH_HOST, SSH_PORT, auth.clone());
+    let host = SshHostConfig::new(SSH_HOST, SSH_PORT, &auth);
 
     let tunnel = SshTunnel::create(
         "group-c-concurrency".into(),
         &host,
-        auth,
+        &auth,
         TUNNEL_TARGET_HOST.into(),
         TUNNEL_TARGET_PORT,
-        vec![],
+        &[],
     )
     .await
     .expect("SSH tunnel create");

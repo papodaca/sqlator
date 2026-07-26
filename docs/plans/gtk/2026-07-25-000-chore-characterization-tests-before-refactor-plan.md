@@ -187,7 +187,7 @@ Notes pinned by Group A that are **not** divergences (same in both copies):
 
 | # | Behavior | Tauri | Web | Recommended winner |
 |---|---|---|---|---|
-| 10 | `SshAuthConfig` implements `Clone` | Yes (`#[derive(Clone)]` in `core`) — plan B wanted a no-`Clone` guard so Drop zeroization cannot be defeated by copies | Same (shared core) | **Remove `Clone`** in phase 1 (or a small precursor PR); characterization today asserts Clone *is* present |
+| 10 | `SshAuthConfig` implements `Clone` | **Resolved (sqlator-33j):** `Clone` removed; APIs take `&SshAuthConfig`; `compile_fail` doctest + `ssh_auth_config_does_not_rely_on_clone` guard the invariant | Same (shared core) | Keep no-`Clone`; do not re-add for convenience |
 | 11 | Vault atomic write on rename failure | `write_vault_atomic` leaves `vault.tmp` behind when rename fails | Same (shared core) | Keep temp+rename; on failure ideally remove `.tmp` (hardening, not required for phase 1 move) |
 
 Notes pinned by Group B that are **not** divergences (same in both copies / core-only):
