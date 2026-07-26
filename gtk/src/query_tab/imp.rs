@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::results::ResultsGrid;
 use crate::window::SqlatorWindow;
 
 #[derive(Default, CompositeTemplate)]
@@ -22,7 +23,7 @@ pub struct QueryTab {
     #[template_child]
     pub results_stack: TemplateChild<gtk::Stack>,
     #[template_child]
-    pub results_view: TemplateChild<gtk::TextView>,
+    pub results_grid: TemplateChild<ResultsGrid>,
     #[template_child]
     pub messages_view: TemplateChild<gtk::TextView>,
 
@@ -40,8 +41,9 @@ impl ObjectSubclass for QueryTab {
     type ParentType = adw::Bin;
 
     fn class_init(klass: &mut Self::Class) {
-        // Ensure SourceView type is registered before template inflation.
+        // Ensure custom / foreign types are registered before template inflation.
         sourceview::View::ensure_type();
+        ResultsGrid::ensure_type();
         klass.bind_template();
     }
 

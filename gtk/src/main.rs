@@ -1,5 +1,6 @@
 mod application;
 mod query_tab;
+mod results;
 mod runtime;
 mod window;
 

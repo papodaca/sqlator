@@ -1,22 +1,18 @@
 /* Single stylesheet — prefer media queries over style-dark.css / style-hc.css. */
 
-.results-placeholder {
-  font-family: monospace;
-  padding: 12px;
+.dimmed {
+  opacity: 0.7;
 }
 
-@media (prefers-color-scheme: dark) {
-  .results-placeholder {
-    color: var(--accent-fg-color, inherit);
-  }
+/* NULL cells in the ColumnView results grid */
+.null-cell {
+  font-style: italic;
+  opacity: 0.55;
 }
 
 @media (prefers-contrast: more) {
-  .results-placeholder {
-    font-weight: bold;
+  .null-cell {
+    opacity: 0.8;
+    text-decoration: underline;
   }
-}
-
-.dimmed {
-  opacity: 0.7;
 }

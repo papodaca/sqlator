@@ -38,15 +38,9 @@ template $QueryTab: Adw.Bin {
 
         StackPage {
           name: "results";
-          child: ScrolledWindow {
-            child: TextView results_view {
-              editable: false;
-              monospace: true;
-              wrap-mode: word_char;
-              styles [
-                "results-placeholder",
-              ]
-            };
+          child: $ResultsGrid results_grid {
+            hexpand: true;
+            vexpand: true;
           };
         }
 

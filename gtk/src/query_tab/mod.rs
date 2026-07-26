@@ -323,26 +323,21 @@ impl QueryTab {
     }
 
     fn handle_event(&self, event: QueryEvent) {
+        let grid = self.imp().results_grid.get();
         match event {
             QueryEvent::Columns { names } => {
-                self.append_result(&format!("columns: {}\n", names.join(" | ")));
+                grid.begin_columns(names);
+                self.imp().results_stack.set_visible_child_name("results");
             }
             QueryEvent::Row { values } => {
-                let line = values
-                    .iter()
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                self.append_result(&format!("{line}\n"));
+                grid.push_row(values);
             }
             QueryEvent::Done {
                 row_count,
                 duration_ms,
             } => {
-                self.append_result(&format!("\n{row_count} rows in {duration_ms} ms\n"));
+                grid.finish(row_count, duration_ms);
+                self.imp().results_stack.set_visible_child_name("results");
                 if let Some(page) = self.tab_page() {
                     if !page.is_selected() {
                         page.set_needs_attention(true);
@@ -350,7 +345,9 @@ impl QueryTab {
                 }
             }
             QueryEvent::RowsAffected { count, duration_ms } => {
-                self.append_result(&format!("{count} rows affected in {duration_ms} ms\n"));
+                let msg = format!("{count} rows affected in {duration_ms} ms");
+                grid.show_message_line(&msg);
+                self.append_message(&msg);
                 self.imp().results_stack.set_visible_child_name("messages");
             }
             QueryEvent::Error { message } => {
@@ -361,14 +358,8 @@ impl QueryTab {
     }
 
     fn clear_results(&self) {
-        self.imp().results_view.buffer().set_text("");
+        self.imp().results_grid.clear();
         self.imp().messages_view.buffer().set_text("");
-    }
-
-    fn append_result(&self, text: &str) {
-        let buffer = self.imp().results_view.buffer();
-        let mut end = buffer.end_iter();
-        buffer.insert(&mut end, text);
     }
 
     fn append_message(&self, text: &str) {
@@ -379,9 +370,11 @@ impl QueryTab {
     }
 
     fn copy_results_as_csv(&self) {
-        let buffer = self.imp().results_view.buffer();
-        let (start, end) = buffer.bounds();
-        let text = buffer.text(&start, &end, false);
+        // Row multi-select → TSV (phase-0 spike). CSV export lands with import/export.
+        let text = self.imp().results_grid.copy_selection_tsv();
+        if text.is_empty() {
+            return;
+        }
         if let Some(display) = gtk::gdk::Display::default() {
             display.clipboard().set_text(&text);
         }
