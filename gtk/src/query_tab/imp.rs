@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::results::ResultsGrid;
+use crate::results::{EditState, ResultsGrid};
 use crate::window::SqlatorWindow;
 
 #[derive(Default, CompositeTemplate)]
@@ -34,6 +34,10 @@ pub struct QueryTab {
     pub generation: AtomicU64,
     pub cancel_token: RefCell<Option<CancellationToken>>,
     pub cancel_action: OnceCell<gio::SimpleAction>,
+    /// Per-tab editable results state (never a process singleton).
+    pub edit_state: RefCell<EditState>,
+    /// SQL from the most recent successful SELECT (for re-execute after save).
+    pub last_select_sql: RefCell<Option<String>>,
 }
 
 #[glib::object_subclass]

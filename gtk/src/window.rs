@@ -133,7 +133,7 @@ mod imp {
             // Connection list + initial tab need GtkWindow:application, which is
             // not readable until after ObjectBuilder::build returns — see ::new().
 
-            // Persist geometry on close.
+            // Persist geometry on close; prompt if any tab has unsaved result edits.
             obj.connect_close_request(glib::clone!(
                 #[weak]
                 obj,
@@ -145,6 +145,37 @@ mod imp {
                         let _ = settings.set("window-width", width);
                         let _ = settings.set("window-height", height);
                         let _ = settings.set("window-maximized", obj.is_maximized());
+                    }
+                    if obj.has_any_unsaved_edits() {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Unsaved changes"),
+                            Some(
+                                "One or more tabs have unsaved result edits. Discard them and close Sqlator?",
+                            ),
+                        );
+                        dialog.add_response("keep", "Keep Open");
+                        dialog.add_response("discard", "Discard & Close");
+                        dialog.set_response_appearance(
+                            "discard",
+                            adw::ResponseAppearance::Destructive,
+                        );
+                        dialog.set_default_response(Some("keep"));
+                        dialog.set_close_response("keep");
+                        dialog.connect_response(
+                            None,
+                            glib::clone!(
+                                #[weak]
+                                obj,
+                                move |_, response| {
+                                    if response == "discard" {
+                                        obj.discard_all_edits();
+                                        obj.destroy();
+                                    }
+                                }
+                            ),
+                        );
+                        dialog.present(Some(&obj));
+                        return glib::Propagation::Stop;
                     }
                     glib::Propagation::Proceed
                 }
@@ -360,6 +391,40 @@ impl SqlatorWindow {
                             move |_, response| {
                                 if response == "close" {
                                     tab.cancel_query();
+                                    if tab.has_unsaved_edits() {
+                                        tab.discard_edits();
+                                    }
+                                    tab_view.close_page_finish(&page, true);
+                                } else {
+                                    tab_view.close_page_finish(&page, false);
+                                }
+                            }
+                        ),
+                    );
+                    dialog.present(Some(&window));
+                    return glib::Propagation::Stop;
+                }
+                if tab.has_unsaved_edits() {
+                    let dialog = adw::AlertDialog::new(
+                        Some("Unsaved changes"),
+                        Some("This tab has unsaved result edits. Discard them and close?"),
+                    );
+                    dialog.add_response("keep", "Keep Open");
+                    dialog.add_response("discard", "Discard & Close");
+                    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("keep"));
+                    dialog.set_close_response("keep");
+
+                    let page = page.clone();
+                    let tab_view = tab_view.clone();
+                    dialog.connect_response(
+                        None,
+                        glib::clone!(
+                            #[weak]
+                            tab,
+                            move |_, response| {
+                                if response == "discard" {
+                                    tab.discard_edits();
                                     tab_view.close_page_finish(&page, true);
                                 } else {
                                     tab_view.close_page_finish(&page, false);
@@ -1325,5 +1390,47 @@ impl SqlatorWindow {
 
     pub fn set_editor_results_position(&self, pos: i32) {
         let _ = self.settings().set("editor-results-position", pos);
+    }
+
+    /// True when any mounted or stashed query tab has pending result edits.
+    fn has_any_unsaved_edits(&self) -> bool {
+        let tab_view = &self.imp().tab_view;
+        for i in 0..tab_view.n_pages() {
+            if let Ok(tab) = tab_view.nth_page(i).child().downcast::<QueryTab>() {
+                if tab.has_unsaved_edits() {
+                    return true;
+                }
+            }
+        }
+        self.imp()
+            .stashed_workspaces
+            .borrow()
+            .values()
+            .flat_map(|ws| ws.tabs.iter())
+            .any(|stashed| stashed.tab.has_unsaved_edits())
+    }
+
+    /// Discard pending result edits across mounted and stashed query tabs.
+    fn discard_all_edits(&self) {
+        let tab_view = &self.imp().tab_view;
+        for i in 0..tab_view.n_pages() {
+            if let Ok(tab) = tab_view.nth_page(i).child().downcast::<QueryTab>() {
+                if tab.has_unsaved_edits() {
+                    tab.discard_edits();
+                }
+            }
+        }
+        let stashed_tabs: Vec<QueryTab> = self
+            .imp()
+            .stashed_workspaces
+            .borrow()
+            .values()
+            .flat_map(|ws| ws.tabs.iter().map(|s| s.tab.clone()))
+            .collect();
+        for tab in stashed_tabs {
+            if tab.has_unsaved_edits() {
+                tab.discard_edits();
+            }
+        }
     }
 }

@@ -58,6 +58,20 @@ impl CellValue {
         matches!(self, Self::Null)
     }
 
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Bool(b) => serde_json::Value::Bool(*b),
+            Self::Int(i) => serde_json::json!(i),
+            Self::Float(f) => serde_json::json!(f),
+            Self::Text(s) => serde_json::Value::String(s.clone()),
+        }
+    }
+
+    pub fn from_json_value(value: serde_json::Value) -> Self {
+        Self::from_json(&value)
+    }
+
     pub fn cmp_typed(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::Null, Self::Null) => Ordering::Equal,

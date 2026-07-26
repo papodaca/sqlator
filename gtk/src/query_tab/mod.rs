@@ -1,11 +1,16 @@
 mod imp;
 
 use crate::application::SqlatorApplication;
+use crate::results::{
+    present_row_editor, present_sql_preview, CellValue, EditOverlay, EditToolbarState,
+    RowEditorMode,
+};
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 use sqlator_core::models::QueryEvent;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +45,7 @@ impl QueryTab {
 
         tab.setup_actions();
         tab.setup_editor();
+        tab.setup_edit_handlers();
         tab.set_placeholder_sql();
         tab
     }
@@ -50,6 +56,33 @@ impl QueryTab {
 
     pub fn set_connection_id(&self, id: Option<String>) {
         *self.imp().connection_id.borrow_mut() = id;
+    }
+
+    pub fn has_unsaved_edits(&self) -> bool {
+        self.imp().edit_state.borrow().has_changes()
+    }
+
+    pub fn discard_edits(&self) {
+        // Remove pending added rows from the model before clearing state.
+        let added = self.imp().edit_state.borrow_mut().take_added_model_rows();
+        let mut idxs: Vec<u32> = added.into_keys().collect();
+        idxs.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in idxs {
+            self.imp().results_grid.remove_model_row(idx);
+        }
+        self.imp().edit_state.borrow_mut().discard_all_changes();
+        self.refresh_edit_ui();
+    }
+
+    /// Drop a pending insert from both edit state and the results model, then
+    /// renumber remaining added-row index keys.
+    fn remove_added_row_at(&self, model_index: u32, temp_id: &str) {
+        self.imp().edit_state.borrow_mut().delete_added_row(temp_id);
+        self.imp().results_grid.remove_model_row(model_index);
+        self.imp()
+            .edit_state
+            .borrow_mut()
+            .shift_added_indices_after_remove(model_index);
     }
 
     fn setup_editor(&self) {
@@ -94,6 +127,8 @@ impl QueryTab {
             ("<Control><Shift>KP_Enter", "tab.run-all"),
             ("<Control><Alt>Return", "tab.run-selection"),
             ("<Control><Alt>KP_Enter", "tab.run-selection"),
+            ("<Control>s", "tab.save-edits"),
+            ("<Control>n", "tab.add-row"),
         ] {
             if let Some(trigger) = gtk::ShortcutTrigger::parse_string(trigger) {
                 shortcuts.add_shortcut(gtk::Shortcut::new(
@@ -173,7 +208,54 @@ impl QueryTab {
         ));
         group.add_action(&copy_csv);
 
+        let save_edits = gio::SimpleAction::new("save-edits", None);
+        save_edits.connect_activate(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _| tab.begin_save_edits()
+        ));
+        group.add_action(&save_edits);
+
+        let add_row = gio::SimpleAction::new("add-row", None);
+        add_row.connect_activate(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _| tab.add_row()
+        ));
+        group.add_action(&add_row);
+
         self.insert_action_group("tab", Some(&group));
+    }
+
+    fn setup_edit_handlers(&self) {
+        let grid = self.imp().results_grid.get();
+        grid.connect_edit_handlers(
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || tab.add_row()
+            ),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || tab.begin_save_edits()
+            ),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || tab.discard_edits()
+            ),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || tab.delete_selected_rows()
+            ),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move |model_index| tab.edit_row_at(model_index)
+            ),
+        );
     }
 
     fn set_placeholder_sql(&self) {
@@ -219,6 +301,16 @@ impl QueryTab {
             .map(|view| view.page(self))
     }
 
+    fn resolve_db_type(&self, connection_id: &str) -> String {
+        let Some(service) = self.imp().service.get() else {
+            return "postgres".into();
+        };
+        service
+            .find_saved_connection(connection_id)
+            .map(|c| c.db_type)
+            .unwrap_or_else(|_| "postgres".into())
+    }
+
     fn run_query(&self, mode: QueryMode) {
         if self.is_busy() {
             return;
@@ -250,10 +342,21 @@ impl QueryTab {
             return;
         }
 
+        self.run_sql(connection_id, sql);
+    }
+
+    fn run_sql(&self, connection_id: String, sql: String) {
         let service = match self.imp().service.get() {
             Some(s) => Arc::clone(s),
             None => return,
         };
+
+        let db_type = self.resolve_db_type(&connection_id);
+        self.imp()
+            .edit_state
+            .borrow_mut()
+            .reset(&connection_id, &db_type, &sql);
+        *self.imp().last_select_sql.borrow_mut() = Some(sql.clone());
 
         let generation = self.imp().generation.fetch_add(1, Ordering::SeqCst) + 1;
         let token = CancellationToken::new();
@@ -264,11 +367,9 @@ impl QueryTab {
 
         let (tx, rx) = async_channel::unbounded::<QueryEvent>();
 
-        // Client task: connect (if needed) + execute, honouring cancel.
         let conn_id = connection_id.clone();
         let sql_task = sql.clone();
         let join = crate::spawn_tokio!(async move {
-            // Ensure pool is up.
             if let Err(e) = service.connect_database(&conn_id).await {
                 let _ = tx
                     .send(QueryEvent::Error {
@@ -285,13 +386,10 @@ impl QueryTab {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        // Layer 3: server-side cancel when supported.
                         let _ = db.cancel_query(&conn_id).await;
                     }
                     res = db.execute_query(&conn_id, &sql_task, event_tx) => {
                         if let Err(e) = res {
-                            // execute_query sends Error events itself on many paths;
-                            // surface join/setup failures here.
                             tracing::debug!("execute_query returned error: {e}");
                         }
                     }
@@ -312,7 +410,6 @@ impl QueryTab {
             async move {
                 while let Ok(event) = rx.recv().await {
                     if tab.imp().generation.load(Ordering::SeqCst) != generation {
-                        // Superseded run — discard late results.
                         continue;
                     }
                     tab.handle_event(event);
@@ -347,18 +444,384 @@ impl QueryTab {
                         page.set_needs_attention(true);
                     }
                 }
+                self.fetch_edit_metadata_after_select();
             }
             QueryEvent::RowsAffected { count, duration_ms } => {
                 let msg = format!("{count} rows affected in {duration_ms} ms");
                 grid.show_message_line(&msg);
                 self.append_message(&msg);
                 self.imp().results_stack.set_visible_child_name("messages");
+                self.imp().edit_state.borrow_mut().clear_all();
+                self.refresh_edit_ui();
             }
             QueryEvent::Error { message } => {
                 self.append_message(&message);
                 self.imp().results_stack.set_visible_child_name("messages");
+                self.imp().edit_state.borrow_mut().clear_all();
+                self.refresh_edit_ui();
             }
         }
+    }
+
+    fn fetch_edit_metadata_after_select(&self) {
+        let Some(connection_id) = self.connection_id() else {
+            return;
+        };
+        let Some(sql) = self.imp().last_select_sql.borrow().clone() else {
+            return;
+        };
+        let Some(service) = self.imp().service.get().map(Arc::clone) else {
+            return;
+        };
+        let generation = self.imp().generation.load(Ordering::SeqCst);
+
+        let join = crate::spawn_tokio!(async move {
+            service
+                .fetch_schema_metadata_for_sql(&connection_id, &sql)
+                .await
+        });
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            async move {
+                let result = join.await;
+                if tab.imp().generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                match result {
+                    Ok(Ok(meta)) => {
+                        tab.imp().edit_state.borrow_mut().set_table_meta(meta);
+                        tab.refresh_edit_ui();
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!("fetch_schema_metadata_for_sql failed: {e}");
+                        tab.imp().edit_state.borrow_mut().set_table_meta(None);
+                        tab.refresh_edit_ui();
+                    }
+                    Err(e) => {
+                        tracing::debug!("fetch_schema_metadata join failed: {e}");
+                    }
+                }
+            }
+        ));
+    }
+
+    fn refresh_edit_ui(&self) {
+        let grid = self.imp().results_grid.get();
+        let selected = grid.selected_model_indices().len() as u32;
+        let state = self.imp().edit_state.borrow();
+        grid.set_edit_toolbar(&EditToolbarState {
+            visible: state.has_table_meta(),
+            editable: state.is_editable(),
+            reason: state.editability_reason().map(str::to_string),
+            change_count: state.change_count(),
+            selected_count: selected,
+        });
+
+        let names = grid.column_names();
+        let mut overlay = EditOverlay::default();
+        let mut idx = 0u32;
+        while let Some(row_map) = grid.row_map(idx) {
+            if state.is_row_deleted(&row_map) {
+                overlay.deleted_rows.insert(idx);
+            }
+            if let Some(temp) = state.added_temp_id_for_model_row(idx) {
+                overlay.added_rows.insert(idx);
+                if let Some(added) = state.change_set().added.get(temp) {
+                    for (col_name, value) in &added.data {
+                        if let Some(col_idx) = names.iter().position(|n| n == col_name) {
+                            overlay
+                                .cell_overrides
+                                .insert((idx, col_idx), CellValue::from_json(value));
+                            overlay.modified_cells.insert((idx, col_idx));
+                        }
+                    }
+                }
+            } else {
+                for (col_idx, name) in names.iter().enumerate() {
+                    if state.is_cell_modified(&row_map, name) {
+                        let display = state.get_cell_display_value(&row_map, name);
+                        overlay
+                            .cell_overrides
+                            .insert((idx, col_idx), CellValue::from_json(&display));
+                        overlay.modified_cells.insert((idx, col_idx));
+                    }
+                }
+            }
+            idx += 1;
+            if idx > 500_000 {
+                break;
+            }
+        }
+        drop(state);
+        grid.set_overlay(overlay);
+    }
+
+    fn add_row(&self) {
+        if !self.imp().edit_state.borrow().is_editable() {
+            return;
+        }
+        let grid = self.imp().results_grid.get();
+        let temp_id = self.imp().edit_state.borrow_mut().add_row();
+        let model_index = grid.append_empty_row();
+        self.imp()
+            .edit_state
+            .borrow_mut()
+            .register_added_model_row(model_index, temp_id.clone());
+
+        let Some(meta) = self.imp().edit_state.borrow().table_meta().cloned() else {
+            return;
+        };
+        let names = grid.column_names();
+        let current = HashMap::new();
+        present_row_editor(
+            self,
+            &meta,
+            &names,
+            &current,
+            RowEditorMode::Added,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move |result| {
+                    let Some(result) = result else {
+                        tab.remove_added_row_at(model_index, &temp_id);
+                        tab.refresh_edit_ui();
+                        return;
+                    };
+                    if result.delete {
+                        tab.remove_added_row_at(model_index, &temp_id);
+                        tab.refresh_edit_ui();
+                        return;
+                    }
+                    {
+                        let mut state = tab.imp().edit_state.borrow_mut();
+                        for (col, value) in &result.values {
+                            state.modify_added_cell(&temp_id, col, value.clone());
+                        }
+                    }
+                    tab.imp()
+                        .results_grid
+                        .update_row_from_map(model_index, &result.values);
+                    tab.refresh_edit_ui();
+                }
+            ),
+        );
+    }
+
+    fn edit_row_at(&self, model_index: u32) {
+        if !self.imp().edit_state.borrow().is_editable() {
+            return;
+        }
+        let grid = self.imp().results_grid.get();
+        let Some(meta) = self.imp().edit_state.borrow().table_meta().cloned() else {
+            return;
+        };
+        let names = grid.column_names();
+
+        if let Some(temp_id) = self
+            .imp()
+            .edit_state
+            .borrow()
+            .added_temp_id_for_model_row(model_index)
+            .map(str::to_string)
+        {
+            let current = self
+                .imp()
+                .edit_state
+                .borrow()
+                .change_set()
+                .added
+                .get(&temp_id)
+                .map(|r| r.data.clone())
+                .unwrap_or_default();
+            present_row_editor(
+                self,
+                &meta,
+                &names,
+                &current,
+                RowEditorMode::Added,
+                glib::clone!(
+                    #[weak(rename_to = tab)]
+                    self,
+                    move |result| {
+                        let Some(result) = result else {
+                            return;
+                        };
+                        if result.delete {
+                            tab.remove_added_row_at(model_index, &temp_id);
+                            tab.refresh_edit_ui();
+                            return;
+                        }
+                        {
+                            let mut state = tab.imp().edit_state.borrow_mut();
+                            for (col, value) in &result.values {
+                                state.modify_added_cell(&temp_id, col, value.clone());
+                            }
+                        }
+                        tab.imp()
+                            .results_grid
+                            .update_row_from_map(model_index, &result.values);
+                        tab.refresh_edit_ui();
+                    }
+                ),
+            );
+            return;
+        }
+
+        let Some(original) = grid.row_map(model_index) else {
+            return;
+        };
+        let mut current = original.clone();
+        {
+            let state = self.imp().edit_state.borrow();
+            for name in &names {
+                current.insert(name.clone(), state.get_cell_display_value(&original, name));
+            }
+        }
+
+        let names_for_cb = names.clone();
+        present_row_editor(
+            self,
+            &meta,
+            &names,
+            &current,
+            RowEditorMode::Existing,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move |result| {
+                    let Some(result) = result else {
+                        return;
+                    };
+                    if result.delete {
+                        tab.imp().edit_state.borrow_mut().delete_row(&original);
+                        tab.refresh_edit_ui();
+                        return;
+                    }
+                    {
+                        let mut state = tab.imp().edit_state.borrow_mut();
+                        for (col, value) in &result.values {
+                            if names_for_cb.iter().any(|n| n == col) {
+                                state.modify_cell(&original, col, value.clone());
+                            }
+                        }
+                    }
+                    tab.refresh_edit_ui();
+                }
+            ),
+        );
+    }
+
+    fn delete_selected_rows(&self) {
+        if !self.imp().edit_state.borrow().is_editable() {
+            return;
+        }
+        let grid = self.imp().results_grid.get();
+        let indices = grid.selected_model_indices();
+        let mut remove_added: Vec<(u32, String)> = Vec::new();
+        for idx in indices {
+            if let Some(temp) = self
+                .imp()
+                .edit_state
+                .borrow()
+                .added_temp_id_for_model_row(idx)
+                .map(str::to_string)
+            {
+                remove_added.push((idx, temp));
+            } else if let Some(row) = grid.row_map(idx) {
+                self.imp().edit_state.borrow_mut().delete_row(&row);
+            }
+        }
+        remove_added.sort_by_key(|b| std::cmp::Reverse(b.0));
+        for (idx, temp) in remove_added {
+            self.remove_added_row_at(idx, &temp);
+        }
+        self.refresh_edit_ui();
+    }
+
+    fn begin_save_edits(&self) {
+        let batch = self.imp().edit_state.borrow().generate_batch();
+        let Some(batch) = batch else {
+            return;
+        };
+        present_sql_preview(
+            self,
+            &batch,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                #[strong]
+                batch,
+                move || tab.execute_edits_batch(batch.clone())
+            ),
+        );
+    }
+
+    fn execute_edits_batch(&self, batch: sqlator_core::models::SqlBatch) {
+        let Some(connection_id) = self
+            .imp()
+            .edit_state
+            .borrow()
+            .connection_id()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some(service) = self.imp().service.get().map(Arc::clone) else {
+            return;
+        };
+
+        let join =
+            crate::spawn_tokio!(
+                async move { service.db().execute_batch(&connection_id, &batch).await }
+            );
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            async move {
+                match join.await {
+                    Ok(Ok(result)) => {
+                        if result.success {
+                            tab.imp().edit_state.borrow_mut().discard_all_changes();
+                            tab.imp().toast_overlay.add_toast(adw::Toast::new(&format!(
+                                "Applied {} statement{}",
+                                result.executed_count,
+                                if result.executed_count == 1 { "" } else { "s" }
+                            )));
+                            if let (Some(conn), Some(sql)) = (
+                                tab.connection_id(),
+                                tab.imp().last_select_sql.borrow().clone(),
+                            ) {
+                                tab.run_sql(conn, sql);
+                            } else {
+                                tab.refresh_edit_ui();
+                            }
+                        } else {
+                            let msg = result
+                                .error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "Batch failed".into());
+                            tab.imp()
+                                .toast_overlay
+                                .add_toast(adw::Toast::new(&format!("Save failed: {msg}")));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tab.imp()
+                            .toast_overlay
+                            .add_toast(adw::Toast::new(&format!("Save failed: {e}")));
+                    }
+                    Err(e) => {
+                        tab.imp()
+                            .toast_overlay
+                            .add_toast(adw::Toast::new(&format!("Save failed: {e}")));
+                    }
+                }
+            }
+        ));
     }
 
     fn clear_results(&self) {
@@ -374,7 +837,6 @@ impl QueryTab {
     }
 
     fn copy_results_as_csv(&self) {
-        // Row multi-select → TSV (phase-0 spike). CSV export lands with import/export.
         let text = self.imp().results_grid.copy_selection_tsv();
         if text.is_empty() {
             return;

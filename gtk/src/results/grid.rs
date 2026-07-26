@@ -10,6 +10,8 @@ use gtk::{
     MultiSelection, SignalListItemFactory, SortListModel,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +20,26 @@ pub const VISIBLE_COLUMN_CAP: usize = 30;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 
+#[derive(Default, Clone)]
+pub struct EditOverlay {
+    pub deleted_rows: HashSet<u32>,
+    pub added_rows: HashSet<u32>,
+    /// `(model_index, col_idx) → display value`
+    pub cell_overrides: HashMap<(u32, usize), CellValue>,
+    pub modified_cells: HashSet<(u32, usize)>,
+}
+
+pub struct EditToolbarState {
+    pub visible: bool,
+    pub editable: bool,
+    pub reason: Option<String>,
+    pub change_count: usize,
+    pub selected_count: u32,
+}
+
+type SimpleCb = Rc<dyn Fn()>;
+type EditRowCb = Rc<dyn Fn(u32)>;
+
 mod imp {
     use super::*;
     use adw::prelude::BinExt;
@@ -25,6 +47,13 @@ mod imp {
     #[derive(Default)]
     pub struct ResultsGrid {
         pub root: gtk::Box,
+        pub action_bar: gtk::ActionBar,
+        pub readonly_badge: gtk::Label,
+        pub add_btn: gtk::Button,
+        pub delete_btn: gtk::Button,
+        pub change_badge: gtk::Label,
+        pub discard_btn: gtk::Button,
+        pub save_btn: gtk::Button,
         pub status: gtk::Label,
         pub column_view: ColumnView,
         pub model: RefCell<Option<ResultModel>>,
@@ -33,6 +62,12 @@ mod imp {
         pub flush_source: RefCell<Option<glib::SourceId>>,
         pub total_columns: Cell<usize>,
         pub visible_columns: Cell<usize>,
+        pub overlay: RefCell<EditOverlay>,
+        pub on_add: RefCell<Option<SimpleCb>>,
+        pub on_save: RefCell<Option<SimpleCb>>,
+        pub on_discard: RefCell<Option<SimpleCb>>,
+        pub on_delete_selected: RefCell<Option<SimpleCb>>,
+        pub on_edit_row: RefCell<Option<EditRowCb>>,
     }
 
     #[glib::object_subclass]
@@ -43,6 +78,42 @@ mod imp {
 
         fn new() -> Self {
             let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+            let action_bar = gtk::ActionBar::new();
+            action_bar.set_revealed(false);
+
+            let readonly_badge = gtk::Label::new(Some("Read-only"));
+            readonly_badge.add_css_class("readonly-badge");
+            readonly_badge.set_visible(false);
+
+            let add_btn = gtk::Button::with_label("Add Row");
+            add_btn.add_css_class("flat");
+            add_btn.set_visible(false);
+
+            let delete_btn = gtk::Button::with_label("Delete");
+            delete_btn.add_css_class("flat");
+            delete_btn.add_css_class("destructive-action");
+            delete_btn.set_visible(false);
+
+            let change_badge = gtk::Label::new(None);
+            change_badge.add_css_class("change-badge");
+            change_badge.set_visible(false);
+
+            let discard_btn = gtk::Button::with_label("Discard All");
+            discard_btn.add_css_class("flat");
+            discard_btn.set_visible(false);
+
+            let save_btn = gtk::Button::with_label("Save Changes");
+            save_btn.add_css_class("suggested-action");
+            save_btn.set_visible(false);
+
+            action_bar.pack_start(&readonly_badge);
+            action_bar.pack_start(&add_btn);
+            action_bar.pack_start(&delete_btn);
+            action_bar.pack_end(&save_btn);
+            action_bar.pack_end(&discard_btn);
+            action_bar.pack_end(&change_badge);
+
             let status = gtk::Label::new(None);
             status.set_xalign(0.0);
             status.add_css_class("dimmed");
@@ -74,11 +145,19 @@ mod imp {
                 .child(&column_view)
                 .build();
 
+            root.append(&action_bar);
             root.append(&status);
             root.append(&scrolled);
 
             Self {
                 root,
+                action_bar,
+                readonly_badge,
+                add_btn,
+                delete_btn,
+                change_badge,
+                discard_btn,
+                save_btn,
                 status,
                 column_view,
                 model: RefCell::new(Some(model)),
@@ -87,6 +166,12 @@ mod imp {
                 flush_source: RefCell::new(None),
                 total_columns: Cell::new(0),
                 visible_columns: Cell::new(0),
+                overlay: RefCell::new(EditOverlay::default()),
+                on_add: RefCell::new(None),
+                on_save: RefCell::new(None),
+                on_discard: RefCell::new(None),
+                on_delete_selected: RefCell::new(None),
+                on_edit_row: RefCell::new(None),
             }
         }
     }
@@ -95,6 +180,8 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             self.obj().set_child(Some(&self.root));
+            self.obj().wire_toolbar_buttons();
+            self.obj().wire_activation();
         }
 
         fn dispose(&self) {
@@ -135,6 +222,182 @@ impl ResultsGrid {
             .expect("MultiSelection set in subclass::new")
     }
 
+    fn wire_toolbar_buttons(&self) {
+        self.imp().add_btn.connect_clicked(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_| {
+                if let Some(cb) = grid.imp().on_add.borrow().as_ref() {
+                    cb();
+                }
+            }
+        ));
+        self.imp().save_btn.connect_clicked(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_| {
+                if let Some(cb) = grid.imp().on_save.borrow().as_ref() {
+                    cb();
+                }
+            }
+        ));
+        self.imp().discard_btn.connect_clicked(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_| {
+                if let Some(cb) = grid.imp().on_discard.borrow().as_ref() {
+                    cb();
+                }
+            }
+        ));
+        self.imp().delete_btn.connect_clicked(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_| {
+                if let Some(cb) = grid.imp().on_delete_selected.borrow().as_ref() {
+                    cb();
+                }
+            }
+        ));
+        self.selection().connect_selection_changed(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_, _, _| {
+                let n = grid.selected_model_indices().len() as u32;
+                grid.imp().delete_btn.set_visible(
+                    grid.imp().action_bar.is_revealed() && grid.imp().add_btn.is_visible() && n > 0,
+                );
+            }
+        ));
+    }
+
+    fn wire_activation(&self) {
+        self.imp().column_view.connect_activate(glib::clone!(
+            #[weak(rename_to = grid)]
+            self,
+            move |_, position| {
+                let selection = grid.selection();
+                let Some(row) = selection.item(position).and_downcast::<RowObject>() else {
+                    return;
+                };
+                if let Some(cb) = grid.imp().on_edit_row.borrow().as_ref() {
+                    cb(row.index());
+                }
+            }
+        ));
+    }
+
+    pub fn connect_edit_handlers(
+        &self,
+        on_add: impl Fn() + 'static,
+        on_save: impl Fn() + 'static,
+        on_discard: impl Fn() + 'static,
+        on_delete_selected: impl Fn() + 'static,
+        on_edit_row: impl Fn(u32) + 'static,
+    ) {
+        *self.imp().on_add.borrow_mut() = Some(Rc::new(on_add));
+        *self.imp().on_save.borrow_mut() = Some(Rc::new(on_save));
+        *self.imp().on_discard.borrow_mut() = Some(Rc::new(on_discard));
+        *self.imp().on_delete_selected.borrow_mut() = Some(Rc::new(on_delete_selected));
+        *self.imp().on_edit_row.borrow_mut() = Some(Rc::new(on_edit_row));
+    }
+
+    pub fn set_edit_toolbar(&self, state: &EditToolbarState) {
+        self.imp().action_bar.set_revealed(state.visible);
+        if !state.visible {
+            return;
+        }
+        if state.editable {
+            self.imp().readonly_badge.set_visible(false);
+            self.imp().add_btn.set_visible(true);
+            let n = state.selected_count;
+            self.imp().delete_btn.set_visible(n > 0);
+        } else {
+            self.imp().readonly_badge.set_visible(true);
+            if let Some(reason) = &state.reason {
+                self.imp().readonly_badge.set_tooltip_text(Some(reason));
+            } else {
+                self.imp().readonly_badge.set_tooltip_text(None);
+            }
+            self.imp().add_btn.set_visible(false);
+            self.imp().delete_btn.set_visible(false);
+        }
+        let has = state.change_count > 0;
+        self.imp().change_badge.set_visible(has);
+        if has {
+            let n = state.change_count;
+            self.imp()
+                .change_badge
+                .set_text(&format!("{n} change{}", if n == 1 { "" } else { "s" }));
+        }
+        self.imp().discard_btn.set_visible(has);
+        self.imp().save_btn.set_visible(has && state.editable);
+    }
+
+    pub fn set_overlay(&self, overlay: EditOverlay) {
+        *self.imp().overlay.borrow_mut() = overlay;
+        // Force ColumnView to rebind visible cells.
+        let n = self.model().n_items();
+        if n > 0 {
+            self.model().items_changed(0, n, n);
+        }
+    }
+
+    pub fn clear_overlay(&self) {
+        self.set_overlay(EditOverlay::default());
+    }
+
+    pub fn column_names(&self) -> Vec<String> {
+        self.model().columns().into_iter().map(|c| c.name).collect()
+    }
+
+    pub fn selected_model_indices(&self) -> Vec<u32> {
+        self.flush_pending();
+        let selection = self.selection();
+        let mut out = Vec::new();
+        let n = selection.n_items();
+        for i in 0..n {
+            if selection.is_selected(i) {
+                if let Some(row) = selection.item(i).and_downcast::<RowObject>() {
+                    out.push(row.index());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn row_map(&self, model_index: u32) -> Option<HashMap<String, serde_json::Value>> {
+        let values = self.model().row_values(model_index)?;
+        let names = self.column_names();
+        let mut map = HashMap::new();
+        for (i, name) in names.into_iter().enumerate() {
+            let cell = values.get(i).cloned().unwrap_or(CellValue::Null);
+            map.insert(name, cell.to_json());
+        }
+        Some(map)
+    }
+
+    pub fn append_empty_row(&self) -> u32 {
+        let n_cols = self.imp().visible_columns.get();
+        let cells = vec![CellValue::Null; n_cols];
+        self.model().append_row(Arc::<[CellValue]>::from(cells))
+    }
+
+    pub fn update_row_from_map(&self, model_index: u32, map: &HashMap<String, serde_json::Value>) {
+        let names = self.column_names();
+        let mut cells = Vec::with_capacity(names.len());
+        for name in &names {
+            let v = map.get(name).cloned().unwrap_or(serde_json::Value::Null);
+            cells.push(CellValue::from_json(&v));
+        }
+        self.model()
+            .set_row_values(model_index, Arc::<[CellValue]>::from(cells));
+    }
+
+    pub fn remove_model_row(&self, model_index: u32) {
+        self.model().remove_row(model_index);
+    }
+
     pub fn clear(&self) {
         self.cancel_flush();
         self.imp().pending.borrow_mut().clear();
@@ -143,12 +406,21 @@ impl ResultsGrid {
         self.imp().status.set_text("");
         self.imp().total_columns.set(0);
         self.imp().visible_columns.set(0);
+        self.clear_overlay();
+        self.set_edit_toolbar(&EditToolbarState {
+            visible: false,
+            editable: false,
+            reason: None,
+            change_count: 0,
+            selected_count: 0,
+        });
     }
 
     /// Start a new result shape. Drops any buffered rows and rebuilds columns.
     pub fn begin_columns(&self, names: Vec<String>) {
         self.cancel_flush();
         self.imp().pending.borrow_mut().clear();
+        self.clear_overlay();
 
         let total = names.len();
         let visible = names
@@ -245,9 +517,13 @@ impl ResultsGrid {
     }
 
     fn cancel_flush(&self) {
-        if let Some(id) = self.imp().flush_source.borrow_mut().take() {
+        if let Some(id) = self.flush_source_take() {
             id.remove();
         }
+    }
+
+    fn flush_source_take(&self) -> Option<glib::SourceId> {
+        self.imp().flush_source.borrow_mut().take()
     }
 
     fn flush_pending(&self) {
@@ -288,10 +564,12 @@ impl ResultsGrid {
         let selection = self.selection();
         let column_view = &self.imp().column_view;
         let columns = model.columns();
+        let grid = self.downgrade();
 
         for (col_idx, meta) in columns.iter().enumerate() {
             let factory = SignalListItemFactory::new();
             let selection_setup = selection.clone();
+            let grid_setup = grid.clone();
 
             factory.connect_setup(move |_factory, item| {
                 let cell = item
@@ -321,25 +599,53 @@ impl ResultsGrid {
                 cell.set_child(Some(&inscription));
             });
 
-            factory.connect_bind(move |_factory, item| {
-                let cell = item
-                    .downcast_ref::<ColumnViewCell>()
-                    .expect("ColumnView factory yields ColumnViewCell");
-                let Some(row) = cell.item().and_downcast::<RowObject>() else {
-                    return;
-                };
-                let Some(inscription) = cell.child().and_downcast::<Inscription>() else {
-                    return;
-                };
-                let value = row.value(col_idx);
-                if value.is_null() {
-                    inscription.set_text(Some("NULL"));
-                    inscription.add_css_class("null-cell");
-                } else {
+            factory.connect_bind(glib::clone!(
+                #[strong]
+                grid_setup,
+                move |_factory, item| {
+                    let cell = item
+                        .downcast_ref::<ColumnViewCell>()
+                        .expect("ColumnView factory yields ColumnViewCell");
+                    let Some(row) = cell.item().and_downcast::<RowObject>() else {
+                        return;
+                    };
+                    let Some(inscription) = cell.child().and_downcast::<Inscription>() else {
+                        return;
+                    };
+                    let model_idx = row.index();
+                    let overlay = grid_setup
+                        .upgrade()
+                        .map(|g| g.imp().overlay.borrow().clone())
+                        .unwrap_or_default();
+
+                    let value = overlay
+                        .cell_overrides
+                        .get(&(model_idx, col_idx))
+                        .cloned()
+                        .unwrap_or_else(|| row.value(col_idx));
+
                     inscription.remove_css_class("null-cell");
-                    inscription.set_text(Some(&value.display()));
+                    inscription.remove_css_class("modified-cell");
+                    inscription.remove_css_class("deleted-row");
+                    inscription.remove_css_class("added-row");
+
+                    if overlay.deleted_rows.contains(&model_idx) {
+                        inscription.add_css_class("deleted-row");
+                    } else if overlay.added_rows.contains(&model_idx) {
+                        inscription.add_css_class("added-row");
+                    }
+                    if overlay.modified_cells.contains(&(model_idx, col_idx)) {
+                        inscription.add_css_class("modified-cell");
+                    }
+
+                    if value.is_null() {
+                        inscription.set_text(Some("NULL"));
+                        inscription.add_css_class("null-cell");
+                    } else {
+                        inscription.set_text(Some(&value.display()));
+                    }
                 }
-            });
+            ));
 
             factory.connect_unbind(|_factory, item| {
                 let cell = item
@@ -348,6 +654,9 @@ impl ResultsGrid {
                 if let Some(inscription) = cell.child().and_downcast::<Inscription>() {
                     inscription.set_text(None);
                     inscription.remove_css_class("null-cell");
+                    inscription.remove_css_class("modified-cell");
+                    inscription.remove_css_class("deleted-row");
+                    inscription.remove_css_class("added-row");
                 }
             });
 

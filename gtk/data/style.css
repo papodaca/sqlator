@@ -10,10 +10,48 @@
   opacity: 0.55;
 }
 
+.readonly-badge {
+  font-size: 0.8em;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background-color: alpha(@borders, 0.35);
+  margin-right: 6px;
+}
+
+.change-badge {
+  font-size: 0.8em;
+  font-weight: bold;
+  color: #ca8a04;
+  margin-right: 8px;
+}
+
+.modified-cell {
+  background-color: alpha(#eab308, 0.22);
+}
+
+.added-row {
+  background-color: alpha(#22c55e, 0.18);
+}
+
+.deleted-row {
+  color: #ef4444;
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
 @media (prefers-contrast: more) {
   .null-cell {
     opacity: 0.8;
     text-decoration: underline;
+  }
+
+  .modified-cell {
+    background-color: alpha(#eab308, 0.35);
+  }
+
+  .added-row {
+    background-color: alpha(#22c55e, 0.3);
   }
 }
 

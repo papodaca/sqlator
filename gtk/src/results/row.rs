@@ -56,4 +56,8 @@ impl RowObject {
             .clone()
             .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice()))
     }
+
+    pub fn set_values(&self, values: Arc<[CellValue]>) {
+        *self.imp().values.borrow_mut() = Some(values);
+    }
 }

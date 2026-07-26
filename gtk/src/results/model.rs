@@ -106,6 +106,39 @@ impl ResultModel {
         self.items_changed(start, 0, added);
     }
 
+    pub fn append_row(&self, row: Arc<[CellValue]>) -> u32 {
+        let index = self.n_items();
+        self.imp().data.borrow_mut().rows.push(row);
+        self.items_changed(index, 0, 1);
+        index
+    }
+
+    pub fn row_values(&self, index: u32) -> Option<Arc<[CellValue]>> {
+        self.imp().data.borrow().rows.get(index as usize).cloned()
+    }
+
+    pub fn set_row_values(&self, index: u32, values: Arc<[CellValue]>) {
+        let mut data = self.imp().data.borrow_mut();
+        let Some(slot) = data.rows.get_mut(index as usize) else {
+            return;
+        };
+        *slot = values;
+        drop(data);
+        self.imp().cache.borrow_mut().remove(&index);
+        self.items_changed(index, 1, 1);
+    }
+
+    pub fn remove_row(&self, index: u32) {
+        let mut data = self.imp().data.borrow_mut();
+        if (index as usize) >= data.rows.len() {
+            return;
+        }
+        data.rows.remove(index as usize);
+        drop(data);
+        self.imp().cache.borrow_mut().clear();
+        self.items_changed(index, 1, 0);
+    }
+
     pub fn row_count(&self) -> u32 {
         self.n_items()
     }
