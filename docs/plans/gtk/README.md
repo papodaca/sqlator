@@ -94,6 +94,11 @@ each contribute to it.
 - **App ID `im.apodaca.SqlatorGtk`**, to avoid colliding with the Tauri build's
   `im.apodaca.sqlator`.
 - **Cargo-only build through phases 2–3.** meson and Flatpak arrive in phase 4, written fresh.
+- **Tunnel registry key (Phase 1d interim):** `(ssh_profile_id, target_host, target_port)` with
+  refcounting — not profile id alone. `TunnelHandle` is one local forward to one target; same
+  bastion + different DB hosts must not share a single listener. Follow-up (shared session,
+  multiple forwards): [`2026-07-26-001-design-ssh-tunnel-registry-keying.md`](2026-07-26-001-design-ssh-tunnel-registry-keying.md)
+  / `sqlator-qa2`.
 
 ## Verified environment
 

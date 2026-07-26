@@ -1,16 +1,15 @@
 //! Shared application service owned by every frontend adapter.
 //!
-//! Owns config, pools, profile-keyed tunnels, credentials, and the schema TTL
-//! cache. Module methods will be filled in by later Phase 1 children; this
-//! skeleton only establishes the type and construction path.
+//! Owns config, pools, profile+target tunnels, credentials, and the schema TTL
+//! cache.
 
 use crate::error::ServiceError;
+use crate::tunnels::{ManagedTunnel, TunnelKey};
 use dashmap::DashMap;
 use sqlator_core::config::ConfigManager;
 use sqlator_core::credentials::{CredentialStore, StorageMode};
 use sqlator_core::db::DbManager;
 use sqlator_core::models::TableMeta;
-use sqlator_core::ssh::TunnelHandle;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,8 +17,10 @@ use std::time::Instant;
 pub struct AppService {
     pub(crate) config: ConfigManager,
     pub(crate) db: DbManager,
-    /// Tunnel registry keyed by **SSH profile id** (refcount wiring comes later).
-    pub(crate) tunnels: DashMap<String, TunnelHandle>,
+    /// Tunnel registry keyed by [`TunnelKey`] `(profile_id, target_host, target_port)`.
+    pub(crate) tunnels: DashMap<TunnelKey, ManagedTunnel>,
+    /// Reverse index: connection id → registry key (for disconnect / VTE lookup).
+    pub(crate) connection_tunnels: DashMap<String, TunnelKey>,
     pub(crate) credentials: Arc<CredentialStore>,
     /// Cache: key = `connection_id:schema:table_name` → `(TableMeta, expiry)`.
     pub(crate) schema_cache: DashMap<String, (TableMeta, Instant)>,
@@ -58,6 +59,7 @@ impl AppService {
             config,
             db: DbManager::new(),
             tunnels: DashMap::new(),
+            connection_tunnels: DashMap::new(),
             credentials,
             schema_cache: DashMap::new(),
         })
@@ -71,7 +73,7 @@ impl AppService {
         &self.db
     }
 
-    pub fn tunnels(&self) -> &DashMap<String, TunnelHandle> {
+    pub fn tunnels(&self) -> &DashMap<TunnelKey, ManagedTunnel> {
         &self.tunnels
     }
 

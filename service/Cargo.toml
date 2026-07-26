@@ -16,7 +16,9 @@ thiserror = "2"
 # tokio-only service (sqlx / tunnels / spawn_blocking). Declared now so module
 # moves do not thrash Cargo.toml; used heavily from Phase 1c onward.
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true
