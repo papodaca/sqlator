@@ -1,6 +1,7 @@
 mod application;
 mod connection;
 mod docker;
+mod editor;
 mod portability;
 mod preferences;
 mod query_tab;
@@ -9,6 +10,8 @@ mod runtime;
 mod schema;
 mod session;
 mod ssh;
+#[cfg(feature = "terminal")]
+mod terminal;
 mod theme;
 mod vault;
 mod window;

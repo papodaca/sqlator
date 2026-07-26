@@ -42,4 +42,8 @@ pub use ssh::{
     build_auth_config_for_profile, build_jump_hosts_for_profile, parse_auth_method, HostEntry,
     SshProfileConfig, SshTunnelRequest,
 };
+pub use terminal_spec::{
+    build_cli_for_connection, direct_cli_spec, docker_exec_cli_spec, remote_docker_exec_cmd,
+    sh_escape, ssh_docker_exec_spec, CliSpec,
+};
 pub use tunnels::{SshTunnelInfo, TunnelClaim, TunnelKey};

@@ -36,7 +36,7 @@ template $SqlatorWindow: Adw.ApplicationWindow {
         Button {
           action-name: "tab.run";
           icon-name: "media-playback-start-symbolic";
-          tooltip-text: _("Run Query");
+          tooltip-text: _("Run Statement Under Cursor");
         }
 
         [start]
@@ -44,6 +44,13 @@ template $SqlatorWindow: Adw.ApplicationWindow {
           action-name: "tab.cancel";
           icon-name: "media-playback-stop-symbolic";
           tooltip-text: _("Cancel Query");
+        }
+
+        [start]
+        Button {
+          action-name: "win.toggle-terminal";
+          icon-name: "utilities-terminal-symbolic";
+          tooltip-text: _("Database Terminal");
         }
 
         [end]
@@ -202,27 +209,47 @@ template $SqlatorWindow: Adw.ApplicationWindow {
         };
 
         content: Adw.ToastOverlay toast_overlay {
-          child: Stack content_stack {
-            hexpand: true;
-            vexpand: true;
-            vhomogeneous: true;
-            hhomogeneous: true;
+          child: Paned terminal_paned {
+            orientation: vertical;
+            wide-handle: true;
+            shrink-start-child: false;
+            shrink-end-child: true;
+            resize-start-child: true;
+            resize-end-child: true;
+            position: 560;
 
-            StackPage {
-              name: "empty";
-              child: Adw.StatusPage {
-                icon-name: "network-server-symbolic";
-                title: _("No connection open");
-                description: _("Select a connection in the sidebar to open a query workspace.");
-              };
+            [start]
+            Stack content_stack {
+              hexpand: true;
+              vexpand: true;
+              vhomogeneous: true;
+              hhomogeneous: true;
+
+              StackPage {
+                name: "empty";
+                child: Adw.StatusPage {
+                  icon-name: "network-server-symbolic";
+                  title: _("No connection open");
+                  description: _("Select a connection in the sidebar to open a query workspace.");
+                };
+              }
+
+              StackPage {
+                name: "tabs";
+                child: Adw.TabView tab_view {
+                  hexpand: true;
+                  vexpand: true;
+                };
+              }
             }
 
-            StackPage {
-              name: "tabs";
-              child: Adw.TabView tab_view {
-                hexpand: true;
-                vexpand: true;
-              };
+            [end]
+            Box terminal_host {
+              orientation: vertical;
+              visible: false;
+              hexpand: true;
+              vexpand: false;
+              height-request: 200;
             }
           };
         };
@@ -293,6 +320,13 @@ menu primary_menu {
     item {
       label: _("Preferences");
       action: "app.preferences";
+    }
+  }
+
+  section {
+    item {
+      label: _("Database Terminal");
+      action: "win.toggle-terminal";
     }
   }
 

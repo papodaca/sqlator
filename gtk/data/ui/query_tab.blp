@@ -10,24 +10,30 @@ template $QueryTab: Adw.Bin {
     resize-end-child: true;
     position: 400;
 
-    start-child: ScrolledWindow {
+    start-child: Box editor_column {
+      orientation: vertical;
       hexpand: true;
       vexpand: true;
-      min-content-height: 120;
 
-      child: GtkSource.View editor {
+      ScrolledWindow {
         hexpand: true;
         vexpand: true;
-        monospace: true;
-        auto-indent: true;
-        smart-backspace: true;
-        highlight-current-line: true;
-        show-line-numbers: true;
-        show-right-margin: true;
-        right-margin-position: 100;
-        tab-width: 2;
-        insert-spaces-instead-of-tabs: true;
-      };
+        min-content-height: 120;
+
+        child: GtkSource.View editor {
+          hexpand: true;
+          vexpand: true;
+          monospace: true;
+          auto-indent: true;
+          smart-backspace: true;
+          highlight-current-line: true;
+          show-line-numbers: true;
+          show-right-margin: true;
+          right-margin-position: 100;
+          tab-width: 2;
+          insert-spaces-instead-of-tabs: true;
+        };
+      }
     };
 
     end-child: Adw.ToastOverlay toast_overlay {

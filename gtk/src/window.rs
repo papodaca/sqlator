@@ -10,7 +10,7 @@ use adw::subclass::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
 use std::collections::HashMap;
 
-mod imp {
+pub(crate) mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
@@ -102,8 +102,15 @@ mod imp {
         pub schema_refresh: TemplateChild<gtk::Button>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub terminal_paned: TemplateChild<gtk::Paned>,
+        #[template_child]
+        pub terminal_host: TemplateChild<gtk::Box>,
 
         pub settings: OnceCell<gio::Settings>,
+        /// Lazily attached VTE panel (feature `terminal` only).
+        #[cfg(feature = "terminal")]
+        pub terminal_panel: RefCell<Option<std::rc::Rc<crate::terminal::TerminalPanel>>>,
         pub connections: RefCell<Option<ConnectionList>>,
         pub schema_tree: RefCell<Option<SchemaTree>>,
         /// Sidebar list highlight / rebuild anchor (may track focus/selection).
@@ -386,7 +393,7 @@ impl SqlatorWindow {
             self,
             move |_, _| {
                 if let Some(tab) = window.selected_query_tab() {
-                    tab.run_editor_query();
+                    tab.run_all_query();
                 }
             }
         ));
@@ -416,8 +423,59 @@ impl SqlatorWindow {
         ));
         tab_group.add_action(&cancel);
 
+        let find = gio::SimpleAction::new("find", None);
+        find.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                if let Some(tab) = window.selected_query_tab() {
+                    tab.reveal_find();
+                }
+            }
+        ));
+        tab_group.add_action(&find);
+
         self.insert_action_group("tab", Some(&tab_group));
+
+        let toggle_terminal = gio::SimpleAction::new("toggle-terminal", None);
+        toggle_terminal.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                window.toggle_terminal_panel();
+            }
+        ));
+        self.add_action(&toggle_terminal);
     }
+
+    fn toggle_terminal_panel(&self) {
+        #[cfg(feature = "terminal")]
+        {
+            let panel = {
+                let mut slot = self.imp().terminal_panel.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(crate::terminal::TerminalPanel::attach(self));
+                }
+                slot.as_ref().expect("terminal panel").clone()
+            };
+            let show = !panel.is_visible_in(self);
+            panel.set_visible_in(self, show);
+        }
+        #[cfg(not(feature = "terminal"))]
+        {
+            self.show_toast("Database terminal requires building with `--features terminal`");
+        }
+    }
+
+    #[cfg(feature = "terminal")]
+    fn notify_terminal_workspace_changed(&self) {
+        if let Some(panel) = self.imp().terminal_panel.borrow().as_ref() {
+            panel.on_workspace_changed(self);
+        }
+    }
+
+    #[cfg(not(feature = "terminal"))]
+    fn notify_terminal_workspace_changed(&self) {}
 
     fn selected_query_tab(&self) -> Option<QueryTab> {
         self.imp()
@@ -1243,6 +1301,7 @@ impl SqlatorWindow {
         self.imp().content_stack.set_visible_child_name("empty");
         self.imp().tab_bar.set_visible(false);
         self.imp().connection_tabs_scroll.set_visible(false);
+        self.notify_terminal_workspace_changed();
     }
 
     /// Open a connection workspace, or focus it if already open.
@@ -1275,6 +1334,7 @@ impl SqlatorWindow {
         self.add_query_tab(None);
         self.rebuild_connection_tab_bar();
         self.schedule_session_save();
+        self.notify_terminal_workspace_changed();
         true
     }
 
@@ -1305,6 +1365,7 @@ impl SqlatorWindow {
         self.set_schema_connection_id(Some(connection_id.to_string()));
         self.rebuild_connection_tab_bar();
         self.schedule_session_save();
+        self.notify_terminal_workspace_changed();
     }
 
     /// Close a connection workspace and disconnect (Svelte connection tab close).
@@ -1359,6 +1420,7 @@ impl SqlatorWindow {
 
         self.rebuild_connection_tab_bar();
         self.schedule_session_save();
+        self.notify_terminal_workspace_changed();
     }
 
     fn stash_active_workspace(&self) {
@@ -1442,6 +1504,7 @@ impl SqlatorWindow {
         *self.imp().active_workspace_id.borrow_mut() = Some(connection_id.to_string());
         self.imp().content_stack.set_visible_child_name("tabs");
         self.imp().tab_bar.set_visible(true);
+        self.notify_terminal_workspace_changed();
     }
 
     fn fresh_workspace(&self, connection_id: &str) -> imp::StashedWorkspace {

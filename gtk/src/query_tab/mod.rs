@@ -57,7 +57,12 @@ impl QueryTab {
     }
 
     pub fn set_connection_id(&self, id: Option<String>) {
-        *self.imp().connection_id.borrow_mut() = id;
+        *self.imp().connection_id.borrow_mut() = id.clone();
+        if let Some(connection_id) = id {
+            self.refresh_completion_snapshot(connection_id);
+        } else if let Some(provider) = self.imp().schema_provider.get() {
+            provider.set_snapshot(std::sync::Arc::new(crate::editor::SchemaSnapshot::default()));
+        }
     }
 
     pub fn persist_id(&self) -> String {
@@ -108,6 +113,8 @@ impl QueryTab {
     fn setup_editor(&self) {
         use sourceview::prelude::*;
 
+        crate::editor::ensure_snippets_registered();
+
         let editor = self.imp().editor.get();
         editor.set_smart_backspace(true);
 
@@ -135,6 +142,30 @@ impl QueryTab {
             }
         ));
 
+        // Schema + words + snippets completion (in-memory snapshot only).
+        let provider = crate::editor::SchemaCompletionProvider::new();
+        crate::editor::attach_providers(&editor, &provider);
+        let _ = self.imp().schema_provider.set(provider);
+
+        // Find/replace SearchBar above the editor.
+        let search = crate::editor::SearchBarState::new(&editor);
+        self.imp().editor_column.prepend(&search.search_bar);
+        *self.imp().search.borrow_mut() = Some(search);
+
+        // Optional VimIMContext (GSettings `vim-mode`).
+        self.sync_vim_mode();
+        let settings = gio::Settings::new("im.apodaca.SqlatorGtk");
+        settings.connect_changed(
+            Some(crate::preferences::VIM_MODE_KEY),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move |_, _| {
+                    tab.sync_vim_mode();
+                }
+            ),
+        );
+
         // SourceView/TextView would otherwise insert a newline on Ctrl+Return
         // before the application accelerator can activate tab.run.
         let shortcuts = gtk::ShortcutController::new();
@@ -149,6 +180,7 @@ impl QueryTab {
             ("<Control><Alt>KP_Enter", "tab.run-selection"),
             ("<Control>s", "tab.save-edits"),
             ("<Control>n", "tab.add-row"),
+            ("<Control>f", "tab.find"),
         ] {
             if let Some(trigger) = gtk::ShortcutTrigger::parse_string(trigger) {
                 shortcuts.add_shortcut(gtk::Shortcut::new(
@@ -171,6 +203,43 @@ impl QueryTab {
         ));
     }
 
+    fn sync_vim_mode(&self) {
+        let editor = self.imp().editor.get();
+        if let Some(old) = self.imp().vim_controller.borrow_mut().take() {
+            editor.remove_controller(&old);
+        }
+        let settings = gio::Settings::new("im.apodaca.SqlatorGtk");
+        if crate::editor::vim_mode_enabled(&settings) {
+            let controller = crate::editor::vim_key_controller(&editor);
+            editor.add_controller(controller.clone());
+            *self.imp().vim_controller.borrow_mut() = Some(controller);
+        }
+    }
+
+    fn refresh_completion_snapshot(&self, connection_id: String) {
+        let Some(service) = self.imp().service.get().map(Arc::clone) else {
+            return;
+        };
+        let Some(provider) = self.imp().schema_provider.get().cloned() else {
+            return;
+        };
+        let join = crate::spawn_tokio!(async move {
+            crate::editor::load_snapshot(service, connection_id).await
+        });
+        glib::spawn_future_local(async move {
+            match join.await {
+                Ok(snapshot) => provider.set_snapshot(Arc::new(snapshot)),
+                Err(e) => tracing::debug!("completion snapshot join failed: {e}"),
+            }
+        });
+    }
+
+    pub fn reveal_find(&self) {
+        if let Some(search) = self.imp().search.borrow().as_ref() {
+            search.reveal();
+        }
+    }
+
     fn apply_editor_style_scheme(buffer: &sourceview::Buffer) {
         use sourceview::prelude::*;
         let name = if adw::StyleManager::default().is_dark() {
@@ -191,7 +260,7 @@ impl QueryTab {
         run.connect_activate(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, _| tab.run_query(QueryMode::Editor)
+            move |_, _| tab.run_query(QueryMode::UnderCursor)
         ));
         group.add_action(&run);
 
@@ -228,7 +297,11 @@ impl QueryTab {
         group.add_action(&format_sql);
 
         let find = gio::SimpleAction::new("find", None);
-        find.connect_activate(|_, _| {});
+        find.connect_activate(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _| tab.reveal_find()
+        ));
         group.add_action(&find);
 
         let copy_csv = gio::SimpleAction::new("copy-as-csv", None);
@@ -300,8 +373,13 @@ impl QueryTab {
         self.imp().cancel_token.borrow().is_some()
     }
 
-    /// Run the editor contents (same as `tab.run` / toolbar play).
+    /// Run the statement under the cursor (same as `tab.run` / toolbar play).
     pub fn run_editor_query(&self) {
+        self.run_query(QueryMode::UnderCursor);
+    }
+
+    /// Run the entire editor buffer (`tab.run-all`).
+    pub fn run_all_query(&self) {
         self.run_query(QueryMode::Editor);
     }
 
@@ -367,9 +445,62 @@ impl QueryTab {
                     buffer.text(&start, &end, false).to_string()
                 }
             }
+            QueryMode::UnderCursor => {
+                let (start, end) = buffer.bounds();
+                let full = buffer.text(&start, &end, false).to_string();
+                let insert = buffer.iter_at_mark(&buffer.get_insert());
+                let prefix = buffer.text(&start, &insert, false);
+                crate::editor::sql_at_cursor(&full, prefix.len())
+            }
         };
         let sql = sql.trim().to_string();
         if sql.is_empty() {
+            return;
+        }
+
+        self.maybe_confirm_and_run(connection_id, sql);
+    }
+
+    fn maybe_confirm_and_run(&self, connection_id: String, sql: String) {
+        let confirm = self
+            .imp()
+            .window
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|w| w.confirm_destructive_pref())
+            .unwrap_or(true);
+
+        if confirm && crate::editor::is_destructive_sql(&sql) {
+            let preview = truncate_sql_preview(&sql, 240);
+            let dialog = adw::AlertDialog::new(
+                Some("Confirm destructive statement"),
+                Some(&format!(
+                    "This looks destructive (DROP/TRUNCATE, or DELETE/UPDATE without WHERE):\n\n{preview}\n\nRun it anyway?"
+                )),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("run", "Run");
+            dialog.set_response_appearance("run", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+
+            let parent = self
+                .imp()
+                .window
+                .get()
+                .and_then(|w| w.upgrade())
+                .map(|w| w.upcast::<gtk::Widget>());
+
+            glib::spawn_future_local(glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                async move {
+                    let response = dialog.choose_future(parent.as_ref()).await;
+                    if response.as_str() == "run" {
+                        tab.run_sql(connection_id, sql);
+                    }
+                }
+            ));
             return;
         }
 
@@ -882,4 +1013,17 @@ impl QueryTab {
 enum QueryMode {
     Editor,
     Selection,
+    UnderCursor,
+}
+
+fn truncate_sql_preview(sql: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    for (i, ch) in sql.chars().enumerate() {
+        if i >= max_chars {
+            preview.push('…');
+            break;
+        }
+        preview.push(ch);
+    }
+    preview
 }

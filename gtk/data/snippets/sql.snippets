@@ -1,0 +1,23 @@
+snippet sel "SELECT all rows"
+	SELECT *
+	FROM ${1:table}
+	WHERE ${2:condition};
+
+snippet ins "INSERT row"
+	INSERT INTO ${1:table} (${2:columns})
+	VALUES (${3:values});
+
+snippet upd "UPDATE rows"
+	UPDATE ${1:table}
+	SET ${2:column} = ${3:value}
+	WHERE ${4:condition};
+
+snippet cte "Common table expression"
+	WITH ${1:name} AS (
+		${2:SELECT ...}
+	)
+	SELECT *
+	FROM ${1:name};
+
+snippet expl "EXPLAIN plan"
+	EXPLAIN ${1:ANALYZE }${2:SELECT ...};

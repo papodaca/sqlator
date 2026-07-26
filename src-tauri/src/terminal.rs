@@ -1,8 +1,8 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use sqlator_core::models::{ConnectionType, SavedConnection, SshAuthMethod, SshProfile};
-use sqlator_core::ssh::{AuthMethod, SshAuthConfig};
+use sqlator_core::models::ConnectionType;
+use sqlator_service::build_cli_for_connection;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use tauri::ipc::Channel;
@@ -21,345 +21,34 @@ pub struct PtyHandle {
     pub child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
-/// Resolved command ready to pass to CommandBuilder.
-struct CliSpec {
-    binary: String,
-    args: Vec<String>,
-    /// Environment variables set on the spawned process.
-    env: Vec<(String, String)>,
-}
-
-// ── Shell escaping ────────────────────────────────────────────────────────────
-
-/// POSIX single-quote escape — safe for interpolation in a remote shell command.
-fn sh_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-// ── CLI spec builders ─────────────────────────────────────────────────────────
-
-/// Build CLI args for direct / SSH-tunnel connections.
-/// `host` and `port` are already resolved (tunnel local endpoint if applicable).
-fn direct_cli_spec(conn: &SavedConnection, host: &str, port: u16) -> CmdResult<CliSpec> {
-    let parsed = url::Url::parse(&conn.url).map_err(map_err)?;
-    let password = parsed.password().unwrap_or("").to_string();
-
-    match conn.db_type.as_str() {
-        "postgres" => Ok(CliSpec {
-            binary: "psql".to_string(),
-            args: vec![
-                "-U".to_string(),
-                conn.username.clone(),
-                "-h".to_string(),
-                host.to_string(),
-                "-p".to_string(),
-                port.to_string(),
-                conn.database.clone(),
-            ],
-            env: vec![("PGPASSWORD".to_string(), password)],
-        }),
-        "mysql" | "mariadb" => Ok(CliSpec {
-            binary: "mysql".to_string(),
-            args: vec![
-                format!("-u{}", conn.username),
-                format!("-h{}", host),
-                format!("-P{}", port),
-                conn.database.clone(),
-            ],
-            env: vec![("MYSQL_PWD".to_string(), password)],
-        }),
-        "sqlite" => Ok(CliSpec {
-            binary: "sqlite3".to_string(),
-            args: vec![conn.database.clone()],
-            env: vec![],
-        }),
-        "oracle" => Ok(CliSpec {
-            binary: "sqlplus".to_string(),
-            args: vec![format!(
-                "{}/{}@{}:{}/{}",
-                conn.username, password, host, port, conn.database
-            )],
-            env: vec![],
-        }),
-        "mssql" => Ok(CliSpec {
-            binary: "sqlcmd".to_string(),
-            args: vec![
-                "-S".to_string(),
-                format!("{},{}", host, port),
-                "-U".to_string(),
-                conn.username.clone(),
-                "-P".to_string(),
-                password,
-                "-d".to_string(),
-                conn.database.clone(),
-            ],
-            env: vec![],
-        }),
-        "clickhouse" => Ok(CliSpec {
-            binary: "clickhouse-client".to_string(),
-            args: vec![
-                "--host".to_string(),
-                host.to_string(),
-                "--port".to_string(),
-                port.to_string(),
-                "--user".to_string(),
-                conn.username.clone(),
-                "--password".to_string(),
-                password,
-                "--database".to_string(),
-                conn.database.clone(),
-            ],
-            env: vec![],
-        }),
-        other => Err(format!("Unsupported database type for terminal: {}", other)),
-    }
-}
-
-/// Build a `docker exec -it <container> <cli> <args>` spec for local Docker.
-/// Passwords are passed via docker exec `-e KEY=VALUE` to avoid host process list exposure.
-fn docker_exec_cli_spec(conn: &SavedConnection) -> CmdResult<CliSpec> {
-    let container = conn
-        .container_name
-        .as_deref()
-        .ok_or("LocalDockerContainer connection is missing a container name")?;
-
-    let parsed = url::Url::parse(&conn.url).map_err(map_err)?;
-    let password = parsed.password().unwrap_or("").to_string();
-
-    let (cli_binary, mut cli_args, env_kv): (&str, Vec<String>, Option<(String, String)>) =
-        match conn.db_type.as_str() {
-            "postgres" => (
-                "psql",
-                vec![
-                    "-U".to_string(),
-                    conn.username.clone(),
-                    conn.database.clone(),
-                ],
-                Some(("PGPASSWORD".to_string(), password)),
-            ),
-            "mysql" | "mariadb" => (
-                "mysql",
-                vec![format!("-u{}", conn.username), conn.database.clone()],
-                Some(("MYSQL_PWD".to_string(), password)),
-            ),
-            "sqlite" => ("sqlite3", vec![conn.database.clone()], None),
-            "oracle" => (
-                "sqlplus",
-                vec![format!("{}/{}@/{}", conn.username, password, conn.database)],
-                None,
-            ),
-            "mssql" => (
-                "sqlcmd",
-                vec![
-                    "-U".to_string(),
-                    conn.username.clone(),
-                    "-P".to_string(),
-                    password,
-                    "-d".to_string(),
-                    conn.database.clone(),
-                ],
-                None,
-            ),
-            "clickhouse" => (
-                "clickhouse-client",
-                vec![
-                    "--user".to_string(),
-                    conn.username.clone(),
-                    "--password".to_string(),
-                    password,
-                    "--database".to_string(),
-                    conn.database.clone(),
-                ],
-                None,
-            ),
-            other => return Err(format!("Unsupported database type for terminal: {}", other)),
-        };
-
-    // Assemble: docker exec [-e KEY=VALUE] -it <container> <cli> <args...>
-    let mut docker_args = vec!["exec".to_string()];
-    if let Some((key, val)) = env_kv {
-        docker_args.push("-e".to_string());
-        docker_args.push(format!("{}={}", key, val));
-    }
-    docker_args.push("-it".to_string());
-    docker_args.push(container.to_string());
-    docker_args.push(cli_binary.to_string());
-    docker_args.append(&mut cli_args);
-
-    Ok(CliSpec {
-        binary: "docker".to_string(),
-        args: docker_args,
-        env: vec![],
-    })
-}
-
-/// Build the remote shell command string for `docker exec` inside an SSH session.
-/// The returned string is passed verbatim to the remote shell, so all arguments
-/// are single-quote-escaped.
-fn remote_docker_exec_cmd(conn: &SavedConnection, container: &str) -> CmdResult<String> {
-    let parsed = url::Url::parse(&conn.url).map_err(map_err)?;
-    let password = parsed.password().unwrap_or("").to_string();
-
-    let (cli, mut cli_parts, env_prefix): (&str, Vec<String>, Option<String>) =
-        match conn.db_type.as_str() {
-            "postgres" => (
-                "psql",
-                vec![
-                    "-U".to_string(),
-                    sh_escape(&conn.username),
-                    sh_escape(&conn.database),
-                ],
-                Some(format!("PGPASSWORD={}", sh_escape(&password))),
-            ),
-            "mysql" | "mariadb" => (
-                "mysql",
-                vec![
-                    format!("-u{}", sh_escape(&conn.username)),
-                    sh_escape(&conn.database),
-                ],
-                Some(format!("MYSQL_PWD={}", sh_escape(&password))),
-            ),
-            "sqlite" => ("sqlite3", vec![sh_escape(&conn.database)], None),
-            "oracle" => (
-                "sqlplus",
-                vec![sh_escape(&format!(
-                    "{}/{}@/{}",
-                    conn.username, password, conn.database
-                ))],
-                None,
-            ),
-            "mssql" => (
-                "sqlcmd",
-                vec![
-                    "-U".to_string(),
-                    sh_escape(&conn.username),
-                    "-P".to_string(),
-                    sh_escape(&password),
-                    "-d".to_string(),
-                    sh_escape(&conn.database),
-                ],
-                None,
-            ),
-            "clickhouse" => (
-                "clickhouse-client",
-                vec![
-                    "--user".to_string(),
-                    sh_escape(&conn.username),
-                    "--password".to_string(),
-                    sh_escape(&password),
-                    "--database".to_string(),
-                    sh_escape(&conn.database),
-                ],
-                None,
-            ),
-            other => return Err(format!("Unsupported database type for terminal: {}", other)),
-        };
-
-    // docker exec [-e KEY=VALUE] -it <container> <cli> <args>
-    let mut parts = vec!["docker".to_string(), "exec".to_string()];
-    if let Some(env) = env_prefix {
-        parts.push("-e".to_string());
-        parts.push(env);
-    }
-    parts.push("-it".to_string());
-    parts.push(sh_escape(container));
-    parts.push(cli.to_string());
-    parts.append(&mut cli_parts);
-
-    Ok(parts.join(" "))
-}
-
-/// Build `ssh [-J jump,...] -t user@host "docker exec ..."` spec for remote Docker.
-///
-/// Auth strategy:
-/// - Key:    passes `-i <key_path>`; SSH prompts for passphrase through the PTY.
-/// - Agent:  SSH picks up keys from `SSH_AUTH_SOCK` automatically.
-/// - Password: uses `sshpass -p <pw>` if available; otherwise SSH prompts through the PTY.
-fn ssh_docker_exec_spec(
-    conn: &SavedConnection,
-    profile: &SshProfile,
-    auth: &SshAuthConfig,
-    container: &str,
-) -> CmdResult<CliSpec> {
-    let remote_cmd = remote_docker_exec_cmd(conn, container)?;
-
-    let mut ssh_args: Vec<String> = vec![
-        "-t".to_string(), // force PTY on remote
-        "-p".to_string(),
-        profile.port.to_string(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
-        "-o".to_string(),
-        "BatchMode=no".to_string(),
-    ];
-
-    // Identity file for key auth on the main hop
-    if let Some(key) = &auth.key_path {
-        ssh_args.push("-i".to_string());
-        ssh_args.push(key.to_string_lossy().to_string());
-    }
-
-    // Jump hosts: -J user@host:port,user@host2:port2
-    // Identity files for key-auth jump hosts are also added via -i so SSH can
-    // try them across all hops.
-    if !profile.proxy_jump.is_empty() {
-        let jump_chain: Vec<String> = profile
-            .proxy_jump
-            .iter()
-            .map(|j| format!("{}@{}:{}", j.username, j.host, j.port))
-            .collect();
-        ssh_args.push("-J".to_string());
-        ssh_args.push(jump_chain.join(","));
-
-        for jump in &profile.proxy_jump {
-            if matches!(jump.auth_method, SshAuthMethod::Key) {
-                if let Some(key) = &jump.key_path {
-                    ssh_args.push("-i".to_string());
-                    ssh_args.push(key.clone());
-                }
-            }
-        }
-    }
-
-    // Target
-    ssh_args.push(format!("{}@{}", profile.username, profile.host));
-    ssh_args.push(remote_cmd);
-
-    // Password auth: wrap with sshpass if available, otherwise let SSH prompt
-    if matches!(auth.method, AuthMethod::Password) {
-        if let Some(password) = &auth.password {
-            if let Ok(sshpass_path) = which::which("sshpass") {
-                let mut sshpass_args = vec!["-p".to_string(), password.clone(), "ssh".to_string()];
-                sshpass_args.extend(ssh_args);
-                return Ok(CliSpec {
-                    binary: sshpass_path.to_string_lossy().to_string(),
-                    args: sshpass_args,
-                    env: vec![],
-                });
-            }
-            // sshpass not available — SSH will prompt in the PTY
-        }
-    }
-
-    Ok(CliSpec {
-        binary: "ssh".to_string(),
-        args: ssh_args,
-        env: vec![],
-    })
-}
-
-// ── Binary resolution ─────────────────────────────────────────────────────────
-
 fn resolve_binary(name: &str) -> CmdResult<std::path::PathBuf> {
-    which::which(name).map_err(|_| {
-        format!(
-            "{} not found on PATH. Install the appropriate client tools.",
-            name
-        )
-    })
+    which::which(name)
+        .map_err(|_| format!("{name} not found on PATH. Install the appropriate client tools."))
 }
 
-// ── Tauri commands ────────────────────────────────────────────────────────────
+/// Optionally wrap an ssh password-auth spec with `sshpass` when available.
+fn maybe_wrap_sshpass(
+    mut spec: sqlator_service::CliSpec,
+    auth: &sqlator_core::ssh::SshAuthConfig,
+) -> sqlator_service::CliSpec {
+    use sqlator_core::ssh::AuthMethod;
+    if spec.binary != "ssh" || !matches!(auth.method, AuthMethod::Password) {
+        return spec;
+    }
+    let Some(password) = auth.password.as_ref() else {
+        return spec;
+    };
+    let Ok(sshpass_path) = which::which("sshpass") else {
+        return spec;
+    };
+    let mut args = vec!["-p".to_string(), password.clone(), "ssh".to_string()];
+    args.append(&mut spec.args);
+    sqlator_service::CliSpec {
+        binary: sshpass_path.to_string_lossy().to_string(),
+        args,
+        env: spec.env,
+    }
+}
 
 #[tauri::command]
 pub async fn spawn_db_terminal(
@@ -373,11 +62,14 @@ pub async fn spawn_db_terminal(
     let conn = connections
         .iter()
         .find(|c| c.id == connection_id)
-        .ok_or_else(|| format!("Connection '{}' not found", connection_id))?
+        .ok_or_else(|| format!("Connection '{connection_id}' not found"))?
         .clone();
 
-    let spec = match &conn.connection_type {
-        // Remote Docker via SSH: spawn ssh -t ... "docker exec ..."
+    let tunnel_port = state
+        .service
+        .tunnel_local_port_for_connection(&connection_id);
+
+    let (spec, auth_for_wrap) = match &conn.connection_type {
         ConnectionType::DockerContainer => {
             let ssh_profile_id = conn
                 .ssh_profile_id
@@ -388,32 +80,21 @@ pub async fn spawn_db_terminal(
                 .config()
                 .get_ssh_profile(ssh_profile_id)
                 .map_err(map_err)?
-                .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-            let container = conn
-                .container_name
-                .as_deref()
-                .ok_or("DockerContainer connection requires a container name")?;
+                .ok_or_else(|| format!("SSH profile '{ssh_profile_id}' not found"))?;
             let auth = sqlator_service::build_auth_config_for_profile(
                 &profile,
                 state.service.credentials(),
             )
             .map_err(|e| e.message())?;
-            ssh_docker_exec_spec(&conn, &profile, &auth, container)?
+            let spec = build_cli_for_connection(&conn, tunnel_port, Some((&profile, &auth)))?;
+            (maybe_wrap_sshpass(spec, &auth), None)
         }
-        // Local Docker: docker exec -it <container> <cli>
-        ConnectionType::LocalDockerContainer => docker_exec_cli_spec(&conn)?,
-        // SSH tunnel or direct: prefer shared tunnel local port when present
         _ => {
-            if let Some(local_port) = state
-                .service
-                .tunnel_local_port_for_connection(&connection_id)
-            {
-                direct_cli_spec(&conn, "127.0.0.1", local_port)?
-            } else {
-                direct_cli_spec(&conn, &conn.host.clone(), conn.port)?
-            }
+            let spec = build_cli_for_connection(&conn, tunnel_port, None)?;
+            (spec, None::<()>)
         }
     };
+    let _ = auth_for_wrap;
 
     let binary_path = resolve_binary(&spec.binary)?;
 
@@ -436,7 +117,6 @@ pub async fn spawn_db_terminal(
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(map_err)?;
-    // Close slave in parent so master EOF fires when child exits
     drop(pair.slave);
 
     let writer = pair.master.take_writer().map_err(map_err)?;
@@ -445,13 +125,11 @@ pub async fn spawn_db_terminal(
 
     let terminal_id = uuid::Uuid::new_v4().to_string();
 
-    // Relay PTY output to the frontend via Tauri channel
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => {
-                    // Null byte sentinel: frontend shows "session ended" message
                     let _ = on_data.send("\x00".to_string());
                     break;
                 }
@@ -484,7 +162,7 @@ pub async fn send_terminal_input(
     let handle = state
         .terminals
         .get(&terminal_id)
-        .ok_or_else(|| format!("Terminal '{}' not found", terminal_id))?;
+        .ok_or_else(|| format!("Terminal '{terminal_id}' not found"))?;
 
     let mut writer = handle.writer.lock().map_err(map_err)?;
     writer.write_all(data.as_bytes()).map_err(map_err)?;
@@ -501,7 +179,7 @@ pub async fn resize_terminal(
     let handle = state
         .terminals
         .get(&terminal_id)
-        .ok_or_else(|| format!("Terminal '{}' not found", terminal_id))?;
+        .ok_or_else(|| format!("Terminal '{terminal_id}' not found"))?;
 
     let master = handle.master.lock().map_err(map_err)?;
     master

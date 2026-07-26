@@ -44,6 +44,10 @@
       <default>true</default>
       <summary>Confirm destructive SQL statements</summary>
     </key>
+    <key name="vim-mode" type="b">
+      <default>false</default>
+      <summary>Enable Vim keybindings in the SQL editor</summary>
+    </key>
     <key name="max-rows" type="i">
       <default>1000</default>
       <summary>Maximum rows to fetch for SELECT results</summary>

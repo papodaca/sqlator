@@ -4,10 +4,12 @@ use gtk::prelude::StaticTypeExt;
 use gtk::{glib, CompositeTemplate};
 use sqlator_service::AppService;
 use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::editor::{SchemaCompletionProvider, SearchBarState};
 use crate::results::{EditState, ResultsGrid};
 use crate::window::SqlatorWindow;
 
@@ -16,6 +18,8 @@ use crate::window::SqlatorWindow;
 pub struct QueryTab {
     #[template_child]
     pub editor_paned: TemplateChild<gtk::Paned>,
+    #[template_child]
+    pub editor_column: TemplateChild<gtk::Box>,
     #[template_child]
     pub editor: TemplateChild<sourceview::View>,
     #[template_child]
@@ -40,6 +44,9 @@ pub struct QueryTab {
     pub edit_state: RefCell<EditState>,
     /// SQL from the most recent successful SELECT (for re-execute after save).
     pub last_select_sql: RefCell<Option<String>>,
+    pub schema_provider: OnceCell<SchemaCompletionProvider>,
+    pub search: RefCell<Option<Rc<SearchBarState>>>,
+    pub vim_controller: RefCell<Option<gtk::EventControllerKey>>,
 }
 
 #[glib::object_subclass]

@@ -1,5 +1,5 @@
 //! `AdwPreferencesDialog` bound to GSettings (`editor-font`, `max-rows`,
-//! `confirm-destructive`).
+//! `confirm-destructive`, `vim-mode`).
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -7,6 +7,7 @@ use gtk::{gdk, gio, glib, pango};
 pub const EDITOR_FONT_KEY: &str = "editor-font";
 pub const MAX_ROWS_KEY: &str = "max-rows";
 pub const CONFIRM_DESTRUCTIVE_KEY: &str = "confirm-destructive";
+pub const VIM_MODE_KEY: &str = "vim-mode";
 
 const EDITOR_CSS_CLASS: &str = "sqlator-editor";
 
@@ -51,6 +52,13 @@ pub fn present(parent: &impl IsA<gtk::Widget>, settings: &gio::Settings) {
     font_row.add_suffix(&font_btn);
     font_row.set_activatable_widget(Some(&font_btn));
     editor_group.add(&font_row);
+
+    let vim = adw::SwitchRow::builder()
+        .title("Vim mode")
+        .subtitle("Use Vim keybindings in the SQL editor")
+        .build();
+    settings.bind(VIM_MODE_KEY, &vim, "active").build();
+    editor_group.add(&vim);
 
     // ── Results ───────────────────────────────────────────────────────────
     let results_group = adw::PreferencesGroup::new();
