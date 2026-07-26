@@ -33,3 +33,6 @@ which = "7"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+
+[lints]
+workspace = true

@@ -45,3 +45,6 @@ default = []
 # Run: cargo test -p sqlator-core --features integration
 # Or:  SQLATOR_INTEGRATION=1 cargo test -p sqlator-core
 integration = []
+
+[lints]
+workspace = true
