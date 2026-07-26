@@ -249,15 +249,19 @@ Notes pinned by Group B that are **not** divergences (same in both copies / core
       transactionality, and tunnel concurrency all covered, behind a feature/env gate
       (`core/tests/group_c_integration.rs`; gate: `--features integration` or
       `SQLATOR_INTEGRATION=1`; openssh service in `docker-compose.yml`)
-- [ ] The divergence ledger in this document is complete — every difference found while writing
-      tests is appended, with a recommended winner
-- [ ] `clippy::await_holding_lock` enabled in CI and passing
+- [x] The divergence ledger in this document is complete — every difference found while writing
+      tests is appended, with a recommended winner (rows 1–11; 5–7 resolved by plan 007 /
+      `sqlator-16c`)
+- [x] `clippy::await_holding_lock` enabled via `[workspace.lints.clippy] await_holding_lock = "deny"`
+      inherited by all workspace members and passing. Full GitHub Actions wiring is deferred to
+      `sqlator-9g1.7` / plan 006 (no `.github/workflows` yet).
 - [x] A bare `cargo test --workspace` passes with no external services running
       (Group C tests early-return unless feature/env gate is set)
 - [x] `cargo test --workspace --features integration` passes with `docker-compose up`
       (also: `cargo test -p sqlator-core --features integration`)
 - [x] No production code was changed by this plan (verified by diff review)
-      (Group C: tests + Cargo feature + compose SSH + cont-init only)
+      (Group C: tests + Cargo feature + compose SSH + cont-init only; this commit: workspace
+      lint config only)
 
 ---
 
