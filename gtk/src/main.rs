@@ -1,5 +1,6 @@
 mod application;
 mod connection;
+mod docker;
 mod query_tab;
 mod results;
 mod runtime;

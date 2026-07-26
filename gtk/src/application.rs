@@ -107,7 +107,7 @@ mod imp {
                     let Ok(window) = window.downcast::<SqlatorWindow>() else {
                         return;
                     };
-                    crate::connection::present_connection_form(&window, &application, None);
+                    crate::docker::present_new_connection_chooser(&window, &application);
                 }
             ));
             application.add_action(&new_connection);

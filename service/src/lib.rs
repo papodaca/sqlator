@@ -8,6 +8,7 @@ pub mod connection_source;
 pub mod connections;
 pub mod credentials;
 pub mod docker;
+pub mod docker_classify;
 pub mod error;
 pub mod portability;
 pub mod schema;
@@ -23,6 +24,10 @@ pub use connections::{
     SaveGroupPayload,
 };
 pub use docker::{ContainerPortInfo, ContainerSummaryInfo, DockerContainerInfo};
+pub use docker_classify::{
+    classify_docker_error, classify_docker_service_error, classify_test_error,
+    classify_test_service_error, ClassifiedDockerError, DockerErrorKind,
+};
 pub use error::ServiceError;
 pub use portability::{
     build_export_json, parse_export_json, ExportFile, ExportedConnection, ExportedGroup,
