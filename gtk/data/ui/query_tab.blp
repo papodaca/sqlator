@@ -36,24 +36,28 @@ template $QueryTab: Adw.Bin {
         vexpand: true;
         transition-type: crossfade;
 
-        ScrolledWindow {
+        StackPage {
           name: "results";
-          child: TextView results_view {
-            editable: false;
-            monospace: true;
-            wrap-mode: word_char;
-            styles [
-              "results-placeholder",
-            ]
+          child: ScrolledWindow {
+            child: TextView results_view {
+              editable: false;
+              monospace: true;
+              wrap-mode: word_char;
+              styles [
+                "results-placeholder",
+              ]
+            };
           };
         }
 
-        ScrolledWindow {
+        StackPage {
           name: "messages";
-          child: TextView messages_view {
-            editable: false;
-            monospace: true;
-            wrap-mode: word_char;
+          child: ScrolledWindow {
+            child: TextView messages_view {
+              editable: false;
+              monospace: true;
+              wrap-mode: word_char;
+            };
           };
         }
       };

@@ -179,6 +179,16 @@ impl QueryTab {
         self.imp().cancel_token.borrow().is_some()
     }
 
+    /// Run the editor contents (same as `tab.run` / toolbar play).
+    pub fn run_editor_query(&self) {
+        self.run_query(QueryMode::Editor);
+    }
+
+    /// Run the current selection, or the whole editor if nothing is selected.
+    pub fn run_selection_query(&self) {
+        self.run_query(QueryMode::Selection);
+    }
+
     pub fn cancel_query(&self) {
         if let Some(token) = self.imp().cancel_token.borrow_mut().take() {
             token.cancel();

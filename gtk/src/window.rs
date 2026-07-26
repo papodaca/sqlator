@@ -186,6 +186,67 @@ impl SqlatorWindow {
             }
         ));
         self.add_action(&tab_overview);
+
+        // HeaderBar play/stop use action-name "tab.*". Those buttons are not
+        // descendants of QueryTab, so the per-tab action group is invisible to
+        // them — proxy through the selected page here.
+        let tab_group = gio::SimpleActionGroup::new();
+        let run = gio::SimpleAction::new("run", None);
+        run.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                if let Some(tab) = window.selected_query_tab() {
+                    tab.run_editor_query();
+                }
+            }
+        ));
+        tab_group.add_action(&run);
+
+        let run_all = gio::SimpleAction::new("run-all", None);
+        run_all.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                if let Some(tab) = window.selected_query_tab() {
+                    tab.run_editor_query();
+                }
+            }
+        ));
+        tab_group.add_action(&run_all);
+
+        let run_selection = gio::SimpleAction::new("run-selection", None);
+        run_selection.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                if let Some(tab) = window.selected_query_tab() {
+                    tab.run_selection_query();
+                }
+            }
+        ));
+        tab_group.add_action(&run_selection);
+
+        let cancel = gio::SimpleAction::new("cancel", None);
+        cancel.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                if let Some(tab) = window.selected_query_tab() {
+                    tab.cancel_query();
+                }
+            }
+        ));
+        tab_group.add_action(&cancel);
+
+        self.insert_action_group("tab", Some(&tab_group));
+    }
+
+    fn selected_query_tab(&self) -> Option<QueryTab> {
+        self.imp()
+            .tab_view
+            .selected_page()
+            .and_then(|page| page.child().downcast::<QueryTab>().ok())
     }
 
     fn setup_tab_view(&self) {
