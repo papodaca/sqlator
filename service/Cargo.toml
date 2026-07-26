@@ -1,0 +1,17 @@
+[package]
+name = "sqlator-service"
+version = "0.1.0"
+edition = "2021"
+description = "Shared application layer for SQLator frontends (Tauri, web, TUI, GTK)"
+
+[dependencies]
+sqlator-core = { path = "../core" }
+dashmap = "6"
+dirs = "6"
+thiserror = "2"
+# tokio-only service (sqlx / tunnels / spawn_blocking). Declared now so module
+# moves do not thrash Cargo.toml; used heavily from Phase 1c onward.
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

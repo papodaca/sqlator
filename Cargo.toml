@@ -1,9 +1,8 @@
 [workspace]
-members = ["core", "src-tauri", "tui-app", "web-server"]
+members = ["core", "service", "src-tauri", "tui-app", "web-server"]
 resolver = "2"
 
 [workspace.lints.clippy]
 # Static check for the SSH-tunnel deadlock class (AGENTS.md / phase 0a).
 # Holding a std/parking_lot mutex across .await is deny; tokio::sync::Mutex is a different type.
 await_holding_lock = "deny"
-

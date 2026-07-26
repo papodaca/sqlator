@@ -144,32 +144,34 @@ each step is either mechanically verifiable or covered by a test written immedia
 These are genuine decisions, not mechanical moves. Each needs an answer before the relevant
 step.
 
-- **The tunnel registry key collides.** `connect_database` keys tunnels by *connection* id
-  (`commands.rs:232`); `create_ssh_tunnel` keys by *profile* id (`commands.rs:482`). Nothing
-  reconciles the two namespaces. Unifying them requires deciding what a tunnel is keyed by and
-  whether tunnels are shareable across connections that use the same profile. This is
-  constrained by `terminal.rs:438`, which reaches into `state.tunnels` to discover the local
-  forward port, so the service must expose tunnel lookup as public API.
-- **Error typing.** `CoreError { message, code }` carries a code, but Tauri flattens to
-  `String` via `map_err` (`commands.rs:13`) and web to `(StatusCode, String)`, discarding it.
-  `SshError` and `DockerError` are separate `thiserror` enums with **no conversion into
-  `CoreError`**, so frontends stringify at each call site. The service should return a typed
-  error and let each frontend flatten — GTK needs to distinguish `VAULT_LOCKED` from
-  `NO_CONNECTION` to drive a dialog rather than a toast.
-- **Export path policy.** Tauri writes to `~/Downloads` and opens it (webviews can't do blob
-  downloads); web writes a temp file and serves it over HTTP. The service should return the
-  JSON string and let frontends decide where it goes — which means *changing* both existing
-  behaviors, not just relocating them.
-- **Web's `single_db` mode** is woven into `get_connections` (synthetic connection,
-  `handlers.rs:211-236`), `connect_database` (no-op), and the `require_multi_db` guard
-  (`:196`). Either the service models "the connection set may be a fixed synthetic singleton"
-  as a first-class concept, or web keeps a thin policy layer on top. Recommend modelling it as
-  a connection-source abstraction — the GTK app may well want a `--config file.json`
-  single-db mode too.
-- **Which divergent behavior wins**, per divergence. The unavoidable one: once web calls the
-  shared `connect()`, SSH and Docker connections start actually tunneling in web mode. That is
-  correct, but it is a real behavior change to a shipped path, and it puts a russh listener
-  inside a server process.
+**Resolved 2026-07-26 (sqlator-9g1.3):**
+
+- **Tunnel registry key — RESOLVED: share by SSH profile (config), with refcounting.**
+  Multiple DB connections that use the same SSH profile share one tunnel (one local listener /
+  session as an implementation detail). Registry key = **SSH profile id**. Track which
+  connection ids are currently using each tunnel; create on first user, tear down only when
+  the last user disconnects (or an explicit close with no remaining users). Standalone
+  `create_ssh_tunnel` / `close_ssh_tunnel` operate on the same profile-keyed registry.
+  `terminal.rs` (and GTK VTE later) look up the local forward port via public service API
+  keyed by connection id → profile id → tunnel. Do **not** key the shared registry by
+  connection id.
+- **Error typing — RESOLVED: option A.** Introduce `ServiceError` in `sqlator-service`
+  wrapping `CoreError` + SSH + Docker + vault/config failures with stable `code`s
+  (`VAULT_LOCKED`, `NO_CONNECTION`, …). Frontends flatten once at the adapter boundary
+  (Tauri → `String`, web → `(StatusCode, String)`, GTK → dialog vs toast by code).
+- **Export path policy — RESOLVED: service returns JSON bytes/string; frontend decides.**
+  Backend builds the export payload only. Tauri/web/GTK each choose persistence:
+  GTK **must** use a native save dialog; web may keep temp-file + HTTP download; Tauri may
+  keep Downloads or also move to a dialog later. Existing “write path inside the shared
+  layer” behavior is intentionally removed.
+- **Web `single_db` mode — RESOLVED: connection-source abstraction in the service** (plan
+  recommendation). The connection set may be a fixed synthetic singleton (web single-db,
+  future GTK `--config file.json`) or the normal multi-db `ConfigManager` store. Policy
+  guards like `require_multi_db` live against that abstraction, not only in web handlers.
+- **Which divergent behavior wins**, per divergence. Unchanged: ledger winners from phase
+  0a / plan 007. Once web calls shared `connect()`, SSH and Docker connections actually
+  tunnel in web mode — correct behavior change; russh listener may run inside the server
+  process.
 
 ### Runtime and thread-safety
 

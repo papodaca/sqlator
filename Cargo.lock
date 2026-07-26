@@ -6123,6 +6123,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlator-service"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "dirs",
+ "sqlator-core",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "sqlator-tui"
 version = "0.1.0"
 dependencies = [
