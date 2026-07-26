@@ -146,15 +146,17 @@ step.
 
 **Resolved 2026-07-26 (sqlator-9g1.3):**
 
-- **Tunnel registry key — RESOLVED: share by SSH profile (config), with refcounting.**
-  Multiple DB connections that use the same SSH profile share one tunnel (one local listener /
-  session as an implementation detail). Registry key = **SSH profile id**. Track which
-  connection ids are currently using each tunnel; create on first user, tear down only when
-  the last user disconnects (or an explicit close with no remaining users). Standalone
-  `create_ssh_tunnel` / `close_ssh_tunnel` operate on the same profile-keyed registry.
-  `terminal.rs` (and GTK VTE later) look up the local forward port via public service API
-  keyed by connection id → profile id → tunnel. Do **not** key the shared registry by
-  connection id.
+- **Tunnel registry key — RESOLVED (refined 2026-07-26): `(ssh_profile_id, target_host,
+  target_port)` with refcounting.** Multiple DB connections that share a profile **and** the
+  same remote target share one tunnel (one local listener / session). Same profile with
+  different targets gets separate tunnels — required because `TunnelHandle` is 1:1 with a
+  single forward target today. Track which connection ids use each entry; create on first
+  user, tear down when the last user disconnects (or an explicit close with no remaining
+  users). Standalone `create_ssh_tunnel` / `close_ssh_tunnel` use the same composite key.
+  `terminal.rs` (and GTK VTE later) look up the local forward port via public service API:
+  connection id → profile + resolved target → tunnel. Do **not** key the shared registry by
+  connection id. Rationale and the follow-up “one SSH session, many local forwards” design:
+  [2026-07-26-001-design-ssh-tunnel-registry-keying.md](2026-07-26-001-design-ssh-tunnel-registry-keying.md).
 - **Error typing — RESOLVED: option A.** Introduce `ServiceError` in `sqlator-service`
   wrapping `CoreError` + SSH + Docker + vault/config failures with stable `code`s
   (`VAULT_LOCKED`, `NO_CONNECTION`, …). Frontends flatten once at the adapter boundary
