@@ -123,3 +123,65 @@ pub struct JumpHost {
     pub auth_method: AuthMethod,
     pub key_path: Option<String>,
 }
+
+#[cfg(test)]
+mod group_b_tests {
+    use super::*;
+    use zeroize::Zeroize;
+
+    /// Pin Drop's zeroization effect on the same types Drop touches.
+    /// We cannot safely read heap after a full `drop` (UB); instead we run the
+    /// identical `zeroize()` calls while the `String`s are still allocated.
+    #[test]
+    fn secret_bytes_zeroed_matching_drop_body() {
+        let mut key_passphrase = Some(String::from("passphrase-characterization!!"));
+        let mut password = Some(String::from("password-characterization!!!"));
+
+        let pp_ptr = key_passphrase.as_ref().unwrap().as_ptr();
+        let pp_len = key_passphrase.as_ref().unwrap().len();
+        let pw_ptr = password.as_ref().unwrap().as_ptr();
+        let pw_len = password.as_ref().unwrap().len();
+
+        // Same operations as `SshAuthConfig::drop`
+        if let Some(ref mut passphrase) = key_passphrase {
+            passphrase.zeroize();
+        }
+        if let Some(ref mut password) = password {
+            password.zeroize();
+        }
+
+        assert_eq!(key_passphrase.as_ref().unwrap().len(), 0);
+        assert_eq!(password.as_ref().unwrap().len(), 0);
+        unsafe {
+            assert!(
+                std::slice::from_raw_parts(pp_ptr, pp_len)
+                    .iter()
+                    .all(|&b| b == 0),
+                "passphrase bytes must be zeroed"
+            );
+            assert!(
+                std::slice::from_raw_parts(pw_ptr, pw_len)
+                    .iter()
+                    .all(|&b| b == 0),
+                "password bytes must be zeroed"
+            );
+        }
+
+        // Smoke: real Drop path runs without panic
+        drop(SshAuthConfig::with_password("u", "x"));
+        drop(SshAuthConfig::with_key_and_passphrase("u", "/tmp/k", "y"));
+    }
+
+    /// Plan Group B asked for a "does NOT implement Clone" guard.
+    /// Current production code `#[derive(Clone)]` on `SshAuthConfig` — characterization
+    /// pins that fact. Removing Clone (so Drop zeroization cannot be defeated by
+    /// copies) is a production change deferred to phase 1 / a follow-up issue.
+    #[test]
+    fn ssh_auth_config_currently_implements_clone() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<SshAuthConfig>();
+        let a = SshAuthConfig::with_password("u", "secret");
+        let b = a.clone();
+        assert_eq!(b.password.as_deref(), Some("secret"));
+    }
+}

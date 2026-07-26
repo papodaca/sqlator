@@ -292,3 +292,159 @@ fn vault_corrupt(msg: impl ToString) -> CoreError {
         code: "VAULT_CORRUPT".into(),
     }
 }
+
+#[cfg(test)]
+mod group_b_tests {
+    use super::*;
+    use crate::credentials::CredentialBackend;
+    use std::time::Duration;
+
+    fn temp_vault() -> (tempfile::TempDir, VaultBackend) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.enc");
+        (dir, VaultBackend::new(path))
+    }
+
+    // ── Idle timeout ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn idle_timeout_locks_after_timeout_secs() {
+        let (_dir, vault) = temp_vault();
+        vault.set_timeout(1);
+        vault.create("master-password").expect("create");
+        assert!(!vault.is_locked());
+
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            vault.is_locked(),
+            "vault must report locked once idle ≥ timeout_secs"
+        );
+    }
+
+    #[test]
+    fn timeout_zero_means_never_expires() {
+        let (_dir, vault) = temp_vault();
+        vault.set_timeout(0);
+        vault.create("master-password").expect("create");
+
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !vault.is_locked(),
+            "timeout_secs == 0 must never idle-expire"
+        );
+        // Accessor must still succeed
+        assert!(vault.get("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn accessor_calls_refresh_last_activity() {
+        let (_dir, vault) = temp_vault();
+        vault.set_timeout(1);
+        vault.create("master-password").expect("create");
+
+        std::thread::sleep(Duration::from_millis(600));
+        // Touch via get — refreshes last_activity (check_and_touch)
+        vault.get("k").expect("get while unlocked");
+        std::thread::sleep(Duration::from_millis(600));
+        // ~1.2s since create, but only ~0.6s since accessor → still unlocked
+        assert!(!vault.is_locked());
+        vault.get("k").expect("still unlocked after refresh");
+    }
+
+    #[test]
+    fn is_locked_peek_does_not_refresh_activity() {
+        // Characterization: is_locked reads elapsed time but does NOT touch last_activity.
+        // An "extra" peek must not extend the idle window.
+        let (_dir, vault) = temp_vault();
+        vault.set_timeout(1);
+        vault.create("master-password").expect("create");
+
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!vault.is_locked()); // peek — must not refresh
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            vault.is_locked(),
+            "is_locked peek must not reset idle timer"
+        );
+    }
+
+    #[test]
+    fn timed_out_accessor_clears_state_and_returns_vault_timed_out() {
+        let (_dir, vault) = temp_vault();
+        vault.set_timeout(1);
+        vault.create("master-password").expect("create");
+        std::thread::sleep(Duration::from_millis(1100));
+
+        let err = vault.get("k").expect_err("accessor after idle timeout");
+        assert_eq!(err.code, "VAULT_TIMED_OUT");
+        // State cleared by check_and_touch
+        assert!(vault.is_locked());
+    }
+
+    // ── Round-trip ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_store_lock_unlock_read_round_trip() {
+        let (_dir, vault) = temp_vault();
+        vault.create("master-password").expect("create");
+        vault
+            .store("profile-1:password", "s3cret")
+            .expect("store");
+        vault.lock();
+        assert!(vault.is_locked());
+
+        vault.unlock("master-password").expect("unlock");
+        assert_eq!(
+            vault.get("profile-1:password").unwrap().as_deref(),
+            Some("s3cret")
+        );
+    }
+
+    #[test]
+    fn wrong_password_fails_with_vault_wrong_password() {
+        let (_dir, vault) = temp_vault();
+        vault.create("correct-horse").expect("create");
+        vault.lock();
+
+        let err = vault.unlock("wrong-battery").expect_err("wrong pw");
+        assert_eq!(err.code, "VAULT_WRONG_PASSWORD");
+        assert!(vault.is_locked());
+    }
+
+    #[test]
+    fn successful_write_leaves_no_tmp_sidecar() {
+        let (dir, vault) = temp_vault();
+        vault.create("master-password").expect("create");
+        vault.store("k", "v").expect("store");
+
+        let tmp = dir.path().join("vault.tmp");
+        assert!(
+            !tmp.exists(),
+            "atomic write must not leave vault.tmp after success"
+        );
+        assert!(dir.path().join("vault.enc").is_file());
+    }
+
+    #[test]
+    fn rename_failure_leaves_tmp_file_behind() {
+        // Characterization without production changes: force rename to fail by
+        // replacing the vault path with a directory. write_vault_atomic writes
+        // vault.tmp then rename→vault.enc; rename fails and .tmp remains.
+        // (Ideal "no partial file on failure" is NOT current behavior.)
+        let (dir, vault) = temp_vault();
+        vault.create("master-password").expect("create");
+
+        let vault_path = dir.path().join("vault.enc");
+        std::fs::remove_file(&vault_path).expect("remove vault file");
+        std::fs::create_dir(&vault_path).expect("dir where file should be");
+
+        let err = vault.store("k", "v").expect_err("rename must fail");
+        assert_eq!(err.code, "VAULT_IO_ERROR");
+
+        let tmp = dir.path().join("vault.tmp");
+        assert!(
+            tmp.is_file(),
+            "on rename failure current code leaves vault.tmp behind"
+        );
+    }
+}

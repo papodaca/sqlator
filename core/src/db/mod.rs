@@ -1738,3 +1738,99 @@ mod group_a_tests {
         assert_eq!(detect_database_type(""), None);
     }
 }
+
+#[cfg(test)]
+mod group_b_tests {
+    use super::*;
+    use crate::models::QueryEvent;
+    use std::time::{Duration, Instant};
+
+    fn sqlite_url(path: &std::path::Path) -> String {
+        // Absolute path + mode=rwc so sqlx creates the file if missing
+        format!("sqlite://{}?mode=rwc", path.display())
+    }
+
+    async fn exec_sql(mgr: &DbManager, id: &str, sql: &str) -> Vec<QueryEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<QueryEvent>(32);
+        mgr.execute_query(id, sql, tx)
+            .await
+            .unwrap_or_else(|e| panic!("execute_query failed: {e:?}"));
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        events
+    }
+
+    // ── Connect timeout ───────────────────────────────────────────────────────
+
+    /// Unreachable/blackholed host must fail with `code == "TIMEOUT"` in ~5s.
+    /// Gated so bare `cargo test --workspace` stays fast; run with
+    /// `SQLATOR_SLOW_TESTS=1`.
+    #[tokio::test]
+    async fn connect_unreachable_host_times_out_with_timeout_code() {
+        if std::env::var("SQLATOR_SLOW_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping connect timeout test; set SQLATOR_SLOW_TESTS=1 (~5s)");
+            return;
+        }
+
+        let mgr = DbManager::new();
+        // TEST-NET-1 — should not respond (blackhole / no route)
+        let url = "postgres://sqlator@192.0.2.1:5432/sqlator";
+        let start = Instant::now();
+        let err = mgr
+            .connect("timeout-probe", url)
+            .await
+            .expect_err("must time out");
+        let elapsed = start.elapsed();
+
+        assert_eq!(err.code, "TIMEOUT");
+        assert!(
+            elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(10),
+            "expected ~5s timeout, got {elapsed:?}"
+        );
+        assert!(!mgr.is_connected("timeout-probe"));
+    }
+
+    // ── Pool replacement ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn connect_same_id_replaces_old_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_a = dir.path().join("a.db");
+        let path_b = dir.path().join("b.db");
+        let url_a = sqlite_url(&path_a);
+        let url_b = sqlite_url(&path_b);
+
+        let mgr = DbManager::new();
+        mgr.connect("c1", &url_a).await.expect("connect A");
+        exec_sql(&mgr, "c1", "CREATE TABLE only_in_a (id INTEGER)").await;
+
+        // Second connect on same id closes old pool and opens B
+        mgr.connect("c1", &url_b).await.expect("connect B");
+        assert!(mgr.is_connected("c1"));
+
+        // Table from A must not be visible on B.
+        // Note: sqlite SELECT errors are delivered as QueryEvent::Error with Ok(()) return.
+        let events = exec_sql(&mgr, "c1", "SELECT * FROM only_in_a").await;
+        assert!(
+            events.iter().any(|e| matches!(e, QueryEvent::Error { .. })),
+            "after pool replace, only_in_a must be missing on B; events={events:?}"
+        );
+
+        exec_sql(&mgr, "c1", "CREATE TABLE only_in_b (id INTEGER)").await;
+
+        // Reconnect to A — only_in_a exists, proving A was a separate pool/file
+        mgr.connect("c1", &url_a).await.expect("reconnect A");
+        let events = exec_sql(&mgr, "c1", "SELECT * FROM only_in_a").await;
+        assert!(
+            events.iter().any(|e| matches!(e, QueryEvent::Done { .. })),
+            "reconnected A must still have only_in_a; events={events:?}"
+        );
+        let events = exec_sql(&mgr, "c1", "SELECT * FROM only_in_b").await;
+        assert!(
+            events.iter().any(|e| matches!(e, QueryEvent::Error { .. })),
+            "only_in_b must not exist on A; events={events:?}"
+        );
+    }
+}

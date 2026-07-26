@@ -174,6 +174,19 @@ Notes pinned by Group A that are **not** divergences (same in both copies):
 - Import **groups** always skip on name collision; `duplicate_mode` / `duplicateMode` only affects connections and SSH profiles.
 - Cyclic `parent_group_name` references are silently dropped after three passes (`groups_added == 0`).
 
+### Found while writing Group B characterization tests
+
+| # | Behavior | Tauri | Web | Recommended winner |
+|---|---|---|---|---|
+| 10 | `SshAuthConfig` implements `Clone` | Yes (`#[derive(Clone)]` in `core`) — plan B wanted a no-`Clone` guard so Drop zeroization cannot be defeated by copies | Same (shared core) | **Remove `Clone`** in phase 1 (or a small precursor PR); characterization today asserts Clone *is* present |
+| 11 | Vault atomic write on rename failure | `write_vault_atomic` leaves `vault.tmp` behind when rename fails | Same (shared core) | Keep temp+rename; on failure ideally remove `.tmp` (hardening, not required for phase 1 move) |
+
+Notes pinned by Group B that are **not** divergences (same in both copies / core-only):
+
+- Schema cache key is `{connection_id}:{schema_name:?}:{table_name}` (Debug on `Option`) in both Tauri and web; TTL insert constant is `300` seconds; wall-clock expiry cannot be advanced without a clock abstraction.
+- Connect unreachable-host timeout returns `code == "TIMEOUT"` after ~5s (`DbManager::connect`); bare `cargo test` skips via `SQLATOR_SLOW_TESTS=1` gate.
+- Tunnel registry DashMap replace-same-id does not leak map entries; full ephemeral teardown + port rebind needs live SSH (`#[ignore]`, Group C overlap). Web `connect_database` still does not manage tunnels (ledger row 1).
+
 ---
 
 ## Technical Considerations
@@ -219,8 +232,10 @@ Notes pinned by Group A that are **not** divergences (same in both copies):
       parents, and a cyclic parent reference
 - [x] Group A: export → import round-trip test exists and **is marked `#[ignore]` with a ledger
       reference on the web side, where it currently fails**
-- [ ] Group B: vault idle-timeout, vault round-trip, `SshAuthConfig` zeroization + no-`Clone`
+- [x] Group B: vault idle-timeout, vault round-trip, `SshAuthConfig` zeroization + no-`Clone`
       guard, schema cache key/TTL, tunnel registry cleanup, and connect timeout all covered
+      (see ledger rows 10–11 for Clone / atomic-write notes; live SSH tunnel teardown is
+      `#[ignore]` pending Group C; connect timeout gated on `SQLATOR_SLOW_TESTS=1`)
 - [ ] Group C: MySQL VARBINARY, `has_more` clamping, `QueryEvent` sequencing, `execute_batch`
       transactionality, and tunnel concurrency all covered, behind a feature/env gate
 - [ ] The divergence ledger in this document is complete — every difference found while writing

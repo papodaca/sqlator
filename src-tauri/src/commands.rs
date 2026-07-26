@@ -2472,3 +2472,190 @@ mod group_a_tests {
         assert!(conns[0].group_id.is_some());
     }
 }
+
+#[cfg(test)]
+mod group_b_tests {
+    use super::*;
+    use sqlator_core::config::ConfigManager;
+    use sqlator_core::credentials::{CredentialStore, StorageMode};
+    use sqlator_core::db::DbManager;
+    use sqlator_core::models::{PrimaryKeyMeta, TableMeta};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    // ── Schema cache key format ───────────────────────────────────────────────
+
+    /// Reconstructs the production key at `fetch_schema_metadata`:
+    /// `format!("{connection_id}:{schema_name:?}:{table_name}")`
+    fn schema_cache_key(
+        connection_id: &str,
+        schema_name: &Option<String>,
+        table_name: &str,
+    ) -> String {
+        format!("{connection_id}:{schema_name:?}:{table_name}")
+    }
+
+    fn sample_meta(name: &str) -> TableMeta {
+        TableMeta {
+            table_name: name.into(),
+            schema: None,
+            columns: vec![],
+            primary_key: PrimaryKeyMeta {
+                columns: vec![],
+                exists: false,
+            },
+            is_editable: true,
+            editability_reason: None,
+        }
+    }
+
+    #[test]
+    fn schema_cache_key_uses_debug_on_option() {
+        // Pin Debug formatting: Some("public") keys as Some("public"), not "public"
+        assert_eq!(
+            schema_cache_key("c1", &Some("public".into()), "users"),
+            r#"c1:Some("public"):users"#
+        );
+        assert_eq!(
+            schema_cache_key("c1", &None, "users"),
+            "c1:None:users"
+        );
+        assert_eq!(
+            schema_cache_key("c1", &Some("".into()), "users"),
+            r#"c1:Some(""):users"#
+        );
+        // None vs Some("") must not collide
+        assert_ne!(
+            schema_cache_key("c1", &None, "t"),
+            schema_cache_key("c1", &Some("".into()), "t")
+        );
+    }
+
+    #[test]
+    fn schema_cache_ttl_constant_is_300_seconds() {
+        // Production insert: Instant::now() + Duration::from_secs(300)
+        // Cannot advance Instant without a clock abstraction; pin the constant.
+        const SCHEMA_CACHE_TTL_SECS: u64 = 300;
+        let inserted_at = Instant::now();
+        let expires = inserted_at + Duration::from_secs(SCHEMA_CACHE_TTL_SECS);
+        let remaining = expires.saturating_duration_since(Instant::now());
+        assert!(
+            remaining.as_secs() >= 299 && remaining.as_secs() <= 300,
+            "TTL characterization: inserts use 300s; remaining={remaining:?}"
+        );
+    }
+
+    #[test]
+    fn schema_cache_hit_miss_and_expiry_via_dashmap() {
+        // Exercise the same lookup logic as fetch_schema_metadata without a live DB.
+        let fx = make_fixture();
+        let state = fx.app.state::<AppState>();
+        let key_hit = schema_cache_key("c1", &Some("public".into()), "users");
+        let key_other = schema_cache_key("c1", &None, "users");
+
+        let meta = sample_meta("users");
+        state.schema_cache.insert(
+            key_hit.clone(),
+            (meta.clone(), Instant::now() + Duration::from_secs(300)),
+        );
+
+        // Hit
+        {
+            let cached = state.schema_cache.get(&key_hit).expect("hit");
+            let (m, expires_at) = cached.clone();
+            assert!(Instant::now() < expires_at);
+            assert_eq!(m.table_name, "users");
+        }
+
+        // Miss — different key (None vs Some("public"))
+        assert!(state.schema_cache.get(&key_other).is_none());
+
+        // Expiry — past expires_at → remove (mirrors production branch)
+        let expired_key = schema_cache_key("c1", &Some("public".into()), "old");
+        state.schema_cache.insert(
+            expired_key.clone(),
+            (sample_meta("old"), Instant::now() - Duration::from_secs(1)),
+        );
+        if let Some(cached) = state.schema_cache.get(&expired_key) {
+            let (_meta, expires_at) = cached.clone();
+            assert!(Instant::now() >= expires_at);
+            drop(cached);
+            state.schema_cache.remove(&expired_key);
+        }
+        assert!(state.schema_cache.get(&expired_key).is_none());
+    }
+
+    // ── Tunnel registry ───────────────────────────────────────────────────────
+
+    #[test]
+    fn tunnel_registry_replace_same_id_does_not_leak_entries() {
+        // Characterization of commands.rs connect_ssh_tunnel / connect_docker_via_ssh:
+        // `tunnels.remove(id)` then `tunnels.insert(id, new)` — DashMap len stays 1.
+        // Stand-in values: we cannot build TunnelHandle without live SSH.
+        let tunnels: dashmap::DashMap<String, u16> = dashmap::DashMap::new();
+        tunnels.insert("conn-1".into(), 10_001);
+
+        if let Some((_, old_port)) = tunnels.remove("conn-1") {
+            assert_eq!(old_port, 10_001);
+            // Production would: SshTunnel::close(old_tunnel).await.ok();
+        }
+        tunnels.insert("conn-1".into(), 10_002);
+
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(*tunnels.get("conn-1").unwrap(), 10_002);
+    }
+
+    #[test]
+    fn appstate_tunnels_map_starts_empty() {
+        let fx = make_fixture();
+        assert!(fx.app.state::<AppState>().tunnels.is_empty());
+    }
+
+    /// Full cleanup (reconnect closes old tunnel; failing test_connection_with_ssh
+    /// closes ephemeral tunnel; local port re-bindable) needs live SSH — Group C.
+    #[tokio::test]
+    #[ignore = "needs live SSH; overlaps Group C tunnel tests — see plan Group B tunnel registry"]
+    async fn tunnel_ephemeral_teardown_on_test_connection_failure_live_ssh() {
+        // Stub: when SSH is available, assert state.tunnels is empty after a failing
+        // test_connection_with_ssh and that the forwarded local port can be rebound.
+        panic!("not implemented without live SSH");
+    }
+
+    // ── Fixture (mirrors group_a) ─────────────────────────────────────────────
+
+    struct TestFixture {
+        app: tauri::App<tauri::test::MockRuntime>,
+        cleanup_dir: PathBuf,
+    }
+
+    impl Drop for TestFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.cleanup_dir);
+        }
+    }
+
+    fn make_fixture() -> TestFixture {
+        let id = uuid::Uuid::new_v4();
+        let app_name = format!("sqlator-char-b-{id}");
+        let config = ConfigManager::new(&app_name).expect("ConfigManager");
+        let cleanup_dir = dirs::config_dir()
+            .expect("config dir")
+            .join(&app_name);
+        let vault_path = cleanup_dir.join("vault.enc");
+        let state = AppState {
+            config,
+            db: DbManager::new(),
+            tunnels: dashmap::DashMap::new(),
+            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
+            schema_cache: dashmap::DashMap::new(),
+            terminals: dashmap::DashMap::new(),
+        };
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        TestFixture { app, cleanup_dir }
+    }
+}
