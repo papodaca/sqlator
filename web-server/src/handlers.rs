@@ -11,7 +11,6 @@ use sqlator_core::models::{
     ConnectionConfig, ConnectionGroup, SchemaColumnInfo, SchemaInfo, SqlBatch, TableInfo,
     TableQueryParams, TableQueryResult,
 };
-use sqlator_core::ssh::config_parser;
 use sqlator_core::BatchResult;
 use std::sync::Arc;
 
@@ -173,7 +172,7 @@ async fn handle(command: &str, state: &Arc<AppState>, args: &Value) -> HandlerRe
         }
 
         // ── SSH config & profiles ─────────────────────────────────────────────
-        "list-ssh-hosts" => Ok(json!(config_parser::load_ssh_config().map_err(err)?)),
+        "list-ssh-hosts" => Ok(json!(state.service.list_ssh_hosts().map_err(map_svc)?)),
         "get-ssh-profiles" => Ok(json!(state.service.get_ssh_profiles().map_err(map_svc)?)),
         "save-ssh-profile" => {
             let config: sqlator_service::SshProfileConfig = get(args, "config")?;

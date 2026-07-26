@@ -4,6 +4,7 @@ mod query_tab;
 mod results;
 mod runtime;
 mod schema;
+mod ssh;
 mod theme;
 mod window;
 

@@ -34,7 +34,7 @@ pub use schema::{
 };
 pub use service::AppService;
 pub use ssh::{
-    build_auth_config_for_profile, build_jump_hosts_for_profile, parse_auth_method,
+    build_auth_config_for_profile, build_jump_hosts_for_profile, parse_auth_method, HostEntry,
     SshProfileConfig, SshTunnelRequest,
 };
 pub use tunnels::{SshTunnelInfo, TunnelClaim, TunnelKey};

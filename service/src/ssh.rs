@@ -9,7 +9,9 @@ use crate::tunnels::{ManagedTunnel, SshTunnelInfo, TunnelClaim, TunnelKey};
 use serde::{Deserialize, Serialize};
 use sqlator_core::credentials::CredentialStore;
 use sqlator_core::models::{SshAuthMethod, SshJumpHost, SshProfile};
-use sqlator_core::ssh::{SshAuthConfig, SshHostConfig, SshTunnel};
+use sqlator_core::ssh::{config_parser, SshAuthConfig, SshHostConfig, SshTunnel};
+
+pub use sqlator_core::ssh::HostEntry;
 
 /// Parse the wire string used by both frontends (`"key"` / `"password"` / `"agent"`).
 ///
@@ -123,6 +125,11 @@ pub struct SshTunnelRequest {
 }
 
 impl AppService {
+    /// Parse `~/.ssh/config` host aliases for the UI host picker.
+    pub fn list_ssh_hosts(&self) -> Result<Vec<HostEntry>, ServiceError> {
+        Ok(config_parser::load_ssh_config()?)
+    }
+
     pub fn get_ssh_profiles(&self) -> Result<Vec<SshProfile>, ServiceError> {
         Ok(self.config.get_ssh_profiles()?)
     }

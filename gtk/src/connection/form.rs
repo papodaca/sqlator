@@ -5,10 +5,13 @@ use crate::application::SqlatorApplication;
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
 use gtk::glib;
-use sqlator_core::models::{ConnectionConfig, ConnectionInfo, ConnectionType};
-use sqlator_service::{default_port_for_db_type, parse_connection_url, ParsedConnectionUrl};
+use sqlator_core::models::{ConnectionConfig, ConnectionInfo, ConnectionType, SshProfile};
+use sqlator_service::{
+    default_port_for_db_type, parse_connection_url, AppService, ParsedConnectionUrl,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 const COLOR_IDS: &[&str] = &[
     "red", "orange", "yellow", "green", "teal", "blue", "violet", "pink", "slate", "white",
@@ -186,6 +189,18 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication, editing: Option
         .title("SSH tunnel")
         .subtitle("Optional — uses a saved SSH profile")
         .build();
+    let ssh_edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+    ssh_edit_btn.set_tooltip_text(Some("Edit SSH profile"));
+    ssh_edit_btn.add_css_class("flat");
+    ssh_edit_btn.set_valign(gtk::Align::Center);
+    ssh_edit_btn.set_sensitive(false);
+    let ssh_new_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    ssh_new_btn.set_tooltip_text(Some("New SSH profile"));
+    ssh_new_btn.add_css_class("flat");
+    ssh_new_btn.set_valign(gtk::Align::Center);
+    ssh_row.add_suffix(&ssh_edit_btn);
+    ssh_row.add_suffix(&ssh_new_btn);
+    // Keep the combo activatable; suffix buttons still receive clicks.
     options.add(&ssh_row);
     content.append(&options);
 
@@ -477,6 +492,8 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication, editing: Option
             group_row,
             #[weak]
             ssh_row,
+            #[weak]
+            ssh_edit_btn,
             async move {
                 let groups_res = crate::spawn_tokio!(async move { service_g.get_groups().await })
                     .await
@@ -507,26 +524,160 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication, editing: Option
                 }
                 *state.groups.borrow_mut() = groups;
 
-                let mut profiles = vec![(None, "None".into())];
-                let mut plist = profiles_res;
-                plist.sort_by(|a, b| a.name.cmp(&b.name));
-                for p in plist {
-                    profiles.push((Some(p.id), p.name));
-                }
-                let labels: Vec<&str> = profiles.iter().map(|(_, n)| n.as_str()).collect();
-                ssh_row.set_model(Some(&gtk::StringList::new(&labels)));
-                if let Some(want) = &initial_ssh_id {
-                    if let Some(idx) = profiles
-                        .iter()
-                        .position(|(id, _)| id.as_deref() == Some(want.as_str()))
-                    {
-                        ssh_row.set_selected(idx as u32);
-                    }
-                }
-                *state.ssh_profiles.borrow_mut() = profiles;
+                apply_ssh_profile_list(
+                    &ssh_row,
+                    &state,
+                    profiles_res,
+                    initial_ssh_id.as_deref(),
+                    &ssh_edit_btn,
+                );
             }
         ));
     }
+
+    ssh_row.connect_selected_notify(glib::clone!(
+        #[weak]
+        ssh_edit_btn,
+        move |row| {
+            ssh_edit_btn.set_sensitive(row.selected() > 0);
+        }
+    ));
+
+    let app = app.clone();
+    ssh_new_btn.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        #[strong]
+        state,
+        #[strong]
+        service,
+        #[weak]
+        dialog,
+        #[weak]
+        ssh_row,
+        #[weak]
+        ssh_edit_btn,
+        move |_| {
+            crate::ssh::present_ssh_profile_form(
+                &dialog,
+                &app,
+                glib::clone!(
+                    #[strong]
+                    state,
+                    #[strong]
+                    service,
+                    #[weak]
+                    ssh_row,
+                    #[weak]
+                    ssh_edit_btn,
+                    move |profile| {
+                        let select_id = profile.id.clone();
+                        refresh_ssh_profiles(
+                            service.clone(),
+                            state.clone(),
+                            ssh_row,
+                            ssh_edit_btn,
+                            Some(select_id),
+                        );
+                    }
+                ),
+            );
+        }
+    ));
+
+    ssh_edit_btn.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        #[strong]
+        state,
+        #[strong]
+        service,
+        #[weak]
+        dialog,
+        #[weak]
+        ssh_row,
+        #[weak]
+        ssh_edit_btn,
+        move |_| {
+            let Some(profile_id) = selected_optional_id(&ssh_row, &state.ssh_profiles.borrow())
+            else {
+                return;
+            };
+            let svc = service.clone();
+            glib::spawn_future_local(glib::clone!(
+                #[strong]
+                app,
+                #[strong]
+                state,
+                #[strong]
+                service,
+                #[weak]
+                dialog,
+                #[weak]
+                ssh_row,
+                #[weak]
+                ssh_edit_btn,
+                #[strong]
+                profile_id,
+                async move {
+                    let profiles = crate::spawn_tokio!(async move { svc.get_ssh_profiles() })
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                    let Some(profile) = profiles.into_iter().find(|p| p.id == profile_id) else {
+                        return;
+                    };
+                    let select_id = profile.id.clone();
+                    crate::ssh::present_edit(
+                        &dialog,
+                        &app,
+                        profile,
+                        glib::clone!(
+                            #[strong]
+                            state,
+                            #[strong]
+                            service,
+                            #[weak]
+                            ssh_row,
+                            #[weak]
+                            ssh_edit_btn,
+                            #[strong]
+                            select_id,
+                            move |_| {
+                                refresh_ssh_profiles(
+                                    service.clone(),
+                                    state.clone(),
+                                    ssh_row,
+                                    ssh_edit_btn,
+                                    Some(select_id.clone()),
+                                );
+                            }
+                        ),
+                        glib::clone!(
+                            #[strong]
+                            state,
+                            #[strong]
+                            service,
+                            #[weak]
+                            ssh_row,
+                            #[weak]
+                            ssh_edit_btn,
+                            move || {
+                                refresh_ssh_profiles(
+                                    service.clone(),
+                                    state.clone(),
+                                    ssh_row,
+                                    ssh_edit_btn,
+                                    None,
+                                );
+                            }
+                        ),
+                    );
+                }
+            ));
+        }
+    ));
 
     cancel_btn.connect_clicked(glib::clone!(
         #[weak]
@@ -839,6 +990,60 @@ fn select_ssl_mode(row: &adw::ComboRow, mode: &str) {
 fn selected_optional_id(row: &adw::ComboRow, items: &[(Option<String>, String)]) -> Option<String> {
     let idx = row.selected() as usize;
     items.get(idx).and_then(|(id, _)| id.clone())
+}
+
+fn apply_ssh_profile_list(
+    ssh_row: &adw::ComboRow,
+    state: &FormState,
+    profiles_res: Vec<SshProfile>,
+    select_id: Option<&str>,
+    ssh_edit_btn: &gtk::Button,
+) {
+    let mut profiles = vec![(None, "None".into())];
+    let mut plist = profiles_res;
+    plist.sort_by(|a, b| a.name.cmp(&b.name));
+    for p in plist {
+        profiles.push((Some(p.id), p.name));
+    }
+    let labels: Vec<&str> = profiles.iter().map(|(_, n)| n.as_str()).collect();
+    ssh_row.set_model(Some(&gtk::StringList::new(&labels)));
+    if let Some(want) = select_id {
+        if let Some(idx) = profiles
+            .iter()
+            .position(|(id, _)| id.as_deref() == Some(want))
+        {
+            ssh_row.set_selected(idx as u32);
+        } else {
+            ssh_row.set_selected(0);
+        }
+    } else {
+        ssh_row.set_selected(0);
+    }
+    ssh_edit_btn.set_sensitive(ssh_row.selected() > 0);
+    *state.ssh_profiles.borrow_mut() = profiles;
+}
+
+fn refresh_ssh_profiles(
+    service: Arc<AppService>,
+    state: Rc<FormState>,
+    ssh_row: adw::ComboRow,
+    ssh_edit_btn: gtk::Button,
+    select_id: Option<String>,
+) {
+    glib::spawn_future_local(async move {
+        let profiles = crate::spawn_tokio!(async move { service.get_ssh_profiles() })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        apply_ssh_profile_list(
+            &ssh_row,
+            &state,
+            profiles,
+            select_id.as_deref(),
+            &ssh_edit_btn,
+        );
+    });
 }
 
 fn parse_ssl_mode(raw_url: &str) -> &'static str {

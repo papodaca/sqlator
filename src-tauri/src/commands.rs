@@ -4,7 +4,7 @@ use sqlator_core::models::{
     ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SchemaColumnInfo, SchemaInfo,
     SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams, TableQueryResult,
 };
-use sqlator_core::ssh::{config_parser, HostEntry};
+use sqlator_core::ssh::HostEntry;
 use sqlator_core::BatchResult;
 use tauri::ipc::Channel;
 use tauri::State;
@@ -156,8 +156,8 @@ pub async fn save_theme(state: State<'_, AppState>, theme: String) -> CmdResult<
 // --- SSH Config / tunnels / profiles ---
 
 #[tauri::command]
-pub async fn list_ssh_hosts() -> CmdResult<Vec<HostEntry>> {
-    config_parser::load_ssh_config().map_err(map_err)
+pub async fn list_ssh_hosts(state: State<'_, AppState>) -> CmdResult<Vec<HostEntry>> {
+    state.service.list_ssh_hosts().map_err(map_svc)
 }
 
 #[tauri::command]
