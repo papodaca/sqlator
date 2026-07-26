@@ -2,6 +2,7 @@
 
 mod colors;
 mod form;
+pub mod groups;
 mod item;
 mod list;
 
@@ -11,6 +12,6 @@ pub use list::{status_map_from_service, ConnectionList};
 
 // Re-exports used by unit tests / form UI.
 #[allow(unused_imports)]
-pub use colors::{color_css_class, color_hex, group_color_css_class};
+pub use colors::{color_css_class, color_hex, group_color_css_class, GROUP_COLOR_HEXES};
 #[allow(unused_imports)]
 pub use item::{SidebarItem, SidebarKind};

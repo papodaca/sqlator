@@ -43,6 +43,7 @@ impl ConnectionList {
                     .expect("ListItem in factory setup");
                 let row = build_row_widget();
                 install_context_menu(&window, &row.root);
+                install_row_dnd(&window, &row.root);
                 list_item.set_child(Some(&row.root));
                 // Safety: RowWidgets is 'static; removed automatically when ListItem drops.
                 unsafe {
@@ -84,6 +85,27 @@ impl ConnectionList {
         list_view.set_factory(Some(&factory));
         list_view.set_model(Some(&selection));
         list_view.set_single_click_activate(true);
+
+        // Dropping onto the list background / ungrouped rows ungroups the connection.
+        let ungroup_drop = gtk::DropTarget::new(String::static_type(), gdk::DragAction::MOVE);
+        ungroup_drop.set_preload(true);
+        ungroup_drop.connect_drop(glib::clone!(
+            #[weak]
+            window,
+            #[upgrade_or]
+            false,
+            move |_, value, _, _| {
+                let Ok(conn_id) = value.get::<String>() else {
+                    return false;
+                };
+                if conn_id.is_empty() {
+                    return false;
+                }
+                window.move_sidebar_connection(&conn_id, None);
+                true
+            }
+        ));
+        list_view.add_controller(ungroup_drop);
 
         // Highlight only — ListView selection can change on focus/hover without
         // activate; schema must not follow that (see set_schema_connection_id).
@@ -392,6 +414,68 @@ fn install_context_menu(window: &SqlatorWindow, root: &gtk::Box) {
     root.add_controller(gesture);
 }
 
+/// Drag connections as `text/plain` ids; drop onto a group row to re-parent.
+fn install_row_dnd(window: &SqlatorWindow, root: &gtk::Box) {
+    let drag = gtk::DragSource::new();
+    drag.set_actions(gdk::DragAction::MOVE);
+    drag.connect_prepare(glib::clone!(
+        #[weak]
+        root,
+        #[upgrade_or]
+        None,
+        move |_, _, _| {
+            let item_ptr = (unsafe { root.data::<SidebarItem>(ITEM_DATA_KEY) })?;
+            let item = unsafe { item_ptr.as_ref() };
+            match item.kind() {
+                SidebarKind::Connection { id, .. } => {
+                    Some(gdk::ContentProvider::for_value(&id.to_value()))
+                }
+                SidebarKind::Group { .. } => None,
+            }
+        }
+    ));
+    root.add_controller(drag);
+
+    let drop = gtk::DropTarget::new(String::static_type(), gdk::DragAction::MOVE);
+    drop.set_preload(true);
+    drop.connect_drop(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        root,
+        #[upgrade_or]
+        false,
+        move |_, value, _, _| {
+            let Ok(conn_id) = value.get::<String>() else {
+                return false;
+            };
+            let Some(item_ptr) = (unsafe { root.data::<SidebarItem>(ITEM_DATA_KEY) }) else {
+                return false;
+            };
+            let item = unsafe { item_ptr.as_ref() };
+            match item.kind() {
+                SidebarKind::Group { id, .. } => {
+                    if conn_id.is_empty() {
+                        return false;
+                    }
+                    window.move_sidebar_connection(&conn_id, Some(id.as_str()));
+                    true
+                }
+                SidebarKind::Connection { group_id, .. } => {
+                    // Dropping onto a connection in the ungrouped zone ungroups;
+                    // dropping onto a grouped connection moves into that group.
+                    if conn_id.is_empty() {
+                        return false;
+                    }
+                    window.move_sidebar_connection(&conn_id, group_id.as_deref());
+                    true
+                }
+            }
+        }
+    ));
+    root.add_controller(drop);
+}
+
 fn build_context_popover(window: &SqlatorWindow, item: &SidebarItem) -> gtk::Popover {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
     box_.add_css_class("connection-menu");
@@ -483,6 +567,9 @@ fn build_context_popover(window: &SqlatorWindow, item: &SidebarItem) -> gtk::Pop
             id,
             collapsed,
             name,
+            color,
+            order,
+            parent_group_id,
             ..
         } => {
             let toggle_label = if collapsed { "Expand" } else { "Collapse" };
@@ -498,6 +585,41 @@ fn build_context_popover(window: &SqlatorWindow, item: &SidebarItem) -> gtk::Pop
                 }
             ));
             box_.append(&toggle_btn);
+
+            let group = sqlator_core::models::ConnectionGroup {
+                id: id.clone(),
+                name: name.clone(),
+                color: color.clone(),
+                parent_group_id: parent_group_id.clone(),
+                order,
+                collapsed,
+            };
+
+            let rename_btn = menu_button("Rename…");
+            rename_btn.connect_clicked(glib::clone!(
+                #[weak]
+                window,
+                #[strong]
+                group,
+                move |btn| {
+                    close_popover(btn);
+                    crate::connection::groups::present_rename(&window, group.clone());
+                }
+            ));
+            box_.append(&rename_btn);
+
+            let color_btn = menu_button("Color…");
+            color_btn.connect_clicked(glib::clone!(
+                #[weak]
+                window,
+                #[strong]
+                group,
+                move |btn| {
+                    close_popover(btn);
+                    crate::connection::groups::present_color_picker(&window, group.clone());
+                }
+            ));
+            box_.append(&color_btn);
 
             let delete_btn = menu_button(&format!("Delete “{name}”"));
             delete_btn.add_css_class("destructive-action");

@@ -43,10 +43,12 @@ impl QueryTab {
             ),
         );
 
+        *tab.imp().persist_id.borrow_mut() = crate::session::new_tab_id();
         tab.setup_actions();
         tab.setup_editor();
         tab.setup_edit_handlers();
         tab.set_placeholder_sql();
+        crate::preferences::style_editor(&tab.imp().editor.get());
         tab
     }
 
@@ -56,6 +58,24 @@ impl QueryTab {
 
     pub fn set_connection_id(&self, id: Option<String>) {
         *self.imp().connection_id.borrow_mut() = id;
+    }
+
+    pub fn persist_id(&self) -> String {
+        self.imp().persist_id.borrow().clone()
+    }
+
+    pub fn set_persist_id(&self, id: impl Into<String>) {
+        *self.imp().persist_id.borrow_mut() = id.into();
+    }
+
+    pub fn sql(&self) -> String {
+        let buffer = self.imp().editor.buffer();
+        let (start, end) = buffer.bounds();
+        buffer.text(&start, &end, false).to_string()
+    }
+
+    pub fn set_sql(&self, sql: &str) {
+        self.imp().editor.buffer().set_text(sql);
     }
 
     pub fn has_unsaved_edits(&self) -> bool {
@@ -138,6 +158,17 @@ impl QueryTab {
             }
         }
         editor.add_controller(shortcuts);
+
+        // Debounced session persistence when SQL changes.
+        buffer.connect_changed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_| {
+                if let Some(window) = tab.imp().window.get().and_then(|w| w.upgrade()) {
+                    window.schedule_session_save();
+                }
+            }
+        ));
     }
 
     fn apply_editor_style_scheme(buffer: &sourceview::Buffer) {

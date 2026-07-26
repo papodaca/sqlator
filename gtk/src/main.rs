@@ -1,12 +1,16 @@
 mod application;
 mod connection;
 mod docker;
+mod portability;
+mod preferences;
 mod query_tab;
 mod results;
 mod runtime;
 mod schema;
+mod session;
 mod ssh;
 mod theme;
+mod vault;
 mod window;
 
 use application::SqlatorApplication;

@@ -100,6 +100,8 @@ mod imp {
         pub schema_banner: TemplateChild<gtk::Label>,
         #[template_child]
         pub schema_refresh: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub toast_overlay: TemplateChild<adw::ToastOverlay>,
 
         pub settings: OnceCell<gio::Settings>,
         pub connections: RefCell<Option<ConnectionList>>,
@@ -121,6 +123,10 @@ mod imp {
         pub open_connection_ids: RefCell<Vec<String>>,
         /// Skip busy/last-tab guards while draining pages for workspace switch/close.
         pub force_close_pages: Cell<bool>,
+        /// Debounced `save_tab_state` source.
+        pub save_debounce: RefCell<Option<glib::SourceId>>,
+        /// Suppress autosave while restoring a session or draining pages.
+        pub suppress_session_save: Cell<bool>,
     }
 
     use std::cell::OnceCell;
@@ -262,6 +268,18 @@ impl SqlatorWindow {
         window.setup_schema_tree();
         window.show_empty_workspace();
 
+        // Unlock vault (if needed) before restoring persisted tabs / reconnecting.
+        crate::vault::gate_startup(
+            &window,
+            glib::clone!(
+                #[weak]
+                window,
+                move || {
+                    window.restore_session();
+                }
+            ),
+        );
+
         window
     }
 
@@ -315,6 +333,36 @@ impl SqlatorWindow {
             }
         ));
         self.add_action(&tab_overview);
+
+        let new_group = gio::SimpleAction::new("new-group", None);
+        new_group.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                crate::connection::groups::present_create(&window);
+            }
+        ));
+        self.add_action(&new_group);
+
+        let import_connections = gio::SimpleAction::new("import-connections", None);
+        import_connections.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                crate::portability::import_connections(&window);
+            }
+        ));
+        self.add_action(&import_connections);
+
+        let export_connections = gio::SimpleAction::new("export-connections", None);
+        export_connections.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| {
+                crate::portability::export_connections(&window);
+            }
+        ));
+        self.add_action(&export_connections);
 
         // HeaderBar play/stop use action-name "tab.*". Those buttons are not
         // descendants of QueryTab, so the per-tab action group is invisible to
@@ -380,6 +428,31 @@ impl SqlatorWindow {
 
     fn setup_tab_view(&self) {
         let tab_view = self.imp().tab_view.clone();
+        // Persist active query-tab selection changes.
+        tab_view.connect_notify_local(
+            Some("selected-page"),
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_, _| {
+                    window.schedule_session_save();
+                }
+            ),
+        );
+        tab_view.connect_page_attached(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _, _| {
+                window.schedule_session_save();
+            }
+        ));
+        tab_view.connect_page_detached(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _, _| {
+                window.schedule_session_save();
+            }
+        ));
         // create-tab on TabOverview is wired via #[template_callback].
         tab_view.connect_create_window(glib::clone!(
             #[weak(rename_to = window)]
@@ -868,6 +941,7 @@ impl SqlatorWindow {
                             list.set_status_for(&id, ConnectionStatus::Connected);
                         }
                         window.update_schema_browser();
+                        window.reload_session_tabs_for(&id);
                     }
                     Err(e) => {
                         tracing::warn!("connect_database({id}) failed: {e}");
@@ -1115,6 +1189,36 @@ impl SqlatorWindow {
         dialog.present(Some(self));
     }
 
+    /// Re-parent a connection into `group_id` (or ungroup when `None`).
+    pub fn move_sidebar_connection(&self, connection_id: &str, group_id: Option<&str>) {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let id = connection_id.to_string();
+        let group_id = group_id.map(str::to_string);
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let svc = service.clone();
+                let id_task = id.clone();
+                let group_task = group_id.clone();
+                let result = crate::spawn_tokio!(async move {
+                    svc.move_connection_to_group(id_task, group_task).await
+                })
+                .await
+                .expect("join move_connection_to_group");
+                match result {
+                    Ok(_) => window.refresh_connections(),
+                    Err(e) => window.show_toast(&format!("Could not move connection: {e}")),
+                }
+            }
+        ));
+    }
+
     pub fn add_query_tab(&self, title: Option<&str>) -> adw::TabPage {
         let app = self
             .application()
@@ -1128,6 +1232,7 @@ impl SqlatorWindow {
         page.set_title(title.unwrap_or("Query"));
         page.set_live_thumbnail(true);
         self.imp().tab_view.set_selected_page(&page);
+        self.schedule_session_save();
         page
     }
 
@@ -1169,6 +1274,7 @@ impl SqlatorWindow {
         self.imp().tab_bar.set_visible(true);
         self.add_query_tab(None);
         self.rebuild_connection_tab_bar();
+        self.schedule_session_save();
         true
     }
 
@@ -1198,6 +1304,7 @@ impl SqlatorWindow {
         self.set_selected_connection_id(Some(connection_id.to_string()));
         self.set_schema_connection_id(Some(connection_id.to_string()));
         self.rebuild_connection_tab_bar();
+        self.schedule_session_save();
     }
 
     /// Close a connection workspace and disconnect (Svelte connection tab close).
@@ -1251,6 +1358,7 @@ impl SqlatorWindow {
         }
 
         self.rebuild_connection_tab_bar();
+        self.schedule_session_save();
     }
 
     fn stash_active_workspace(&self) {
@@ -1451,6 +1559,365 @@ impl SqlatorWindow {
         let _ = self.settings().set("editor-results-position", pos);
     }
 
+    pub fn max_rows_pref(&self) -> usize {
+        crate::preferences::max_rows(self.settings())
+    }
+
+    pub fn confirm_destructive_pref(&self) -> bool {
+        crate::preferences::confirm_destructive(self.settings())
+    }
+
+    pub fn show_toast(&self, message: &str) {
+        self.add_toast(adw::Toast::new(message));
+    }
+
+    pub fn add_toast(&self, toast: adw::Toast) {
+        self.imp().toast_overlay.add_toast(toast);
+    }
+
+    /// Debounced persist of open workspaces (Svelte `tabs.saveState`).
+    pub fn schedule_session_save(&self) {
+        if self.imp().suppress_session_save.get() || self.imp().force_close_pages.get() {
+            return;
+        }
+        if let Some(id) = self.imp().save_debounce.borrow_mut().take() {
+            id.remove();
+        }
+        let window = self.downgrade();
+        let id = glib::timeout_add_local_once(
+            std::time::Duration::from_millis(u64::from(crate::session::SAVE_DEBOUNCE_MS)),
+            move || {
+                if let Some(window) = window.upgrade() {
+                    *window.imp().save_debounce.borrow_mut() = None;
+                    window.save_session_now();
+                }
+            },
+        );
+        *self.imp().save_debounce.borrow_mut() = Some(id);
+    }
+
+    fn save_session_now(&self) {
+        if self.imp().suppress_session_save.get() {
+            return;
+        }
+        let Some(app) = self.application().and_downcast::<SqlatorApplication>() else {
+            return;
+        };
+        let service = app.service();
+        let state = match serde_json::to_value(self.collect_persisted_state()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("serialize tab state failed: {e}");
+                return;
+            }
+        };
+        glib::spawn_future_local(async move {
+            let svc = service.clone();
+            let result = crate::spawn_tokio!(async move { svc.save_tab_state(state).await })
+                .await
+                .expect("join save_tab_state");
+            if let Err(e) = result {
+                tracing::warn!("save_tab_state failed: {e}");
+            }
+        });
+    }
+
+    fn collect_persisted_state(&self) -> crate::session::PersistedTabState {
+        use crate::session::{PersistedConnectionTab, PersistedTabState};
+
+        let active_connection_id = self.imp().active_workspace_id.borrow().clone();
+        let open_ids = self.imp().open_connection_ids.borrow().clone();
+        let mut connection_tabs = Vec::with_capacity(open_ids.len());
+
+        for connection_id in open_ids {
+            let (query_tabs, selected_index) =
+                if active_connection_id.as_deref() == Some(connection_id.as_str()) {
+                    self.collect_mounted_query_tabs()
+                } else if let Some(workspace) =
+                    self.imp().stashed_workspaces.borrow().get(&connection_id)
+                {
+                    (
+                        Self::persisted_tabs_from_stashed(workspace),
+                        workspace.selected_index,
+                    )
+                } else {
+                    continue;
+                };
+
+            if query_tabs.is_empty() {
+                continue;
+            }
+            let active_query_tab_id = query_tabs
+                .get(selected_index as usize)
+                .or_else(|| query_tabs.first())
+                .map(|t| t.id.clone());
+            connection_tabs.push(PersistedConnectionTab {
+                connection_id,
+                active_query_tab_id,
+                query_tabs,
+            });
+        }
+
+        PersistedTabState {
+            active_connection_id,
+            connection_tabs,
+        }
+    }
+
+    fn collect_mounted_query_tabs(&self) -> (Vec<crate::session::PersistedQueryTab>, u32) {
+        let tab_view = &self.imp().tab_view;
+        let selected_index = tab_view
+            .selected_page()
+            .map(|p| tab_view.page_position(&p) as u32)
+            .unwrap_or(0);
+        let mut tabs = Vec::new();
+        for i in 0..tab_view.n_pages() {
+            let page = tab_view.nth_page(i);
+            let title = page.title().to_string();
+            let child = page.child();
+            if let Ok(tab) = child.clone().downcast::<QueryTab>() {
+                tabs.push(crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: title,
+                    sql: tab.sql(),
+                    table_browse: None,
+                    schema_ddl: None,
+                });
+            } else if let Ok(tab) = child.clone().downcast::<TableBrowseTab>() {
+                tabs.push(crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: title,
+                    sql: String::new(),
+                    table_browse: Some(crate::session::PersistedTableBrowse {
+                        table_name: tab.table_name(),
+                        schema: tab.schema(),
+                        sort: tab.sort_specs(),
+                        filters: tab.filter_specs(),
+                    }),
+                    schema_ddl: None,
+                });
+            } else if let Ok(tab) = child.downcast::<SchemaDdlTab>() {
+                tabs.push(crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: title,
+                    sql: String::new(),
+                    table_browse: None,
+                    schema_ddl: Some(crate::session::PersistedSchemaDdl {
+                        table_name: tab.table_name(),
+                        schema: tab.schema(),
+                    }),
+                });
+            }
+        }
+        (tabs, selected_index)
+    }
+
+    fn persisted_tabs_from_stashed(
+        workspace: &imp::StashedWorkspace,
+    ) -> Vec<crate::session::PersistedQueryTab> {
+        workspace
+            .tabs
+            .iter()
+            .map(|stashed| match &stashed.page {
+                imp::StashedPage::Query(tab) => crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: stashed.title.clone(),
+                    sql: tab.sql(),
+                    table_browse: None,
+                    schema_ddl: None,
+                },
+                imp::StashedPage::TableBrowse(tab) => crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: stashed.title.clone(),
+                    sql: String::new(),
+                    table_browse: Some(crate::session::PersistedTableBrowse {
+                        table_name: tab.table_name(),
+                        schema: tab.schema(),
+                        sort: tab.sort_specs(),
+                        filters: tab.filter_specs(),
+                    }),
+                    schema_ddl: None,
+                },
+                imp::StashedPage::SchemaDdl(tab) => crate::session::PersistedQueryTab {
+                    id: tab.persist_id(),
+                    label: stashed.title.clone(),
+                    sql: String::new(),
+                    table_browse: None,
+                    schema_ddl: Some(crate::session::PersistedSchemaDdl {
+                        table_name: tab.table_name(),
+                        schema: tab.schema(),
+                    }),
+                },
+            })
+            .collect()
+    }
+
+    /// Load `get_tab_state`, rebuild workspaces, then reconnect in the background.
+    fn restore_session(&self) {
+        let Some(app) = self.application().and_downcast::<SqlatorApplication>() else {
+            return;
+        };
+        let service = app.service();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[strong]
+            app,
+            async move {
+                let svc = service.clone();
+                let result = crate::spawn_tokio!(async move { svc.get_tab_state().await })
+                    .await
+                    .expect("join get_tab_state");
+                let value = match result {
+                    Ok(Some(v)) => v,
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::warn!("get_tab_state failed: {e}");
+                        return;
+                    }
+                };
+                let state: crate::session::PersistedTabState = match serde_json::from_value(value) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("decode tab state failed: {e}");
+                        return;
+                    }
+                };
+                if state.connection_tabs.is_empty() {
+                    return;
+                }
+
+                window.imp().suppress_session_save.set(true);
+
+                let mut open_ids = Vec::new();
+                let mut stashed = std::collections::HashMap::new();
+                for ct in &state.connection_tabs {
+                    let workspace = window.build_workspace_from_persisted(&app, ct);
+                    open_ids.push(ct.connection_id.clone());
+                    stashed.insert(ct.connection_id.clone(), workspace);
+                }
+
+                *window.imp().open_connection_ids.borrow_mut() = open_ids.clone();
+                *window.imp().stashed_workspaces.borrow_mut() = stashed;
+
+                let active_id = state
+                    .active_connection_id
+                    .clone()
+                    .filter(|id| open_ids.iter().any(|o| o == id))
+                    .or_else(|| open_ids.first().cloned());
+
+                if let Some(active_id) = active_id {
+                    let workspace = window
+                        .imp()
+                        .stashed_workspaces
+                        .borrow_mut()
+                        .remove(&active_id)
+                        .unwrap_or_else(|| window.fresh_workspace(&active_id));
+                    window.mount_workspace(&active_id, workspace);
+                    window.set_selected_connection_id(Some(active_id.clone()));
+                    window.set_schema_connection_id(Some(active_id.clone()));
+                    window.rebuild_connection_tab_bar();
+
+                    for id in open_ids {
+                        window.connect_sidebar_connection(&id);
+                    }
+                }
+
+                window.imp().suppress_session_save.set(false);
+            }
+        ));
+    }
+
+    fn build_workspace_from_persisted(
+        &self,
+        app: &SqlatorApplication,
+        ct: &crate::session::PersistedConnectionTab,
+    ) -> imp::StashedWorkspace {
+        let mut tabs = Vec::new();
+        let mut selected_index = 0u32;
+
+        for (i, qt) in ct.query_tabs.iter().enumerate() {
+            if ct.active_query_tab_id.as_deref() == Some(qt.id.as_str()) {
+                selected_index = i as u32;
+            }
+            let page = if let Some(browse) = &qt.table_browse {
+                let tab = TableBrowseTab::restore(
+                    app,
+                    self,
+                    ct.connection_id.clone(),
+                    browse.table_name.clone(),
+                    browse.schema.clone(),
+                    qt.id.clone(),
+                    browse.sort.clone(),
+                    browse.filters.clone(),
+                );
+                imp::StashedPage::TableBrowse(tab)
+            } else if let Some(ddl) = &qt.schema_ddl {
+                let tab = SchemaDdlTab::restore(
+                    app,
+                    self,
+                    ct.connection_id.clone(),
+                    ddl.table_name.clone(),
+                    ddl.schema.clone(),
+                    qt.id.clone(),
+                );
+                imp::StashedPage::SchemaDdl(tab)
+            } else {
+                let tab = QueryTab::new(app, self);
+                tab.set_connection_id(Some(ct.connection_id.clone()));
+                tab.set_persist_id(qt.id.clone());
+                tab.set_sql(&qt.sql);
+                imp::StashedPage::Query(tab)
+            };
+            let title = if qt.label.trim().is_empty() {
+                "Query".to_string()
+            } else {
+                qt.label.clone()
+            };
+            tabs.push(imp::StashedTab { title, page });
+        }
+
+        if tabs.is_empty() {
+            return self.fresh_workspace(&ct.connection_id);
+        }
+        if selected_index as usize >= tabs.len() {
+            selected_index = 0;
+        }
+        imp::StashedWorkspace {
+            tabs,
+            selected_index,
+        }
+    }
+
+    fn reload_session_tabs_for(&self, connection_id: &str) {
+        let tab_view = &self.imp().tab_view;
+        if self.imp().active_workspace_id.borrow().as_deref() == Some(connection_id) {
+            for i in 0..tab_view.n_pages() {
+                let child = tab_view.nth_page(i).child();
+                if let Ok(tab) = child.clone().downcast::<TableBrowseTab>() {
+                    if tab.connection_id() == connection_id {
+                        tab.reload();
+                    }
+                } else if let Ok(tab) = child.downcast::<SchemaDdlTab>() {
+                    if tab.connection_id() == connection_id {
+                        tab.reload();
+                    }
+                }
+            }
+        }
+
+        let stashed = self.imp().stashed_workspaces.borrow();
+        if let Some(workspace) = stashed.get(connection_id) {
+            for tab in &workspace.tabs {
+                match &tab.page {
+                    imp::StashedPage::TableBrowse(t) => t.reload(),
+                    imp::StashedPage::SchemaDdl(t) => t.reload(),
+                    imp::StashedPage::Query(_) => {}
+                }
+            }
+        }
+    }
+
     /// Open or focus a table-browse tab for the schema connection (Svelte `tabs.openTableBrowse`).
     pub fn open_table_browse(&self, table_name: &str, schema: Option<String>) {
         let Some(connection_id) = self.schema_connection_id() else {
@@ -1484,6 +1951,7 @@ impl SqlatorWindow {
         page.set_title(&title);
         page.set_live_thumbnail(true);
         tab_view.set_selected_page(&page);
+        self.schedule_session_save();
     }
 
     /// Open or focus a DDL viewer tab for the schema connection (Svelte `tabs.openSchemaDdl`).
@@ -1519,6 +1987,7 @@ impl SqlatorWindow {
         page.set_title(&title);
         page.set_live_thumbnail(true);
         tab_view.set_selected_page(&page);
+        self.schedule_session_save();
     }
 
     /// True when any mounted or stashed query tab has pending result edits.

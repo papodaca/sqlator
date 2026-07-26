@@ -27,6 +27,7 @@ mod imp {
         pub connection_id: RefCell<String>,
         pub table_name: RefCell<String>,
         pub schema: RefCell<Option<String>>,
+        pub persist_id: RefCell<String>,
         pub ddl: RefCell<Option<String>>,
         pub generation: AtomicU64,
         pub loading: Cell<bool>,
@@ -148,6 +149,7 @@ mod imp {
                 connection_id: RefCell::new(String::new()),
                 table_name: RefCell::new(String::new()),
                 schema: RefCell::new(None),
+                persist_id: RefCell::new(String::new()),
                 ddl: RefCell::new(None),
                 generation: AtomicU64::new(0),
                 loading: Cell::new(false),
@@ -180,6 +182,38 @@ impl SchemaDdlTab {
         table_name: impl Into<String>,
         schema: Option<String>,
     ) -> Self {
+        let tab = Self::build(app, window, connection_id, table_name, schema, None);
+        tab.fetch_ddl();
+        tab
+    }
+
+    /// Restore a DDL tab from session state without fetching until connected.
+    pub fn restore(
+        app: &SqlatorApplication,
+        window: &SqlatorWindow,
+        connection_id: impl Into<String>,
+        table_name: impl Into<String>,
+        schema: Option<String>,
+        persist_id: impl Into<String>,
+    ) -> Self {
+        Self::build(
+            app,
+            window,
+            connection_id,
+            table_name,
+            schema,
+            Some(persist_id.into()),
+        )
+    }
+
+    fn build(
+        app: &SqlatorApplication,
+        window: &SqlatorWindow,
+        connection_id: impl Into<String>,
+        table_name: impl Into<String>,
+        schema: Option<String>,
+        persist_id: Option<String>,
+    ) -> Self {
         let tab: Self = glib::Object::builder().build();
         tab.imp().service.set(app.service()).ok();
         tab.imp()
@@ -197,6 +231,8 @@ impl SchemaDdlTab {
         *tab.imp().connection_id.borrow_mut() = connection_id;
         *tab.imp().table_name.borrow_mut() = table_name;
         *tab.imp().schema.borrow_mut() = schema;
+        *tab.imp().persist_id.borrow_mut() = persist_id.unwrap_or_else(crate::session::new_tab_id);
+        crate::preferences::style_editor(&tab.imp().editor);
 
         tab.imp().refresh_btn.connect_clicked(glib::clone!(
             #[weak]
@@ -209,7 +245,6 @@ impl SchemaDdlTab {
             move |_| tab.copy_ddl()
         ));
 
-        tab.fetch_ddl();
         tab
     }
 
@@ -225,6 +260,14 @@ impl SchemaDdlTab {
         self.imp().schema.borrow().clone()
     }
 
+    pub fn persist_id(&self) -> String {
+        self.imp().persist_id.borrow().clone()
+    }
+
+    pub fn set_persist_id(&self, id: impl Into<String>) {
+        *self.imp().persist_id.borrow_mut() = id.into();
+    }
+
     /// True when this tab shows DDL for the same table identity.
     pub fn matches_table(&self, table_name: &str, schema: Option<&str>) -> bool {
         self.table_name() == table_name && self.schema().as_deref() == schema
@@ -234,6 +277,11 @@ impl SchemaDdlTab {
         if let Some(id) = id {
             *self.imp().connection_id.borrow_mut() = id;
         }
+    }
+
+    /// Re-fetch DDL (used after session restore reconnects).
+    pub fn reload(&self) {
+        self.fetch_ddl();
     }
 
     fn fetch_ddl(&self) {

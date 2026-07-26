@@ -64,9 +64,10 @@ mod imp {
                 panic!("service set once at startup");
             }
 
-            // Theme before any window constructs SourceView buffers.
+            // Theme / editor font before any window constructs SourceView buffers.
             let settings = gio::Settings::new("im.apodaca.SqlatorGtk");
             crate::theme::bind_settings(&settings);
+            crate::preferences::bind_editor_font(&settings);
             application.setup_color_scheme_action(&settings);
 
             let quit = gio::SimpleAction::new("quit", None);
@@ -83,14 +84,11 @@ mod imp {
             preferences.connect_activate(glib::clone!(
                 #[weak]
                 application,
+                #[strong]
+                settings,
                 move |_, _| {
                     if let Some(window) = application.active_window() {
-                        let dialog = adw::AlertDialog::new(
-                            Some("Preferences"),
-                            Some("Preferences land in phase 3."),
-                        );
-                        dialog.add_response("ok", "OK");
-                        dialog.present(Some(&window));
+                        crate::preferences::present(&window, &settings);
                     }
                 }
             ));

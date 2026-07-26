@@ -6512,6 +6512,7 @@ dependencies = [
  "glib-build-tools",
  "gtk4",
  "libadwaita",
+ "serde",
  "serde_json",
  "sourceview5",
  "sqlator-core",

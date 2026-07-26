@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const LIMIT: i64 = 50;
-const MAX_ROWS: usize = 1000;
+const DEFAULT_MAX_ROWS: usize = 1000;
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone)]
@@ -49,6 +49,7 @@ mod imp {
         pub connection_id: RefCell<String>,
         pub table_name: RefCell<String>,
         pub schema: RefCell<Option<String>>,
+        pub persist_id: RefCell<String>,
         pub sort: RefCell<Vec<SortSpec>>,
         pub filters: RefCell<HashMap<String, FilterEntry>>,
         pub column_names: RefCell<Vec<String>>,
@@ -211,6 +212,7 @@ mod imp {
                 connection_id: RefCell::new(String::new()),
                 table_name: RefCell::new(String::new()),
                 schema: RefCell::new(None),
+                persist_id: RefCell::new(String::new()),
                 sort: RefCell::new(Vec::new()),
                 filters: RefCell::new(HashMap::new()),
                 column_names: RefCell::new(Vec::new()),
@@ -273,7 +275,76 @@ impl TableBrowseTab {
         *tab.imp().connection_id.borrow_mut() = connection_id;
         *tab.imp().table_name.borrow_mut() = table_name;
         *tab.imp().schema.borrow_mut() = schema;
+        *tab.imp().persist_id.borrow_mut() = crate::session::new_tab_id();
 
+        tab.wire_controls();
+        tab.fetch(0, false);
+        tab
+    }
+
+    /// Restore a browse tab from session state (sort/filters applied before first fetch).
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        app: &SqlatorApplication,
+        window: &SqlatorWindow,
+        connection_id: impl Into<String>,
+        table_name: impl Into<String>,
+        schema: Option<String>,
+        persist_id: impl Into<String>,
+        sort: Vec<SortSpec>,
+        filters: Vec<FilterSpec>,
+    ) -> Self {
+        let tab: Self = glib::Object::builder().build();
+        tab.imp().service.set(app.service()).ok();
+        tab.imp()
+            .window
+            .set(window.downgrade())
+            .expect("window weak ref once");
+
+        let connection_id = connection_id.into();
+        let table_name = table_name.into();
+        let title = match schema.as_deref() {
+            Some(s) if !s.is_empty() => format!("{s}.{table_name}"),
+            _ => table_name.clone(),
+        };
+        tab.imp().title.set_text(&title);
+        *tab.imp().connection_id.borrow_mut() = connection_id;
+        *tab.imp().table_name.borrow_mut() = table_name;
+        *tab.imp().schema.borrow_mut() = schema;
+        *tab.imp().persist_id.borrow_mut() = persist_id.into();
+        *tab.imp().sort.borrow_mut() = sort;
+        {
+            let mut map = tab.imp().filters.borrow_mut();
+            map.clear();
+            for f in filters {
+                map.insert(
+                    f.column,
+                    FilterEntry {
+                        operator: f.operator,
+                        value: f
+                            .value
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_default(),
+                    },
+                );
+            }
+        }
+
+        tab.wire_controls();
+        // Defer fetch until reconnect — session restore may run before connect.
+        tab
+    }
+
+    /// Re-fetch from offset 0 (after restore reconnect or preference change).
+    pub fn reload(&self) {
+        self.fetch(0, false);
+    }
+
+    fn wire_controls(&self) {
+        let tab = self;
         tab.imp().grid.connect_server_sort(glib::clone!(
             #[weak]
             tab,
@@ -320,9 +391,6 @@ impl TableBrowseTab {
                 ));
             }
         }
-
-        tab.fetch(0, false);
-        tab
     }
 
     pub fn connection_id(&self) -> String {
@@ -337,6 +405,22 @@ impl TableBrowseTab {
         self.imp().schema.borrow().clone()
     }
 
+    pub fn persist_id(&self) -> String {
+        self.imp().persist_id.borrow().clone()
+    }
+
+    pub fn set_persist_id(&self, id: impl Into<String>) {
+        *self.imp().persist_id.borrow_mut() = id.into();
+    }
+
+    pub fn sort_specs(&self) -> Vec<SortSpec> {
+        self.imp().sort.borrow().clone()
+    }
+
+    pub fn filter_specs(&self) -> Vec<FilterSpec> {
+        self.current_filter_specs()
+    }
+
     pub fn matches_table(&self, table_name: &str, schema: Option<&str>) -> bool {
         self.table_name() == table_name && self.schema().as_deref() == schema
     }
@@ -344,6 +428,21 @@ impl TableBrowseTab {
     pub fn set_connection_id(&self, id: Option<String>) {
         if let Some(id) = id {
             *self.imp().connection_id.borrow_mut() = id;
+        }
+    }
+
+    fn max_rows(&self) -> usize {
+        self.imp()
+            .window
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|w| w.max_rows_pref())
+            .unwrap_or(DEFAULT_MAX_ROWS)
+    }
+
+    fn schedule_session_save(&self) {
+        if let Some(window) = self.imp().window.get().and_then(|w| w.upgrade()) {
+            window.schedule_session_save();
         }
     }
 
@@ -357,6 +456,7 @@ impl TableBrowseTab {
                 }
             }
         }
+        self.schedule_session_save();
         self.fetch(0, false);
     }
 
@@ -415,18 +515,21 @@ impl TableBrowseTab {
         );
         self.imp().filter_value.set_text("");
         self.rebuild_filter_chips();
+        self.schedule_session_save();
         self.schedule_filter_fetch();
     }
 
     fn clear_filters(&self) {
         self.imp().filters.borrow_mut().clear();
         self.rebuild_filter_chips();
+        self.schedule_session_save();
         self.fetch(0, false);
     }
 
     fn remove_filter(&self, column: &str) {
         self.imp().filters.borrow_mut().remove(column);
         self.rebuild_filter_chips();
+        self.schedule_session_save();
         self.schedule_filter_fetch();
     }
 
@@ -520,7 +623,8 @@ impl TableBrowseTab {
 
     fn load_more(&self) {
         let next = self.imp().offset.get() + self.imp().total_returned.get() as i64;
-        if next as usize >= MAX_ROWS {
+        let max_rows = self.max_rows();
+        if next as usize >= max_rows {
             return;
         }
         self.fetch(next, true);
@@ -612,16 +716,17 @@ impl TableBrowseTab {
         } else {
             data.rows.len()
         });
-        self.imp().total_returned.set(returned.min(MAX_ROWS));
+        let max_rows = self.max_rows();
+        self.imp().total_returned.set(returned.min(max_rows));
         self.imp()
             .has_more
-            .set(data.has_more && returned < MAX_ROWS);
+            .set(data.has_more && returned < max_rows);
         self.imp().has_result.set(true);
 
         grid.finish(self.imp().total_returned.get(), 0);
         let status = if self.imp().has_more.get() {
             format!(
-                "Showing {} rows (load more for up to {MAX_ROWS})",
+                "Showing {} rows (load more for up to {max_rows})",
                 self.imp().total_returned.get()
             )
         } else {

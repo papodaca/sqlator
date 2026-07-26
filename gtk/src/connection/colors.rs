@@ -1,5 +1,11 @@
 //! Connection color ids shared with the Svelte `CONNECTION_COLORS` palette.
 
+/// Hex palette used for group color pickers (Svelte `GROUP_COLORS` parity).
+pub const GROUP_COLOR_HEXES: &[&str] = &[
+    "#ef4444", "#f97316", "#eab308", "#22c55e", "#14b8a6", "#3b82f6", "#8b5cf6", "#ec4899",
+    "#64748b",
+];
+
 /// Resolve a stored `color_id` (or hex fallback) to a CSS class suffix / hex.
 pub fn color_hex(color_id: &str) -> &'static str {
     match color_id {
