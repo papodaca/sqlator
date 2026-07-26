@@ -3,7 +3,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use argon2::{Argon2, Algorithm, Params, Version};
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -120,10 +120,12 @@ impl VaultBackend {
 
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| CoreError {
-            message: "Wrong password or corrupted vault".into(),
-            code: "VAULT_WRONG_PASSWORD".into(),
-        })?;
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext.as_ref())
+            .map_err(|_| CoreError {
+                message: "Wrong password or corrupted vault".into(),
+                code: "VAULT_WRONG_PASSWORD".into(),
+            })?;
 
         let entries: HashMap<String, String> =
             serde_json::from_slice(&plaintext).map_err(|e| vault_corrupt(e.to_string()))?;
@@ -238,10 +240,12 @@ fn make_vault_file(
     })?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref()).map_err(|e| CoreError {
-        message: format!("Encryption failed: {e}"),
-        code: "VAULT_ERROR".into(),
-    })?;
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext.as_ref())
+        .map_err(|e| CoreError {
+            message: format!("Encryption failed: {e}"),
+            code: "VAULT_ERROR".into(),
+        })?;
     Ok(VaultFile {
         version: 1,
         salt: B64.encode(salt),
@@ -387,9 +391,7 @@ mod group_b_tests {
     fn create_store_lock_unlock_read_round_trip() {
         let (_dir, vault) = temp_vault();
         vault.create("master-password").expect("create");
-        vault
-            .store("profile-1:password", "s3cret")
-            .expect("store");
+        vault.store("profile-1:password", "s3cret").expect("store");
         vault.lock();
         assert!(vault.is_locked());
 

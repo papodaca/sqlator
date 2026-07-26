@@ -1,7 +1,9 @@
 // Oracle database support via oracle-rs pure-Rust TNS driver.
 // Connection URL format: oracle://user:pass@host:1521/service_name
 use crate::error::CoreError;
-use crate::models::{QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo, TableQueryParams, TableQueryResult};
+use crate::models::{
+    QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo, TableQueryParams, TableQueryResult,
+};
 use deadpool_oracle::PoolBuilder;
 use oracle_rs::{Config, LobValue, Value};
 use std::collections::{HashMap, HashSet};
@@ -42,7 +44,9 @@ fn parse_url(url: &str) -> Result<Config, CoreError> {
 
     if service.is_empty() {
         return Err(CoreError {
-            message: "Oracle URL must include a service name, e.g. oracle://user:pass@host:1521/FREEPDB1".into(),
+            message:
+                "Oracle URL must include a service name, e.g. oracle://user:pass@host:1521/FREEPDB1"
+                    .into(),
             code: "INVALID_URL".into(),
         });
     }
@@ -64,7 +68,11 @@ pub async fn execute_select(
     let result = match conn.query(sql, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
             return Ok(());
         }
     };
@@ -87,7 +95,12 @@ pub async fn execute_select(
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let _ = sender.send(QueryEvent::Done { row_count, duration_ms }).await;
+    let _ = sender
+        .send(QueryEvent::Done {
+            row_count,
+            duration_ms,
+        })
+        .await;
     Ok(())
 }
 
@@ -107,7 +120,11 @@ pub async fn execute_statement(
             // Oracle auto-commit is off by default; commit DML so changes persist
             // across pooled connections (deadpool recycles via rollback).
             if let Err(e) = conn.commit().await {
-                let _ = sender.send(QueryEvent::Error { message: format!("Commit failed: {}", e) }).await;
+                let _ = sender
+                    .send(QueryEvent::Error {
+                        message: format!("Commit failed: {}", e),
+                    })
+                    .await;
                 return Ok(());
             }
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -119,7 +136,11 @@ pub async fn execute_statement(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())
@@ -136,7 +157,10 @@ pub async fn get_schemas(pool: &OraclePool) -> Result<Vec<SchemaInfo>, CoreError
     let current_user = conn
         .query("SELECT USER FROM DUAL", &[])
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .rows
         .first()
         .and_then(|r| r.get_string(0))
@@ -153,7 +177,10 @@ pub async fn get_schemas(pool: &OraclePool) -> Result<Vec<SchemaInfo>, CoreError
             &[Value::String(current_user.clone())],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     Ok(result
         .rows
@@ -182,8 +209,15 @@ pub async fn get_tables(
         let r = conn
             .query("SELECT USER FROM DUAL", &[])
             .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
-        r.rows.first().and_then(|row| row.get_string(0)).unwrap_or("UNKNOWN").to_string()
+            .map_err(|e| CoreError {
+                message: e.to_string(),
+                code: "SCHEMA_QUERY".into(),
+            })?;
+        r.rows
+            .first()
+            .and_then(|row| row.get_string(0))
+            .unwrap_or("UNKNOWN")
+            .to_string()
     };
 
     let result = conn
@@ -192,10 +226,16 @@ pub async fn get_tables(
              UNION ALL \
              SELECT view_name, 'view' FROM all_views WHERE owner = :2 \
              ORDER BY 1",
-            &[Value::String(schema_val.clone()), Value::String(schema_val.clone())],
+            &[
+                Value::String(schema_val.clone()),
+                Value::String(schema_val.clone()),
+            ],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     Ok(result
         .rows
@@ -231,8 +271,15 @@ pub async fn get_columns(
         let r = conn
             .query("SELECT USER FROM DUAL", &[])
             .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
-        r.rows.first().and_then(|row| row.get_string(0)).unwrap_or("UNKNOWN").to_string()
+            .map_err(|e| CoreError {
+                message: e.to_string(),
+                code: "SCHEMA_QUERY".into(),
+            })?;
+        r.rows
+            .first()
+            .and_then(|row| row.get_string(0))
+            .unwrap_or("UNKNOWN")
+            .to_string()
     };
 
     let schema_esc = schema_val.replace('\'', "''");
@@ -253,11 +300,15 @@ pub async fn get_columns(
              ORDER BY acc.position",
             schema_esc, table_esc
         );
-        let result = conn
-            .query(&pk_sql, &[])
-            .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
-        result.rows.iter().filter_map(|r| r.get_string(0).map(String::from)).collect()
+        let result = conn.query(&pk_sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
+        result
+            .rows
+            .iter()
+            .filter_map(|r| r.get_string(0).map(String::from))
+            .collect()
     };
 
     // Foreign key columns — fresh connection
@@ -280,10 +331,10 @@ pub async fn get_columns(
              WHERE ac.constraint_type = 'R' AND ac.owner = '{}' AND ac.table_name = '{}'",
             schema_esc, table_esc
         );
-        let result = conn
-            .query(&fk_sql, &[])
-            .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        let result = conn.query(&fk_sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
         let mut map = HashMap::new();
         for r in &result.rows {
             if let (Some(col), Some(ref_owner), Some(ref_table), Some(ref_col)) = (
@@ -317,10 +368,10 @@ pub async fn get_columns(
              ORDER BY column_id",
             schema_esc, table_esc
         );
-        conn
-            .query(&col_sql, &[])
-            .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        conn.query(&col_sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
     };
 
     Ok(col_result
@@ -351,7 +402,11 @@ pub async fn get_columns(
         .collect())
 }
 
-pub async fn get_ddl(pool: &OraclePool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+pub async fn get_ddl(
+    pool: &OraclePool,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, CoreError> {
     let schema_val = if let Some(s) = schema {
         s.to_string()
     } else {
@@ -362,8 +417,15 @@ pub async fn get_ddl(pool: &OraclePool, table_name: &str, schema: Option<&str>) 
         let r = conn
             .query("SELECT USER FROM DUAL", &[])
             .await
-            .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
-        r.rows.first().and_then(|row| row.get_string(0)).unwrap_or("UNKNOWN").to_string()
+            .map_err(|e| CoreError {
+                message: e.to_string(),
+                code: "SCHEMA_QUERY".into(),
+            })?;
+        r.rows
+            .first()
+            .and_then(|row| row.get_string(0))
+            .unwrap_or("UNKNOWN")
+            .to_string()
     };
 
     if let Some(ddl) = try_dbms_metadata(pool, table_name, &schema_val).await? {
@@ -373,7 +435,11 @@ pub async fn get_ddl(pool: &OraclePool, table_name: &str, schema: Option<&str>) 
     reconstruct_ddl(pool, table_name, &schema_val).await
 }
 
-async fn try_dbms_metadata(pool: &OraclePool, table_name: &str, schema_val: &str) -> Result<Option<String>, CoreError> {
+async fn try_dbms_metadata(
+    pool: &OraclePool,
+    table_name: &str,
+    schema_val: &str,
+) -> Result<Option<String>, CoreError> {
     let conn = pool.get().await.map_err(|e| CoreError {
         message: e.to_string(),
         code: "CONNECTION_FAILED".into(),
@@ -401,10 +467,18 @@ async fn try_dbms_metadata(pool: &OraclePool, table_name: &str, schema_val: &str
         }
     };
 
-    Ok(result.rows.first().and_then(|r| r.get_string(0)).map(|s| s.trim().to_string()))
+    Ok(result
+        .rows
+        .first()
+        .and_then(|r| r.get_string(0))
+        .map(|s| s.trim().to_string()))
 }
 
-async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) -> Result<String, CoreError> {
+async fn reconstruct_ddl(
+    pool: &OraclePool,
+    table_name: &str,
+    schema_val: &str,
+) -> Result<String, CoreError> {
     let schema_esc = schema_val.replace('\'', "''");
     let table_esc = table_name.replace('\'', "''");
     let qualified = format!("\"{}\".\"{}\"", schema_val, table_name);
@@ -420,7 +494,10 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
             "SELECT COUNT(*) FROM all_views WHERE owner = '{}' AND view_name = '{}'",
             schema_esc, table_esc
         );
-        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
         result.rows.first().and_then(|r| r.get_i64(0)).unwrap_or(0) > 0
     };
 
@@ -433,9 +510,20 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
             "SELECT text FROM all_views WHERE owner = '{}' AND view_name = '{}'",
             schema_esc, table_esc
         );
-        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
-        let view_text = result.rows.first().and_then(|r| r.get_string(0)).unwrap_or("").trim();
-        return Ok(format!("CREATE OR REPLACE VIEW {} AS\n{};", qualified, view_text));
+        let result = conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
+        let view_text = result
+            .rows
+            .first()
+            .and_then(|r| r.get_string(0))
+            .unwrap_or("")
+            .trim();
+        return Ok(format!(
+            "CREATE OR REPLACE VIEW {} AS\n{};",
+            qualified, view_text
+        ));
     }
 
     let col_rows = {
@@ -450,12 +538,18 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
              ORDER BY column_id",
             schema_esc, table_esc
         );
-        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
     };
 
     if col_rows.rows.is_empty() {
         return Err(CoreError {
-            message: format!("Table {}.{} not found. It may have been dropped.", schema_val, table_name),
+            message: format!(
+                "Table {}.{} not found. It may have been dropped.",
+                schema_val, table_name
+            ),
             code: "TABLE_NOT_FOUND".into(),
         });
     }
@@ -490,10 +584,14 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
              ORDER BY ac.constraint_name, acc.position",
             schema_esc, table_esc
         );
-        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
     };
 
-    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &pk_rows.rows {
         let cname = row.get_string(0).unwrap_or("").to_string();
         let col = row.get_string(1).unwrap_or("").to_string();
@@ -501,7 +599,11 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
     }
     for (cname, cols) in &pk_by_constraint {
         let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" PRIMARY KEY ({})", cname, quoted.join(", ")));
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" PRIMARY KEY ({})",
+            cname,
+            quoted.join(", ")
+        ));
     }
 
     let fk_rows = {
@@ -519,24 +621,45 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
              ORDER BY ac.constraint_name, acc.position",
             schema_esc, table_esc
         );
-        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
     };
 
-    let mut fk_by_constraint: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> = std::collections::BTreeMap::new();
+    let mut fk_by_constraint: std::collections::BTreeMap<
+        String,
+        Vec<(String, String, String, String)>,
+    > = std::collections::BTreeMap::new();
     for row in &fk_rows.rows {
         let cname = row.get_string(0).unwrap_or("").to_string();
         let col = row.get_string(1).unwrap_or("").to_string();
         let ref_schema = row.get_string(2).unwrap_or("").to_string();
         let ref_table = row.get_string(3).unwrap_or("").to_string();
         let ref_col = row.get_string(4).unwrap_or("").to_string();
-        fk_by_constraint.entry(cname).or_default().push((col, ref_schema, ref_table, ref_col));
+        fk_by_constraint
+            .entry(cname)
+            .or_default()
+            .push((col, ref_schema, ref_table, ref_col));
     }
     for (cname, refs) in &fk_by_constraint {
-        let from_cols: Vec<String> = refs.iter().map(|(c, _, _, _)| format!("\"{}\"", c)).collect();
+        let from_cols: Vec<String> = refs
+            .iter()
+            .map(|(c, _, _, _)| format!("\"{}\"", c))
+            .collect();
         let first = refs.first().unwrap();
         let ref_qualified = format!("\"{}\".\"{}\"", first.1, first.2);
-        let to_cols: Vec<String> = refs.iter().map(|(_, _, _, c)| format!("\"{}\"", c)).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES {} ({})", cname, from_cols.join(", "), ref_qualified, to_cols.join(", ")));
+        let to_cols: Vec<String> = refs
+            .iter()
+            .map(|(_, _, _, c)| format!("\"{}\"", c))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES {} ({})",
+            cname,
+            from_cols.join(", "),
+            ref_qualified,
+            to_cols.join(", ")
+        ));
     }
 
     let uq_rows = {
@@ -552,10 +675,14 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
              ORDER BY ac.constraint_name, acc.position",
             schema_esc, table_esc
         );
-        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
     };
 
-    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &uq_rows.rows {
         let cname = row.get_string(0).unwrap_or("").to_string();
         let col = row.get_string(1).unwrap_or("").to_string();
@@ -563,7 +690,11 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
     }
     for (cname, cols) in &uq_by_constraint {
         let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
-        parts.push(format!("  CONSTRAINT \"{}\" UNIQUE ({})", cname, quoted.join(", ")));
+        parts.push(format!(
+            "  CONSTRAINT \"{}\" UNIQUE ({})",
+            cname,
+            quoted.join(", ")
+        ));
     }
 
     let ck_rows = {
@@ -579,21 +710,36 @@ async fn reconstruct_ddl(pool: &OraclePool, table_name: &str, schema_val: &str) 
              ORDER BY ac.constraint_name",
             schema_esc, table_esc
         );
-        conn.query(&sql, &[]).await.map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        conn.query(&sql, &[]).await.map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
     };
 
     for row in &ck_rows.rows {
         let cname = row.get_string(0).unwrap_or("").to_string();
         let check_clause = row.get_string(1).unwrap_or("").to_string();
         if !check_clause.is_empty() {
-            parts.push(format!("  CONSTRAINT \"{}\" CHECK ({})", cname, check_clause));
+            parts.push(format!(
+                "  CONSTRAINT \"{}\" CHECK ({})",
+                cname, check_clause
+            ));
         }
     }
 
-    Ok(format!("CREATE TABLE {} (\n{}\n);", qualified, parts.join(",\n")))
+    Ok(format!(
+        "CREATE TABLE {} (\n{}\n);",
+        qualified,
+        parts.join(",\n")
+    ))
 }
 
-fn resolve_oracle_type(data_type: &str, data_length: i32, data_precision: Option<i32>, data_scale: Option<i32>) -> String {
+fn resolve_oracle_type(
+    data_type: &str,
+    data_length: i32,
+    data_precision: Option<i32>,
+    data_scale: Option<i32>,
+) -> String {
     let upper = data_type.to_uppercase();
     let base = upper.split('(').next().unwrap_or(&upper).trim();
     match base {
@@ -756,7 +902,8 @@ pub async fn query_table(
     let result_rows: Vec<serde_json::Value> = rows_slice
         .iter()
         .map(|row| {
-            let values: Vec<serde_json::Value> = row.values().iter().map(oracle_value_to_json).collect();
+            let values: Vec<serde_json::Value> =
+                row.values().iter().map(oracle_value_to_json).collect();
             let mut obj = serde_json::Map::new();
             for (i, col) in col_names.iter().enumerate() {
                 let val = values.get(i).cloned().unwrap_or(serde_json::Value::Null);

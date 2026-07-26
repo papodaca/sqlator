@@ -66,12 +66,21 @@ impl CredentialStore {
         }
     }
 
-    pub fn store_credential(&self, profile_id: &str, kind: &str, secret: &str) -> Result<(), CoreError> {
+    pub fn store_credential(
+        &self,
+        profile_id: &str,
+        kind: &str,
+        secret: &str,
+    ) -> Result<(), CoreError> {
         let key = credential_key(profile_id, kind);
         self.active()?.store(&key, secret)
     }
 
-    pub fn get_credential(&self, profile_id: &str, kind: &str) -> Result<Option<String>, CoreError> {
+    pub fn get_credential(
+        &self,
+        profile_id: &str,
+        kind: &str,
+    ) -> Result<Option<String>, CoreError> {
         let key = credential_key(profile_id, kind);
         self.active()?.get(&key)
     }
@@ -97,7 +106,11 @@ impl CredentialStore {
 
     /// Copy credentials for `profile_ids` from current mode to `new_mode`.
     /// Vault must be unlocked when it is involved as source or destination.
-    pub fn migrate_to(&self, new_mode: &StorageMode, profile_ids: &[String]) -> Result<Vec<String>, CoreError> {
+    pub fn migrate_to(
+        &self,
+        new_mode: &StorageMode,
+        profile_ids: &[String],
+    ) -> Result<Vec<String>, CoreError> {
         if self.mode() == *new_mode {
             return Ok(vec![]);
         }
@@ -151,6 +164,8 @@ pub struct VaultSettings {
 
 impl Default for VaultSettings {
     fn default() -> Self {
-        Self { timeout_secs: 15 * 60 }
+        Self {
+            timeout_secs: 15 * 60,
+        }
     }
 }

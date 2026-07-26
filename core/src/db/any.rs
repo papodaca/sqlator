@@ -22,11 +22,8 @@ pub async fn execute_select(
             Ok(row) => {
                 let row: AnyRow = row;
                 if !columns_sent {
-                    let names: Vec<String> = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
                     let _ = sender.send(QueryEvent::Columns { names }).await;
                     columns_sent = true;
                 }

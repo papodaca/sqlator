@@ -10,9 +10,13 @@ impl LocalDockerAccess {
     pub fn new() -> Result<Self, DockerError> {
         let socket = PathBuf::from("/var/run/docker.sock");
         if socket.exists() {
-            Ok(Self { socket_path: socket })
+            Ok(Self {
+                socket_path: socket,
+            })
         } else {
-            Err(DockerError::Other("Docker socket not found at /var/run/docker.sock".to_string()))
+            Err(DockerError::Other(
+                "Docker socket not found at /var/run/docker.sock".to_string(),
+            ))
         }
     }
 
@@ -61,7 +65,10 @@ impl LocalDockerAccess {
     pub async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
         let output = tokio::process::Command::new("docker")
             .args(["ps", "--format", "{{.Names}}|{{.Image}}|{{.Status}}"])
-            .env("DOCKER_HOST", format!("unix://{}", self.socket_path.display()))
+            .env(
+                "DOCKER_HOST",
+                format!("unix://{}", self.socket_path.display()),
+            )
             .output()
             .await
             .map_err(|e| DockerError::Other(format!("Failed to execute docker: {}", e)))?;
@@ -109,7 +116,8 @@ fn parse_local_inspect(container_name: &str, output: &str) -> Result<ContainerIn
     let parts: Vec<&str> = output.splitn(5, '|').collect();
     if parts.len() < 2 {
         return Err(DockerError::ParseError(format!(
-            "Unexpected docker inspect output: {}", output
+            "Unexpected docker inspect output: {}",
+            output
         )));
     }
 

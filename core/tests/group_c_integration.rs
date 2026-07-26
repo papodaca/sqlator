@@ -8,9 +8,7 @@
 //!
 //! Bare `cargo test --workspace` must pass with no docker (tests skip).
 
-use sqlator_core::models::{
-    ParameterizedStatement, QueryEvent, SqlBatch, TableQueryParams,
-};
+use sqlator_core::models::{ParameterizedStatement, QueryEvent, SqlBatch, TableQueryParams};
 use sqlator_core::{DbManager, SshAuthConfig, SshHostConfig, SshTunnel};
 use std::time::Duration;
 
@@ -113,7 +111,9 @@ async fn mysql_get_schemas_decodes_schema_name_as_string() {
         );
         // Names are printable identifiers, not opaque binary
         assert!(
-            s.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            s.name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
             "unexpected schema name bytes: {:?}",
             s.name
         );
@@ -170,7 +170,10 @@ async fn query_table_has_more_clamping_sqlite() {
     // Exactly `limit` rows available → has_more false
     let r = mgr.query_table("hm", &base(15)).await.expect("limit=15");
     assert_eq!(r.total_returned, 15);
-    assert!(!r.has_more, "exactly limit rows → has_more false; got {r:?}");
+    assert!(
+        !r.has_more,
+        "exactly limit rows → has_more false; got {r:?}"
+    );
 
     // limit+1 available → has_more true, returns `limit` rows
     let r = mgr.query_table("hm", &base(10)).await.expect("limit=10");
@@ -186,7 +189,10 @@ async fn query_table_has_more_clamping_sqlite() {
         )
         .await;
     }
-    let r = mgr.query_table("hm", &base(2000)).await.expect("limit=2000");
+    let r = mgr
+        .query_table("hm", &base(2000))
+        .await
+        .expect("limit=2000");
     assert_eq!(
         r.total_returned, 1000,
         "limit>1000 clamped to 1000 rows returned"
@@ -213,7 +219,12 @@ async fn query_event_sequencing_select_nonsel_failure() {
     let mgr = DbManager::new();
     mgr.connect("ev", &url).await.expect("connect");
 
-    collect_events(&mgr, "ev", "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)").await;
+    collect_events(
+        &mgr,
+        "ev",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)",
+    )
+    .await;
     collect_events(&mgr, "ev", "INSERT INTO t (id, v) VALUES (1, 'a')").await;
     collect_events(&mgr, "ev", "INSERT INTO t (id, v) VALUES (2, 'b')").await;
 
@@ -251,7 +262,11 @@ async fn query_event_sequencing_select_nonsel_failure() {
     );
 
     let events = collect_events(&mgr, "ev", "DELETE FROM definitely_missing").await;
-    assert_eq!(events.len(), 1, "non-SELECT failure → only Error; got {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "non-SELECT failure → only Error; got {events:?}"
+    );
     assert!(
         matches!(events[0], QueryEvent::Error { .. }),
         "expected Error; got {events:?}"
@@ -306,10 +321,7 @@ async fn execute_batch_ordering_and_rollback_sqlite() {
         ],
         use_transaction: true,
     };
-    let result = mgr
-        .execute_batch("batch", &batch)
-        .await
-        .expect("batch ok");
+    let result = mgr.execute_batch("batch", &batch).await.expect("batch ok");
     assert!(result.success, "batch should succeed: {result:?}");
     assert_eq!(result.executed_count, 3);
 
@@ -337,10 +349,13 @@ async fn execute_batch_ordering_and_rollback_sqlite() {
                 "INSERT INTO kv (k, v) VALUES (?, ?)",
                 vec![serde_json::json!("d"), serde_json::json!("4")],
             ),
-            stmt("INSERT INTO kv (k, v) VALUES (?, ?)", vec![
-                serde_json::json!("b"), // PK conflict
-                serde_json::json!("nope"),
-            ]),
+            stmt(
+                "INSERT INTO kv (k, v) VALUES (?, ?)",
+                vec![
+                    serde_json::json!("b"), // PK conflict
+                    serde_json::json!("nope"),
+                ],
+            ),
             stmt(
                 "INSERT INTO kv (k, v) VALUES (?, ?)",
                 vec![serde_json::json!("e"), serde_json::json!("5")],
@@ -352,7 +367,10 @@ async fn execute_batch_ordering_and_rollback_sqlite() {
         .execute_batch("batch", &batch)
         .await
         .expect("batch returns Ok with success=false on stmt error");
-    assert!(!result.success, "mid-batch failure → success=false: {result:?}");
+    assert!(
+        !result.success,
+        "mid-batch failure → success=false: {result:?}"
+    );
     assert_eq!(result.executed_count, 1);
     assert!(result.error.is_some());
 
@@ -496,19 +514,27 @@ async fn ssh_tunnel_two_simultaneous_streams_complete() {
         .expect("tunnel concurrency timed out — possible deadlock regression");
 
     assert!(
-        events_a.iter().any(|e| matches!(e, QueryEvent::Done { .. })),
+        events_a
+            .iter()
+            .any(|e| matches!(e, QueryEvent::Done { .. })),
         "stream A must complete with Done; got {events_a:?}"
     );
     assert!(
-        events_b.iter().any(|e| matches!(e, QueryEvent::Done { .. })),
+        events_b
+            .iter()
+            .any(|e| matches!(e, QueryEvent::Done { .. })),
         "stream B must complete with Done; got {events_b:?}"
     );
     assert!(
-        events_a.iter().all(|e| !matches!(e, QueryEvent::Error { .. })),
+        events_a
+            .iter()
+            .all(|e| !matches!(e, QueryEvent::Error { .. })),
         "stream A must not Error; got {events_a:?}"
     );
     assert!(
-        events_b.iter().all(|e| !matches!(e, QueryEvent::Error { .. })),
+        events_b
+            .iter()
+            .all(|e| !matches!(e, QueryEvent::Error { .. })),
         "stream B must not Error; got {events_b:?}"
     );
 

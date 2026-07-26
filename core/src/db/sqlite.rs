@@ -21,11 +21,8 @@ pub async fn execute_select(
         match result {
             Ok(row) => {
                 if !columns_sent {
-                    let names: Vec<String> = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
                     let _ = sender.send(QueryEvent::Columns { names }).await;
                     columns_sent = true;
                 }
@@ -42,7 +39,11 @@ pub async fn execute_select(
                 row_count += 1;
             }
             Err(e) => {
-                let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+                let _ = sender
+                    .send(QueryEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return Ok(());
             }
         }
@@ -60,11 +61,17 @@ pub async fn execute_select(
 
 pub async fn get_ddl(pool: &SqlitePool, table_name: &str) -> Result<String, CoreError> {
     let safe_name = table_name.replace('"', "\"\"");
-    let sql = format!("SELECT sql FROM sqlite_master WHERE name = \"{}\"", safe_name);
+    let sql = format!(
+        "SELECT sql FROM sqlite_master WHERE name = \"{}\"",
+        safe_name
+    );
     let row = sqlx::query(&sql)
         .fetch_one(pool)
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
     let raw = row.try_get::<String, _>("sql").unwrap_or_default();
     let mut result = String::with_capacity(raw.len());
     let mut prev_newline = false;

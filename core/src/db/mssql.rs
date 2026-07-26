@@ -1,6 +1,8 @@
 use crate::error::CoreError;
-use crate::models::{FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo,
-    TableQueryParams, TableQueryResult};
+use crate::models::{
+    FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo, TableQueryParams,
+    TableQueryResult,
+};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
@@ -47,7 +49,10 @@ fn parse_url(url: &str) -> Result<tiberius::Config, CoreError> {
 
     if !parsed.username().is_empty() {
         let password = parsed.password().unwrap_or("");
-        config.authentication(tiberius::AuthMethod::sql_server(parsed.username(), password));
+        config.authentication(tiberius::AuthMethod::sql_server(
+            parsed.username(),
+            password,
+        ));
     }
 
     // Trust server certificate by default — users can configure TLS later
@@ -67,12 +72,20 @@ pub async fn execute_select(
         Ok(q) => match q.into_first_result().await {
             Ok(rows) => rows,
             Err(e) => {
-                let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+                let _ = sender
+                    .send(QueryEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return Ok(());
             }
         },
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
             return Ok(());
         }
     };
@@ -100,7 +113,12 @@ pub async fn execute_select(
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let _ = sender.send(QueryEvent::Done { row_count, duration_ms }).await;
+    let _ = sender
+        .send(QueryEvent::Done {
+            row_count,
+            duration_ms,
+        })
+        .await;
     Ok(())
 }
 
@@ -122,7 +140,11 @@ pub async fn execute_statement(
                 .await;
         }
         Err(e) => {
-            let _ = sender.send(QueryEvent::Error { message: e.to_string() }).await;
+            let _ = sender
+                .send(QueryEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
         }
     }
     Ok(())
@@ -140,16 +162,25 @@ pub async fn get_schemas(pool: &MssqlPool) -> Result<Vec<SchemaInfo>, CoreError>
             &[],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     Ok(rows
         .iter()
         .map(|r| {
             let name: &str = r.try_get(0).ok().flatten().unwrap_or("unknown");
-            SchemaInfo { is_default: name == "dbo", name: name.to_string() }
+            SchemaInfo {
+                is_default: name == "dbo",
+                name: name.to_string(),
+            }
         })
         .collect())
 }
@@ -175,17 +206,27 @@ pub async fn get_tables(
             &[&schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     Ok(rows
         .iter()
         .map(|r| {
             let name: &str = r.try_get(0).ok().flatten().unwrap_or("unknown");
             let type_desc: &str = r.try_get(1).ok().flatten().unwrap_or("USER_TABLE");
-            let table_type = if type_desc.contains("VIEW") { "view" } else { "table" };
+            let table_type = if type_desc.contains("VIEW") {
+                "view"
+            } else {
+                "table"
+            };
             TableInfo {
                 full_name: format!("{}.{}", schema, name),
                 name: name.to_string(),
@@ -218,10 +259,16 @@ pub async fn get_columns(
             &[&format!("{}.{}", schema, table_name), &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     let pk_columns: std::collections::HashSet<String> = pk_rows
         .iter()
@@ -250,10 +297,16 @@ pub async fn get_columns(
             &[&table_name, &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     let mut fk_map: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
@@ -286,10 +339,16 @@ pub async fn get_columns(
             &[&table_name, &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "SCHEMA_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "SCHEMA_QUERY".into(),
+        })?;
 
     Ok(col_rows
         .iter()
@@ -320,7 +379,11 @@ pub async fn get_columns(
         .collect())
 }
 
-pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+pub async fn get_ddl(
+    pool: &MssqlPool,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, CoreError> {
     let schema = schema.unwrap_or("dbo");
     let mut client = pool.lock().await;
 
@@ -349,7 +412,10 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
 
     if col_rows.is_empty() {
         return Err(CoreError {
-            message: format!("Table {}.{} not found. It may have been dropped.", schema, table_name),
+            message: format!(
+                "Table {}.{} not found. It may have been dropped.",
+                schema, table_name
+            ),
             code: "TABLE_NOT_FOUND".into(),
         });
     }
@@ -361,7 +427,8 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
         let max_length: Option<i32> = row.try_get(3).ok().flatten();
         let precision: Option<i32> = row.try_get(4).ok().flatten();
         let scale: Option<i32> = row.try_get(5).ok().flatten();
-        let default_value: Option<String> = row.try_get::<&str, _>(6).ok().flatten().map(String::from);
+        let default_value: Option<String> =
+            row.try_get::<&str, _>(6).ok().flatten().map(String::from);
         let is_identity: bool = row.try_get::<bool, _>(7).ok().flatten().unwrap_or(false);
 
         let full_type = resolve_mssql_type(data_type, max_length, precision, scale);
@@ -392,20 +459,37 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
             &[&format!("{}.{}", schema, table_name), &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
 
-    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut pk_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &pk_rows {
         let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
         let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
-        pk_by_constraint.entry(cname.to_string()).or_default().push(col.to_string());
+        pk_by_constraint
+            .entry(cname.to_string())
+            .or_default()
+            .push(col.to_string());
     }
     for (cname, cols) in &pk_by_constraint {
-        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("[{}]", c.replace(']', "]]"))).collect();
-        parts.push(format!("  CONSTRAINT [{}] PRIMARY KEY ({})", cname.replace(']', "]]"), quoted_cols.join(", ")));
+        let quoted_cols: Vec<String> = cols
+            .iter()
+            .map(|c| format!("[{}]", c.replace(']', "]]")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT [{}] PRIMARY KEY ({})",
+            cname.replace(']', "]]"),
+            quoted_cols.join(", ")
+        ));
     }
 
     let fk_rows = client
@@ -430,27 +514,59 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
             &[&table_name, &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
 
-    let mut fk_by_constraint: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> = std::collections::BTreeMap::new();
+    let mut fk_by_constraint: std::collections::BTreeMap<
+        String,
+        Vec<(String, String, String, String)>,
+    > = std::collections::BTreeMap::new();
     for row in &fk_rows {
         let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
         let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
         let ref_schema: &str = row.try_get(2).ok().flatten().unwrap_or("");
         let ref_table: &str = row.try_get(3).ok().flatten().unwrap_or("");
         let ref_col: &str = row.try_get(4).ok().flatten().unwrap_or("");
-        fk_by_constraint.entry(cname.to_string()).or_default().push((col.to_string(), ref_schema.to_string(), ref_table.to_string(), ref_col.to_string()));
+        fk_by_constraint
+            .entry(cname.to_string())
+            .or_default()
+            .push((
+                col.to_string(),
+                ref_schema.to_string(),
+                ref_table.to_string(),
+                ref_col.to_string(),
+            ));
     }
     for (cname, refs) in &fk_by_constraint {
-        let from_cols: Vec<String> = refs.iter().map(|(c, _, _, _)| format!("[{}]", c.replace(']', "]]"))).collect();
+        let from_cols: Vec<String> = refs
+            .iter()
+            .map(|(c, _, _, _)| format!("[{}]", c.replace(']', "]]")))
+            .collect();
         let first = refs.first().unwrap();
-        let ref_qualified = format!("[{}].[{}]", first.1.replace(']', "]]"), first.2.replace(']', "]]"));
-        let to_cols: Vec<String> = refs.iter().map(|(_, _, _, c)| format!("[{}]", c.replace(']', "]]"))).collect();
-        parts.push(format!("  CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES {} ({})",
-            cname.replace(']', "]]"), from_cols.join(", "), ref_qualified, to_cols.join(", ")));
+        let ref_qualified = format!(
+            "[{}].[{}]",
+            first.1.replace(']', "]]"),
+            first.2.replace(']', "]]")
+        );
+        let to_cols: Vec<String> = refs
+            .iter()
+            .map(|(_, _, _, c)| format!("[{}]", c.replace(']', "]]")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES {} ({})",
+            cname.replace(']', "]]"),
+            from_cols.join(", "),
+            ref_qualified,
+            to_cols.join(", ")
+        ));
     }
 
     let uq_rows = client
@@ -467,20 +583,37 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
             &[&table_name, &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
 
-    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut uq_by_constraint: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for row in &uq_rows {
         let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
         let col: &str = row.try_get(1).ok().flatten().unwrap_or("");
-        uq_by_constraint.entry(cname.to_string()).or_default().push(col.to_string());
+        uq_by_constraint
+            .entry(cname.to_string())
+            .or_default()
+            .push(col.to_string());
     }
     for (cname, cols) in &uq_by_constraint {
-        let quoted_cols: Vec<String> = cols.iter().map(|c| format!("[{}]", c.replace(']', "]]"))).collect();
-        parts.push(format!("  CONSTRAINT [{}] UNIQUE ({})", cname.replace(']', "]]"), quoted_cols.join(", ")));
+        let quoted_cols: Vec<String> = cols
+            .iter()
+            .map(|c| format!("[{}]", c.replace(']', "]]")))
+            .collect();
+        parts.push(format!(
+            "  CONSTRAINT [{}] UNIQUE ({})",
+            cname.replace(']', "]]"),
+            quoted_cols.join(", ")
+        ));
     }
 
     let ck_rows = client
@@ -494,34 +627,64 @@ pub async fn get_ddl(pool: &MssqlPool, table_name: &str, schema: Option<&str>) -
             &[&table_name, &schema],
         )
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "DDL_QUERY".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "DDL_QUERY".into(),
+        })?;
 
     for row in &ck_rows {
         let cname: &str = row.try_get(0).ok().flatten().unwrap_or("");
         let check_clause: &str = row.try_get(1).ok().flatten().unwrap_or("");
-        parts.push(format!("  CONSTRAINT [{}] CHECK ({})", cname.replace(']', "]]"), check_clause));
+        parts.push(format!(
+            "  CONSTRAINT [{}] CHECK ({})",
+            cname.replace(']', "]]"),
+            check_clause
+        ));
     }
 
-    let table_quoted = format!("[{}].[{}]", schema.replace(']', "]]"), table_name.replace(']', "]]"));
-    Ok(format!("CREATE TABLE {} (\n{}\n);", table_quoted, parts.join(",\n")))
+    let table_quoted = format!(
+        "[{}].[{}]",
+        schema.replace(']', "]]"),
+        table_name.replace(']', "]]")
+    );
+    Ok(format!(
+        "CREATE TABLE {} (\n{}\n);",
+        table_quoted,
+        parts.join(",\n")
+    ))
 }
 
-fn resolve_mssql_type(data_type: &str, max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> String {
+fn resolve_mssql_type(
+    data_type: &str,
+    max_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> String {
     let lower = data_type.to_lowercase();
     match lower.as_str() {
         "varchar" | "nvarchar" => {
             let len = max_length.unwrap_or(0);
-            if len == -1 { format!("{}(MAX)", lower) }
-            else if lower == "nvarchar" { format!("nvarchar({})", len / 2) }
-            else { format!("varchar({})", len) }
+            if len == -1 {
+                format!("{}(MAX)", lower)
+            } else if lower == "nvarchar" {
+                format!("nvarchar({})", len / 2)
+            } else {
+                format!("varchar({})", len)
+            }
         }
         "char" | "nchar" => {
             let len = max_length.unwrap_or(1);
-            if lower == "nchar" { format!("nchar({})", len / 2) }
-            else { format!("char({})", len) }
+            if lower == "nchar" {
+                format!("nchar({})", len / 2)
+            } else {
+                format!("char({})", len)
+            }
         }
         "decimal" | "numeric" => match (precision, scale) {
             (Some(p), Some(s)) => format!("{}({}, {})", lower, p, s),
@@ -529,12 +692,19 @@ fn resolve_mssql_type(data_type: &str, max_length: Option<i32>, precision: Optio
             _ => lower,
         },
         "float" | "real" => {
-            if let Some(p) = precision { format!("float({})", p) } else { lower }
+            if let Some(p) = precision {
+                format!("float({})", p)
+            } else {
+                lower
+            }
         }
         "varbinary" | "binary" => {
             let len = max_length.unwrap_or(0);
-            if len == -1 { format!("{}(MAX)", lower) }
-            else { format!("{}({})", lower, len) }
+            if len == -1 {
+                format!("{}(MAX)", lower)
+            } else {
+                format!("{}({})", lower, len)
+            }
         }
         _ => lower,
     }
@@ -590,11 +760,21 @@ fn mssql_value_to_json(row: &tiberius::Row, index: usize) -> serde_json::Value {
     try_get!(u8);
     try_get!(f64);
     try_get!(f32);
-    try_get!(chrono::NaiveDateTime, |v: chrono::NaiveDateTime| serde_json::json!(v.to_string()));
-    try_get!(chrono::NaiveDate, |v: chrono::NaiveDate| serde_json::json!(v.to_string()));
-    try_get!(chrono::NaiveTime, |v: chrono::NaiveTime| serde_json::json!(v.to_string()));
+    try_get!(
+        chrono::NaiveDateTime,
+        |v: chrono::NaiveDateTime| serde_json::json!(v.to_string())
+    );
+    try_get!(chrono::NaiveDate, |v: chrono::NaiveDate| serde_json::json!(
+        v.to_string()
+    ));
+    try_get!(chrono::NaiveTime, |v: chrono::NaiveTime| serde_json::json!(
+        v.to_string()
+    ));
     try_get!(&str, |v: &str| serde_json::Value::String(v.to_string()));
-    try_get!(&[u8], |v: &[u8]| serde_json::json!(format!("<binary: {} bytes>", v.len())));
+    try_get!(&[u8], |v: &[u8]| serde_json::json!(format!(
+        "<binary: {} bytes>",
+        v.len()
+    )));
 
     let type_name = format!("{:?}", row.columns()[index].column_type());
     serde_json::Value::String(format!("<{}>", type_name))
@@ -633,13 +813,23 @@ pub async fn query_table(
     let rows = client
         .query(&sql, &[])
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "QUERY_TABLE".into(),
+        })?
         .into_first_result()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "QUERY_TABLE".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "QUERY_TABLE".into(),
+        })?;
 
     let has_more = rows.len() as i64 > params.limit.min(1000);
-    let rows_to_use = if has_more { &rows[..rows.len() - 1] } else { &rows[..] };
+    let rows_to_use = if has_more {
+        &rows[..rows.len() - 1]
+    } else {
+        &rows[..]
+    };
 
     let result_rows: Vec<serde_json::Value> = rows_to_use
         .iter()
@@ -685,21 +875,30 @@ fn build_where_mssql(filters: &[FilterSpec], valid: &[&str]) -> String {
                     let lit = format_sql_literal(val);
                     match f.operator.as_str() {
                         "contains" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '%{}%'", col, s))
                         }
                         "startsWith" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '{}%'", col, s))
                         }
                         "endsWith" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '%{}'", col, s))
                         }
                         "equals" => Some(format!("{} = {}", col, lit)),
-                        "gt"  => Some(format!("{} > {}", col, lit)),
+                        "gt" => Some(format!("{} > {}", col, lit)),
                         "gte" => Some(format!("{} >= {}", col, lit)),
-                        "lt"  => Some(format!("{} < {}", col, lit)),
+                        "lt" => Some(format!("{} < {}", col, lit)),
                         "lte" => Some(format!("{} <= {}", col, lit)),
                         _ => None,
                     }
@@ -708,7 +907,11 @@ fn build_where_mssql(filters: &[FilterSpec], valid: &[&str]) -> String {
         })
         .collect();
 
-    if parts.is_empty() { String::new() } else { format!(" WHERE {}", parts.join(" AND ")) }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", parts.join(" AND "))
+    }
 }
 
 fn build_order_by_mssql(sort: &[SortSpec], valid: &[&str]) -> String {
@@ -721,5 +924,9 @@ fn build_order_by_mssql(sort: &[SortSpec], valid: &[&str]) -> String {
         })
         .collect();
 
-    if parts.is_empty() { String::new() } else { format!(" ORDER BY {}", parts.join(", ")) }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", parts.join(", "))
+    }
 }
