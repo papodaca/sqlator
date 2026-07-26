@@ -96,15 +96,80 @@ template $SqlatorWindow: Adw.ApplicationWindow {
             };
           }
 
-          content: ScrolledWindow {
-            hexpand: true;
-            vexpand: true;
+          content: Paned sidebar_paned {
+            orientation: vertical;
+            wide-handle: true;
+            position: 280;
+            shrink-start-child: false;
+            shrink-end-child: false;
 
-            child: ListView connection_list {
-              styles [
-                "navigation-sidebar",
-              ]
-            };
+            [start]
+            ScrolledWindow {
+              hexpand: true;
+              vexpand: true;
+
+              child: ListView connection_list {
+                styles [
+                  "navigation-sidebar",
+                ]
+              };
+            }
+
+            [end]
+            Box {
+              orientation: vertical;
+              hexpand: true;
+              vexpand: true;
+
+              Box {
+                orientation: horizontal;
+                margin-start: 8;
+                margin-end: 4;
+                margin-top: 6;
+                margin-bottom: 4;
+
+                Label {
+                  label: _("Schema");
+                  xalign: 0.0;
+                  hexpand: true;
+                  styles [
+                    "heading",
+                  ]
+                }
+
+                Button schema_refresh {
+                  icon-name: "view-refresh-symbolic";
+                  tooltip-text: _("Refresh schema");
+                  styles [
+                    "flat",
+                  ]
+                }
+              }
+
+              Label schema_banner {
+                label: _("Connect to browse schema");
+                xalign: 0.0;
+                wrap: true;
+                margin-start: 10;
+                margin-end: 10;
+                margin-bottom: 6;
+                styles [
+                  "dimmed",
+                  "caption",
+                ]
+              }
+
+              ScrolledWindow {
+                hexpand: true;
+                vexpand: true;
+
+                child: ListView schema_list {
+                  styles [
+                    "navigation-sidebar",
+                  ]
+                };
+              }
+            }
           };
         };
 

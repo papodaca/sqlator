@@ -1,6 +1,9 @@
 use crate::application::SqlatorApplication;
 use crate::connection::{status_map_from_service, ConnectionList, ConnectionStatus};
 use crate::query_tab::QueryTab;
+use crate::schema::{
+    replace_store_with_columns, replace_store_with_error, replace_store_with_tables, SchemaTree,
+};
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
@@ -25,9 +28,16 @@ mod imp {
         pub overview_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub connection_list: TemplateChild<gtk::ListView>,
+        #[template_child]
+        pub schema_list: TemplateChild<gtk::ListView>,
+        #[template_child]
+        pub schema_banner: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub schema_refresh: TemplateChild<gtk::Button>,
 
         pub settings: OnceCell<gio::Settings>,
         pub connections: RefCell<Option<ConnectionList>>,
+        pub schema_tree: RefCell<Option<SchemaTree>>,
         pub selected_connection_id: RefCell<Option<String>>,
         /// In-flight / error status overlays on top of `db.is_connected`.
         pub connection_status: RefCell<HashMap<String, ConnectionStatus>>,
@@ -137,6 +147,7 @@ impl SqlatorWindow {
 
         // Must run after build(): application() is None during constructed().
         window.setup_connection_list();
+        window.setup_schema_tree();
         window.add_query_tab(None);
 
         window
@@ -323,6 +334,19 @@ impl SqlatorWindow {
         self.refresh_connections();
     }
 
+    fn setup_schema_tree(&self) {
+        let tree = SchemaTree::attach(self, &self.imp().schema_list);
+        *self.imp().schema_tree.borrow_mut() = Some(tree);
+        self.imp().schema_refresh.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| {
+                window.reload_schema_browser();
+            }
+        ));
+        self.update_schema_browser();
+    }
+
     pub fn refresh_connections(&self) {
         let app = self
             .application()
@@ -388,7 +412,242 @@ impl SqlatorWindow {
     }
 
     pub fn set_selected_connection_id(&self, id: Option<String>) {
+        let changed = self.imp().selected_connection_id.borrow().as_deref() != id.as_deref();
         *self.imp().selected_connection_id.borrow_mut() = id;
+        if changed {
+            self.update_schema_browser();
+        }
+    }
+
+    fn set_schema_banner(&self, message: Option<&str>) {
+        let banner = &self.imp().schema_banner;
+        match message {
+            Some(msg) => {
+                banner.set_text(msg);
+                banner.set_visible(true);
+            }
+            None => {
+                banner.set_text("");
+                banner.set_visible(false);
+            }
+        }
+    }
+
+    fn clear_schema_browser(&self, banner: &str) {
+        if let Some(tree) = self.imp().schema_tree.borrow().as_ref() {
+            tree.clear();
+        }
+        self.set_schema_banner(Some(banner));
+        self.imp().schema_refresh.set_sensitive(false);
+    }
+
+    /// Sync schema pane to the selected connection's live pool state.
+    pub fn update_schema_browser(&self) {
+        let Some(id) = self.selected_connection_id() else {
+            self.clear_schema_browser("Connect to browse schema");
+            return;
+        };
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        if !service.db().is_connected(&id) {
+            self.clear_schema_browser("Connect to browse schema");
+            return;
+        }
+
+        if let Some(tree) = self.imp().schema_tree.borrow().as_ref() {
+            if tree.connection_id().as_deref() == Some(id.as_str()) {
+                self.set_schema_banner(None);
+                self.imp().schema_refresh.set_sensitive(true);
+                return;
+            }
+        }
+
+        self.reload_schema_browser();
+    }
+
+    /// Force-refresh schemas for the selected connected connection.
+    pub fn reload_schema_browser(&self) {
+        let Some(id) = self.selected_connection_id() else {
+            self.clear_schema_browser("Connect to browse schema");
+            return;
+        };
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        if !service.db().is_connected(&id) {
+            self.clear_schema_browser("Connect to browse schema");
+            return;
+        }
+
+        if let Some(tree) = self.imp().schema_tree.borrow().as_ref() {
+            tree.prepare_load(&id);
+        }
+        self.set_schema_banner(Some("Loading schemas…"));
+        self.imp().schema_refresh.set_sensitive(true);
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let db = service.db_handle();
+                let id_task = id.clone();
+                let result = crate::spawn_tokio!(async move { db.get_schemas(&id_task).await })
+                    .await
+                    .expect("join get_schemas");
+
+                let current = window.selected_connection_id();
+                if current.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+                if let Some(tree) = window.imp().schema_tree.borrow().as_ref() {
+                    if tree.connection_id().as_deref() != Some(id.as_str()) {
+                        return;
+                    }
+                }
+
+                match result {
+                    Ok(schemas) => {
+                        if let Some(tree) = window.imp().schema_tree.borrow().as_ref() {
+                            tree.set_schemas(&id, schemas);
+                        }
+                        window.set_schema_banner(None);
+                    }
+                    Err(e) => {
+                        tracing::warn!("get_schemas({id}) failed: {e}");
+                        if let Some(tree) = window.imp().schema_tree.borrow().as_ref() {
+                            tree.clear();
+                        }
+                        window.set_schema_banner(Some(&format!("Failed to load schemas: {e}")));
+                    }
+                }
+            }
+        ));
+    }
+
+    /// Lazy expand: populate `store` with tables for `schema_name`.
+    pub fn fill_schema_tables(&self, schema_name: &str, store: gio::ListStore) {
+        let Some(connection_id) = self
+            .imp()
+            .schema_tree
+            .borrow()
+            .as_ref()
+            .and_then(|t| t.connection_id())
+        else {
+            replace_store_with_error(&store, "No connection");
+            return;
+        };
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let schema_name = schema_name.to_string();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let db = service.db_handle();
+                let conn = connection_id.clone();
+                let schema = schema_name.clone();
+                let result = crate::spawn_tokio!(async move {
+                    db.get_tables(&conn, Some(schema.as_str())).await
+                })
+                .await
+                .expect("join get_tables");
+
+                let still_current = window
+                    .imp()
+                    .schema_tree
+                    .borrow()
+                    .as_ref()
+                    .and_then(|t| t.connection_id())
+                    .as_deref()
+                    == Some(connection_id.as_str());
+                if !still_current {
+                    return;
+                }
+
+                match result {
+                    Ok(tables) => replace_store_with_tables(&store, tables),
+                    Err(e) => {
+                        tracing::warn!("get_tables({connection_id}, {schema_name}) failed: {e}");
+                        replace_store_with_error(&store, e.to_string());
+                    }
+                }
+            }
+        ));
+    }
+
+    /// Lazy expand: populate `store` with columns for `table_name`.
+    pub fn fill_schema_columns(
+        &self,
+        schema: Option<&str>,
+        table_name: &str,
+        store: gio::ListStore,
+    ) {
+        let Some(connection_id) = self
+            .imp()
+            .schema_tree
+            .borrow()
+            .as_ref()
+            .and_then(|t| t.connection_id())
+        else {
+            replace_store_with_error(&store, "No connection");
+            return;
+        };
+
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let schema = schema.map(str::to_string);
+        let table_name = table_name.to_string();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let db = service.db_handle();
+                let conn = connection_id.clone();
+                let table = table_name.clone();
+                let schema_task = schema.clone();
+                let result = crate::spawn_tokio!(async move {
+                    db.get_columns(&conn, &table, schema_task.as_deref()).await
+                })
+                .await
+                .expect("join get_columns");
+
+                let still_current = window
+                    .imp()
+                    .schema_tree
+                    .borrow()
+                    .as_ref()
+                    .and_then(|t| t.connection_id())
+                    .as_deref()
+                    == Some(connection_id.as_str());
+                if !still_current {
+                    return;
+                }
+
+                match result {
+                    Ok(columns) => replace_store_with_columns(&store, columns),
+                    Err(e) => {
+                        tracing::warn!("get_columns({connection_id}, {table_name}) failed: {e}");
+                        replace_store_with_error(&store, e.to_string());
+                    }
+                }
+            }
+        ));
     }
 
     pub fn connect_sidebar_connection(&self, connection_id: &str) {
@@ -429,6 +688,7 @@ impl SqlatorWindow {
                         if let Some(list) = window.imp().connections.borrow().as_ref() {
                             list.set_status_for(&id, ConnectionStatus::Connected);
                         }
+                        window.update_schema_browser();
                     }
                     Err(e) => {
                         tracing::warn!("connect_database({id}) failed: {e}");
@@ -440,6 +700,7 @@ impl SqlatorWindow {
                         if let Some(list) = window.imp().connections.borrow().as_ref() {
                             list.set_status_for(&id, ConnectionStatus::Error);
                         }
+                        window.update_schema_browser();
                         let dialog =
                             adw::AlertDialog::new(Some("Connection failed"), Some(&e.to_string()));
                         dialog.add_response("ok", "OK");
@@ -475,6 +736,7 @@ impl SqlatorWindow {
                         if let Some(list) = window.imp().connections.borrow().as_ref() {
                             list.set_status_for(&id, ConnectionStatus::Disconnected);
                         }
+                        window.update_schema_browser();
                     }
                     Err(e) => {
                         tracing::warn!("disconnect_database({id}) failed: {e}");
