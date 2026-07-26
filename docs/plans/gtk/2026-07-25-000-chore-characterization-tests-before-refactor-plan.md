@@ -113,6 +113,15 @@ Gated behind a feature or env var so a bare `cargo test` still passes.
 | `execute_batch` transactionality | `core/src/db/mod.rs:333-361` | DELETE → UPDATE → INSERT ordering; a mid-batch failure rolls back; the four unsupported engines return `UNSUPPORTED` rather than silently doing nothing |
 | SSH tunnel concurrency | `core/src/ssh/tunnel.rs:74`, `:133` (`forward_stream`) | **The deadlock regression test.** Two simultaneous streams through one tunnel must both complete. This is the one that catches someone reintroducing `Arc<Mutex<Channel>>`. Requires an SSH server in compose — `linuxserver/openssh-server` is sufficient. |
 
+**Done (2026-07-26):** `core/tests/group_c_integration.rs`. Gate: Cargo feature
+`integration` on `sqlator-core` **or** `SQLATOR_INTEGRATION=1`. Compose service
+`openssh` (linuxserver/openssh-server) with `docker/openssh/cont-init.d` enabling
+`AllowTcpForwarding` (image default is `no`). Unsupported-engine arms in
+production are **three** (Mssql / Oracle / ClickHouse), not four — soft-skip if
+those compose services are down; ClickHouse exercised when up. Group B
+`#[ignore]` live-SSH ephemeral teardown left as stub (AppState wiring is
+Tauri/web-specific; tunnel concurrency covers the deadlock risk in core).
+
 ---
 
 ## The divergence ledger
@@ -236,14 +245,19 @@ Notes pinned by Group B that are **not** divergences (same in both copies / core
       guard, schema cache key/TTL, tunnel registry cleanup, and connect timeout all covered
       (see ledger rows 10–11 for Clone / atomic-write notes; live SSH tunnel teardown is
       `#[ignore]` pending Group C; connect timeout gated on `SQLATOR_SLOW_TESTS=1`)
-- [ ] Group C: MySQL VARBINARY, `has_more` clamping, `QueryEvent` sequencing, `execute_batch`
+- [x] Group C: MySQL VARBINARY, `has_more` clamping, `QueryEvent` sequencing, `execute_batch`
       transactionality, and tunnel concurrency all covered, behind a feature/env gate
+      (`core/tests/group_c_integration.rs`; gate: `--features integration` or
+      `SQLATOR_INTEGRATION=1`; openssh service in `docker-compose.yml`)
 - [ ] The divergence ledger in this document is complete — every difference found while writing
       tests is appended, with a recommended winner
 - [ ] `clippy::await_holding_lock` enabled in CI and passing
-- [ ] A bare `cargo test --workspace` passes with no external services running
-- [ ] `cargo test --workspace --features integration` passes with `docker-compose up`
-- [ ] No production code was changed by this plan (verified by diff review)
+- [x] A bare `cargo test --workspace` passes with no external services running
+      (Group C tests early-return unless feature/env gate is set)
+- [x] `cargo test --workspace --features integration` passes with `docker-compose up`
+      (also: `cargo test -p sqlator-core --features integration`)
+- [x] No production code was changed by this plan (verified by diff review)
+      (Group C: tests + Cargo feature + compose SSH + cont-init only)
 
 ---
 

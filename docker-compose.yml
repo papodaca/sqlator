@@ -66,6 +66,24 @@ services:
     volumes:
       - clickhousedata:/var/lib/clickhouse
 
+  # Group C: SSH tunnel concurrency characterization (password auth).
+  # From the host: ssh sqlator@localhost -p 2222 (password: sqlator)
+  # Tunnel target for postgres on the compose network: postgres:5432
+  # custom-cont-init enables AllowTcpForwarding (image default is no).
+  openssh:
+    image: lscr.io/linuxserver/openssh-server:latest
+    ports:
+      - 2222:2222
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      PASSWORD_ACCESS: "true"
+      USER_PASSWORD: sqlator
+      USER_NAME: sqlator
+    volumes:
+      - ./docker/openssh/cont-init.d:/custom-cont-init.d:ro
+
 volumes:
   pgdata:
   mysqldata:
@@ -81,6 +99,7 @@ volumes:
   # - MSSQL: mssql://sa:Sqlator123!@localhost:1444/master
   # - Oracle (experimental): oracle://system:Sqlator123!@localhost:1522/FREEPDB1
   # - ClickHouse: clickhouse://sqlator:sqlator@localhost:8123/sqlator
+  # - OpenSSH: ssh://sqlator:sqlator@localhost:2222 (password auth; TCP forward to postgres:5432)
 
 # select * from Persons;
 

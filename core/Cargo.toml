@@ -38,3 +38,10 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = []
+# Group C characterization tests against docker-compose services.
+# Run: cargo test -p sqlator-core --features integration
+# Or:  SQLATOR_INTEGRATION=1 cargo test -p sqlator-core
+integration = []

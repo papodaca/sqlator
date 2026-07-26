@@ -1,0 +1,8 @@
+#!/bin/bash
+# Group C tunnel tests need direct-tcpip forwarding (default image sets AllowTcpForwarding no).
+set -euo pipefail
+if [ -f /etc/ssh/sshd_config ]; then
+  sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config
+  echo "[sqlator] AllowTcpForwarding enabled"
+  grep -n '^AllowTcpForwarding' /etc/ssh/sshd_config || true
+fi
