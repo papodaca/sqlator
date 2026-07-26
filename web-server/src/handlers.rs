@@ -1090,64 +1090,183 @@ fn build_auth_config_for_profile(
 
 // ── Schema metadata ───────────────────────────────────────────────────────────
 
-fn extract_single_table(sql: &str) -> Option<(String, Option<String>)> {
+/// Outcome of trying to identify a single editable source table.
+enum TableExtract {
+    /// One table reference found.
+    Found(String, Option<String>),
+    /// Parser succeeded but the query is a join, CTE, subquery, etc.
+    NotSingleTable,
+    /// Parser failed and the regex fallback could not determine a table.
+    Undetermined,
+}
+
+fn extract_single_table(sql: &str) -> TableExtract {
     use sqlparser::ast::{SetExpr, Statement, TableFactor};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::parser::Parser;
 
     let stmts = match Parser::parse_sql(&GenericDialect {}, sql) {
         Ok(s) => s,
-        Err(_) => return extract_table_regex(sql),
+        Err(_) => {
+            return match extract_table_regex(sql) {
+                Some((t, s)) => TableExtract::Found(t, s),
+                None => TableExtract::Undetermined,
+            };
+        }
     };
 
-    let stmt = stmts.into_iter().next()?;
+    let Some(stmt) = stmts.into_iter().next() else {
+        return TableExtract::NotSingleTable;
+    };
     let query = match stmt {
         Statement::Query(q) => q,
-        _ => return None,
+        _ => return TableExtract::NotSingleTable,
     };
 
-    if query.with.is_some() { return None; }
+    if query.with.is_some() {
+        return TableExtract::NotSingleTable;
+    }
 
     let body = match *query.body {
         SetExpr::Select(sel) => sel,
-        _ => return None,
+        _ => return TableExtract::NotSingleTable,
     };
 
-    if body.from.len() != 1 { return None; }
+    if body.from.len() != 1 {
+        return TableExtract::NotSingleTable;
+    }
     let twj = &body.from[0];
-    if !twj.joins.is_empty() { return None; }
+    if !twj.joins.is_empty() {
+        return TableExtract::NotSingleTable;
+    }
 
     match &twj.relation {
         TableFactor::Table { name, .. } => {
             let idents: Vec<String> = name.0.iter().map(|i| i.value.clone()).collect();
             match idents.len() {
-                1 => Some((idents[0].clone(), None)),
-                2 => Some((idents[1].clone(), Some(idents[0].clone()))),
-                _ => None,
+                1 => TableExtract::Found(idents[0].clone(), None),
+                2 => TableExtract::Found(idents[1].clone(), Some(idents[0].clone())),
+                _ => TableExtract::NotSingleTable,
             }
         }
-        _ => None,
+        _ => TableExtract::NotSingleTable,
     }
 }
 
+/// Regex/heuristic fallback when sqlparser cannot parse the statement.
+///
+/// Delimits the FROM region first, then rejects commas/`JOIN` only inside that
+/// region — so commas in the SELECT list are fine, but `FROM t1 , t2` is not.
+/// Indexes against the original string (not an uppercased copy) so non-ASCII
+/// before `FROM` cannot shift offsets.
 fn extract_table_regex(sql: &str) -> Option<(String, Option<String>)> {
-    let upper = sql.to_uppercase();
-    let from_idx = upper.find(" FROM ")?;
+    let from_idx = sql
+        .as_bytes()
+        .windows(6)
+        .position(|w| w.eq_ignore_ascii_case(b" from "))?;
     let after_from = sql[from_idx + 6..].trim_start();
-    let table_token: String = after_from
+    let from_region = delimit_from_region(after_from);
+
+    // Multi-table FROM: comma or JOIN inside the region only
+    if from_region.contains(',') {
+        return None;
+    }
+    if from_region
+        .as_bytes()
+        .windows(6)
+        .any(|w| w.eq_ignore_ascii_case(b" join "))
+    {
+        return None;
+    }
+
+    let table_token: String = from_region
         .chars()
-        .take_while(|c| !c.is_whitespace() && *c != ';')
+        .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '\\')
         .collect();
-    if table_token.is_empty() || table_token.contains(',') { return None; }
-    if upper.contains(" JOIN ") { return None; }
-    let parts: Vec<&str> = table_token.splitn(2, '.').collect();
-    match parts.len() {
-        1 => Some((parts[0].trim_matches(|c| c == '"' || c == '`').to_string(), None)),
-        2 => Some((
-            parts[1].trim_matches(|c| c == '"' || c == '`').to_string(),
-            Some(parts[0].trim_matches(|c| c == '"' || c == '`').to_string()),
+    if table_token.is_empty() {
+        return None;
+    }
+
+    split_schema_table(&table_token)
+}
+
+/// Slice of `after_from` up to the next clause keyword or `;`.
+fn delimit_from_region(after_from: &str) -> &str {
+    const KEYWORDS: &[&str] = &[
+        "where", "group", "having", "order", "limit", "offset", "fetch", "window", "union",
+        "intersect", "except", "for", "into",
+    ];
+
+    let bytes = after_from.as_bytes();
+    let mut end = after_from.len();
+    if let Some(semi) = after_from.find(';') {
+        end = semi;
+    }
+
+    let mut i = 0;
+    while i < end {
+        while i < end && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= end {
+            break;
+        }
+        let token_start = i;
+        while i < end && !bytes[i].is_ascii_whitespace() && bytes[i] != b';' {
+            i += 1;
+        }
+        let token = &after_from[token_start..i];
+        if KEYWORDS.iter().any(|kw| token.eq_ignore_ascii_case(kw)) {
+            end = token_start;
+            break;
+        }
+    }
+
+    after_from[..end].trim()
+}
+
+fn unquote_ident(s: &str) -> String {
+    s.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
+        .to_string()
+}
+
+/// Split `schema.table` on the first dot not inside quotes/brackets.
+fn split_schema_table(token: &str) -> Option<(String, Option<String>)> {
+    let mut in_quotes: Option<char> = None;
+    let mut dot_pos = None;
+    for (i, c) in token.char_indices() {
+        match (in_quotes, c) {
+            (None, '"' | '`') => in_quotes = Some(c),
+            (None, '[') => in_quotes = Some(']'),
+            (Some(q), c) if c == q => in_quotes = None,
+            (None, '.') => {
+                dot_pos = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    match dot_pos {
+        Some(i) => Some((
+            unquote_ident(&token[i + 1..]),
+            Some(unquote_ident(&token[..i])),
         )),
-        _ => None,
+        None => Some((unquote_ident(token), None)),
+    }
+}
+
+fn non_editable_meta(reason: &str) -> TableMeta {
+    TableMeta {
+        table_name: String::new(),
+        schema: None,
+        columns: vec![],
+        primary_key: sqlator_core::PrimaryKeyMeta {
+            columns: vec![],
+            exists: false,
+        },
+        is_editable: false,
+        editability_reason: Some(reason.into()),
     }
 }
 
@@ -1162,18 +1281,19 @@ async fn fetch_schema_metadata(state: &Arc<AppState>, args: &Value) -> HandlerRe
     if !is_select { return Ok(json!(null)); }
 
     let (table_name, schema_name) = match extract_single_table(&sql) {
-        Some(t) => t,
-        None => {
-            return Ok(json!(TableMeta {
-                table_name: String::new(),
-                schema: None,
-                columns: vec![],
-                primary_key: sqlator_core::PrimaryKeyMeta { columns: vec![], exists: false },
-                is_editable: false,
-                editability_reason: Some("Cannot edit: query joins multiple tables or uses a subquery".into()),
-            }));
+        TableExtract::Found(t, s) => (t, s),
+        TableExtract::NotSingleTable => {
+            return Ok(json!(non_editable_meta(
+                "Cannot edit: query joins multiple tables or uses a subquery",
+            )));
+        }
+        TableExtract::Undetermined => {
+            return Ok(json!(non_editable_meta(
+                "Cannot determine a single source table for this query",
+            )));
         }
     };
+
 
     let cache_key = format!("{connection_id}:{schema_name:?}:{table_name}");
     if let Some(cached) = state.schema_cache.get(&cache_key) {
@@ -1391,4 +1511,120 @@ fn build_jump_hosts_for_profile(
             Ok((config, auth))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod table_extract_tests {
+    use super::*;
+
+    #[test]
+    fn regex_simple_table() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM t"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_comma_in_select_list() {
+        assert_eq!(
+            extract_table_regex("SELECT a, b FROM t"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_comma_in_function_call() {
+        assert_eq!(
+            extract_table_regex("SELECT f(a, b) FROM t"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_comma_in_in_list() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM t WHERE x IN (1,2)"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_implicit_comma_join_rejected() {
+        assert_eq!(extract_table_regex("SELECT a, b FROM t1, t2"), None);
+        assert_eq!(extract_table_regex("SELECT a, b FROM t1 , t2"), None);
+    }
+
+    #[test]
+    fn regex_join_rejected() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM t1 JOIN t2 ON t1.id = t2.id"),
+            None
+        );
+    }
+
+    #[test]
+    fn regex_mixed_quoting() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM `\"t\"`"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_schema_qualified() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM s.t"),
+            Some(("t".into(), Some("s".into())))
+        );
+    }
+
+    #[test]
+    fn regex_mssql_brackets() {
+        assert_eq!(
+            extract_table_regex("SELECT a FROM [dbo].[t]"),
+            Some(("t".into(), Some("dbo".into())))
+        );
+    }
+
+    #[test]
+    fn regex_non_ascii_before_from_does_not_shift_offset() {
+        // Dotless-i uppercases to a different byte length; must still find `t`.
+        assert_eq!(
+            extract_table_regex("SELECT 'ııı' FROM t"),
+            Some(("t".into(), None))
+        );
+    }
+
+    #[test]
+    fn regex_quoted_ident_containing_dot() {
+        assert_eq!(
+            extract_table_regex(r#"SELECT a FROM "my.schema".t"#),
+            Some(("t".into(), Some("my.schema".into())))
+        );
+    }
+
+    #[test]
+    fn regex_mysql_g_terminator() {
+        // Confirmed sqlparser failure; fallback must still extract the table.
+        assert_eq!(
+            extract_table_regex("SELECT a FROM t\\G"),
+            Some(("t".into(), None))
+        );
+        match extract_single_table("SELECT a FROM t\\G") {
+            TableExtract::Found(t, s) => {
+                assert_eq!(t, "t");
+                assert_eq!(s, None);
+            }
+            other => panic!("expected Found, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn undetermined_reason_for_fallback_failure() {
+        match extract_single_table("SELECT a FROM t1 , t2\\G") {
+            TableExtract::Undetermined | TableExtract::NotSingleTable => {}
+            TableExtract::Found(t, _) => panic!("expected non-editable, got {t}"),
+        }
+    }
 }

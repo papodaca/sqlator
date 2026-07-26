@@ -197,20 +197,26 @@ fallback, which is the opposite of the goal. Keep `GenericDialect`.
 
 ## Acceptance Criteria
 
-- [ ] `extract_table_regex` is behaviorally identical in `commands.rs` and `handlers.rs`
-- [ ] Every row of the measured-behavior table produces the "Correct" column in both frontends
-- [ ] `SELECT a, b FROM t1 , t2` returns `None` (implicit-join hole closed in web)
-- [ ] `SELECT a, b FROM t` returns `Some(t)` (comma-in-SELECT-list unblocked in Tauri)
-- [ ] `` SELECT a FROM `"t"` `` returns `Some(t)` with no residual quote characters
-- [ ] `SELECT a FROM [dbo].[t]` returns `Some(t, dbo)` (MSSQL bracket quoting)
-- [ ] `"SELECT 'ııı' FROM t"` returns `Some(t)`, not `Some("OM")`
-- [ ] No input in the test corpus panics, including non-ASCII before `FROM`
-- [ ] Comma and `JOIN` detection consider only the FROM region, verified by a test with a comma
+- [x] `extract_table_regex` is behaviorally identical in `commands.rs` and `handlers.rs`
+- [x] Every row of the measured-behavior table produces the "Correct" column in both frontends
+- [x] `SELECT a, b FROM t1 , t2` returns `None` (implicit-join hole closed in web)
+- [x] `SELECT a, b FROM t` returns `Some(t)` (comma-in-SELECT-list unblocked in Tauri)
+- [x] `` SELECT a FROM `"t"` `` returns `Some(t)` with no residual quote characters
+- [x] `SELECT a FROM [dbo].[t]` returns `Some(t, dbo)` (MSSQL bracket quoting)
+- [x] `"SELECT 'ııı' FROM t"` returns `Some(t)`, not `Some("OM")`
+- [x] No input in the test corpus panics, including non-ASCII before `FROM`
+- [x] Comma and `JOIN` detection consider only the FROM region, verified by a test with a comma
       in the SELECT list, in a function call, and in an `IN (…)` list
-- [ ] The fallback-path read-only reason no longer claims the query "joins multiple tables"
-- [ ] Tests live next to both copies and move with the code in the service extraction
-- [ ] Manual check: a MySQL query using `\G` (the one confirmed parse failure) yields a correctly
+- [x] The fallback-path read-only reason no longer claims the query "joins multiple tables"
+- [x] Tests live next to both copies and move with the code in the service extraction
+- [x] Manual check: a MySQL query using `\G` (the one confirmed parse failure) yields a correctly
       editable grid
+
+### Implementation notes (vs plan)
+
+- Optional quoted-dot split (`"my.schema".t`) **was** implemented via `split_schema_table`.
+- Table tokens also stop at `\` so `SELECT a FROM t\G` extracts `t` (needed for the `\G` case;
+  neither original copy did this — they would have kept `t\G` as the token).
 
 ---
 
