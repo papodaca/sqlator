@@ -149,7 +149,8 @@ pub fn present_new_connection_chooser(window: &SqlatorWindow, app: &SqlatorAppli
 pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let service = app.service();
     let dialog = adw::Dialog::new();
-    dialog.set_content_width(560);
+    // Track natural size so step changes (esp. container list) resize the dialog.
+    dialog.set_follows_content_size(true);
     dialog.set_title("New Docker Container Connection");
 
     let toast_overlay = adw::ToastOverlay::new();
@@ -218,8 +219,8 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let containers_scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .min_content_height(120)
-        .max_content_height(180)
+        // Grow with the list; only scroll once the dialog would get too tall.
+        .max_content_height(360)
         .propagate_natural_height(true)
         .child(&containers_list)
         .build();
