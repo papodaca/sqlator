@@ -1,10 +1,14 @@
 //! Connection helpers: URL ↔ [`SavedConnection`], naming, and type inference.
 
 use crate::error::ServiceError;
+use crate::service::{run_blocking, AppService};
 use serde::{Deserialize, Serialize};
 use sqlator_core::db::DatabaseType;
-use sqlator_core::models::{ConnectionConfig, ConnectionType, SavedConnection};
+use sqlator_core::models::{
+    ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, SavedConnection,
+};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Default TCP port for a stored `db_type` label (`"postgres"`, `"mariadb"`, …).
 pub fn default_port_for_db_type(db_type: &str) -> u16 {
@@ -299,5 +303,213 @@ mod tests {
         assert_eq!(saved.database, "app");
         assert_eq!(saved.username, "alice");
         assert_eq!(saved.connection_type, ConnectionType::Direct);
+    }
+}
+
+// ── AppService connection / group / config entry points ───────────────────────
+
+/// Frontend payload for creating a group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveGroupPayload {
+    pub name: String,
+    pub color: Option<String>,
+    pub parent_group_id: Option<String>,
+}
+
+impl AppService {
+    pub async fn list_connections(&self) -> Result<Vec<ConnectionInfo>, ServiceError> {
+        let source = Arc::clone(&self.connection_source);
+        run_blocking(move || {
+            let connections = source.list_connections()?;
+            Ok::<_, ServiceError>(connections.iter().map(ConnectionInfo::from).collect())
+        })
+        .await
+    }
+
+    pub async fn save_connection(
+        &self,
+        config_in: ConnectionConfig,
+    ) -> Result<ConnectionInfo, ServiceError> {
+        self.require_multi_db()?;
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            let conn = build_saved_connection(uuid::Uuid::new_v4().to_string(), config_in)?;
+            config.save_connection(conn.clone())?;
+            Ok::<_, ServiceError>(ConnectionInfo::from(&conn))
+        })
+        .await
+    }
+
+    pub async fn update_connection(
+        &self,
+        id: String,
+        config_in: ConnectionConfig,
+    ) -> Result<ConnectionInfo, ServiceError> {
+        self.require_multi_db()?;
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            let conn = build_saved_connection(id, config_in)?;
+            config.update_connection(conn.clone())?;
+            Ok::<_, ServiceError>(ConnectionInfo::from(&conn))
+        })
+        .await
+    }
+
+    pub async fn delete_connection(&self, id: String) -> Result<(), ServiceError> {
+        self.require_multi_db()?;
+        self.db.disconnect(&id).await;
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.delete_connection(&id)?;
+            Ok::<(), ServiceError>(())
+        })
+        .await
+    }
+
+    pub async fn clone_connection(&self, id: String) -> Result<ConnectionInfo, ServiceError> {
+        self.require_multi_db()?;
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            let connections = config.get_connections()?;
+            let original = connections.iter().find(|c| c.id == id).ok_or_else(|| {
+                ServiceError::app(
+                    "CONNECTION_NOT_FOUND",
+                    format!("Connection '{id}' not found"),
+                )
+            })?;
+            let mut cloned = original.clone();
+            cloned.id = uuid::Uuid::new_v4().to_string();
+            cloned.name = format!("{} (Copy)", original.name);
+            config.save_connection(cloned.clone())?;
+            Ok::<_, ServiceError>(ConnectionInfo::from(&cloned))
+        })
+        .await
+    }
+
+    pub async fn get_query(&self, connection_id: String) -> Result<Option<String>, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || config.get_query(&connection_id).map_err(ServiceError::from)).await
+    }
+
+    pub async fn save_query(
+        &self,
+        connection_id: String,
+        query: String,
+    ) -> Result<(), ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.save_query(&connection_id, &query)?;
+            Ok::<(), ServiceError>(())
+        })
+        .await
+    }
+
+    pub async fn get_tab_state(&self) -> Result<Option<serde_json::Value>, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || config.get_tab_state().map_err(ServiceError::from)).await
+    }
+
+    pub async fn save_tab_state(&self, tab_state: serde_json::Value) -> Result<(), ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.save_tab_state(tab_state)?;
+            Ok::<(), ServiceError>(())
+        })
+        .await
+    }
+
+    pub async fn get_theme(&self) -> Result<String, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || Ok(config.get_theme()?)).await
+    }
+
+    pub async fn save_theme(&self, theme: String) -> Result<(), ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.save_theme(&theme)?;
+            Ok::<(), ServiceError>(())
+        })
+        .await
+    }
+
+    pub async fn get_groups(&self) -> Result<Vec<ConnectionGroup>, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || Ok(config.get_groups()?)).await
+    }
+
+    pub async fn save_group(
+        &self,
+        payload: SaveGroupPayload,
+    ) -> Result<ConnectionGroup, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            let groups = config.get_groups()?;
+            let order = groups.len() as u32;
+            let group = ConnectionGroup {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: payload.name,
+                color: payload.color,
+                parent_group_id: payload.parent_group_id,
+                order,
+                collapsed: false,
+            };
+            config.save_group(group.clone())?;
+            Ok::<_, ServiceError>(group)
+        })
+        .await
+    }
+
+    pub async fn update_group(
+        &self,
+        group: ConnectionGroup,
+    ) -> Result<ConnectionGroup, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.update_group(group.clone())?;
+            Ok::<_, ServiceError>(group)
+        })
+        .await
+    }
+
+    pub async fn delete_group(&self, id: String) -> Result<(), ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.delete_group(&id)?;
+            Ok::<(), ServiceError>(())
+        })
+        .await
+    }
+
+    pub async fn move_connection_to_group(
+        &self,
+        connection_id: String,
+        group_id: Option<String>,
+    ) -> Result<ConnectionInfo, ServiceError> {
+        let config = Arc::clone(&self.config);
+        run_blocking(move || {
+            config.move_connection_to_group(&connection_id, group_id.as_deref())?;
+            let connections = config.get_connections()?;
+            let conn = connections
+                .iter()
+                .find(|c| c.id == connection_id)
+                .ok_or_else(|| {
+                    ServiceError::app(
+                        "CONNECTION_NOT_FOUND",
+                        format!("Connection '{connection_id}' not found"),
+                    )
+                })?;
+            Ok::<_, ServiceError>(ConnectionInfo::from(conn))
+        })
+        .await
+    }
+
+    /// Sync lookup used by connect orchestration / tests (already under config lock).
+    pub fn find_saved_connection(&self, id: &str) -> Result<SavedConnection, ServiceError> {
+        self.connection_source.get_connection(id)?.ok_or_else(|| {
+            ServiceError::app(
+                "CONNECTION_NOT_FOUND",
+                format!("Connection '{id}' not found"),
+            )
+        })
     }
 }

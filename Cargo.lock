@@ -6149,6 +6149,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "sqlator-core",
+ "sqlator-service",
  "tokio",
  "tui-textarea",
  "unicode-width 0.2.0",

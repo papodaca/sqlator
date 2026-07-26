@@ -1,9 +1,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
-use sqlator_core::config::ConfigManager;
-use sqlator_core::db::DbManager;
-use sqlator_core::error::CoreError;
-use sqlator_core::models::{QueryEvent, SavedConnection, SchemaColumnInfo, SchemaInfo, TableInfo};
+use sqlator_core::models::{ConnectionInfo, QueryEvent, SchemaColumnInfo, SchemaInfo, TableInfo};
+use sqlator_service::{AppService, ServiceError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +28,7 @@ pub enum FocusPane {
 #[derive(Debug, Clone)]
 pub struct VisibleItem {
     pub label: String,
+    #[allow(dead_code)] // reserved for indent-aware rendering
     pub depth: usize,
     pub kind: ItemKind,
     pub schema_name: Option<String>,
@@ -56,17 +55,16 @@ struct ColumnLoadResult {
 
 pub struct App {
     rt: tokio::runtime::Handle,
-    db: Arc<DbManager>,
-    config: ConfigManager,
+    service: Arc<AppService>,
 
     pub mode: AppMode,
     pub should_quit: bool,
 
-    pub connections: Vec<SavedConnection>,
+    pub connections: Vec<ConnectionInfo>,
     pub conn_list_state: ListState,
-    pub active_connection: Option<SavedConnection>,
+    pub active_connection: Option<ConnectionInfo>,
 
-    connect_rx: Option<oneshot::Receiver<Result<(), CoreError>>>,
+    connect_rx: Option<oneshot::Receiver<Result<(), ServiceError>>>,
     pub connect_error: Option<String>,
     connect_spinner: u8,
 
@@ -96,9 +94,8 @@ pub struct App {
 
 impl App {
     pub fn new(rt: tokio::runtime::Handle) -> Self {
-        let config = ConfigManager::new("sqlator").expect("Failed to init config manager");
-        let db = Arc::new(DbManager::new());
-        let connections = config.get_connections().unwrap_or_default();
+        let service = Arc::new(AppService::new().expect("Failed to init AppService"));
+        let connections = Self::load_connections(&service);
 
         let mut conn_list_state = ListState::default();
         if !connections.is_empty() {
@@ -109,8 +106,7 @@ impl App {
 
         Self {
             rt,
-            db,
-            config,
+            service,
             mode: AppMode::ConnectionList,
             should_quit: false,
             connections,
@@ -140,6 +136,16 @@ impl App {
         }
     }
 
+    fn load_connections(service: &AppService) -> Vec<ConnectionInfo> {
+        service
+            .connection_source()
+            .list_connections()
+            .unwrap_or_default()
+            .iter()
+            .map(ConnectionInfo::from)
+            .collect()
+    }
+
     pub fn run(
         &mut self,
         terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
@@ -160,10 +166,10 @@ impl App {
         }
 
         if let Some(ref conn) = self.active_connection {
-            let db = self.db.clone();
+            let service = self.service.clone();
             let id = conn.id.clone();
             self.rt.spawn(async move {
-                db.disconnect(&id).await;
+                let _ = service.disconnect_database(&id).await;
             });
         }
 
@@ -194,7 +200,7 @@ impl App {
                     self.start_schema_load();
                 }
                 Ok(Err(e)) => {
-                    self.connect_error = Some(e.message.clone());
+                    self.connect_error = Some(e.message());
                     self.mode = AppMode::ConnectionList;
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
@@ -288,7 +294,10 @@ impl App {
                     self.result_rows.push(row);
                 }
             }
-            QueryEvent::Done { row_count, duration_ms } => {
+            QueryEvent::Done {
+                row_count,
+                duration_ms,
+            } => {
                 self.result_status = format!("{} rows in {}ms", row_count, duration_ms);
                 self.query_running = false;
                 self.query_rx = None;
@@ -347,18 +356,17 @@ impl App {
         }
     }
 
-    fn start_connect(&mut self, conn: SavedConnection) {
+    fn start_connect(&mut self, conn: ConnectionInfo) {
         self.mode = AppMode::Connecting;
         self.connect_error = None;
         self.active_connection = Some(conn.clone());
 
-        let db = self.db.clone();
+        let service = self.service.clone();
         let conn_id = conn.id.clone();
-        let url = conn.url.clone();
         let (tx, rx) = oneshot::channel();
 
         self.rt.spawn(async move {
-            let result = db.connect(&conn_id, &url).await;
+            let result = service.connect_database(&conn_id).await;
             let _ = tx.send(result);
         });
 
@@ -371,25 +379,38 @@ impl App {
         };
 
         self.schema_loading = true;
-        let db = self.db.clone();
+        let service = self.service.clone();
         let conn_id = conn.id.clone();
         let (tx, rx) = mpsc::channel(1);
 
         self.rt.spawn(async move {
-            let schemas = db.get_schemas(&conn_id).await.unwrap_or_default();
+            let schemas = service.db().get_schemas(&conn_id).await.unwrap_or_default();
             let mut tables_by_schema: HashMap<String, Vec<TableInfo>> = HashMap::new();
 
             for schema in &schemas {
-                let tables = db.get_tables(&conn_id, Some(&schema.name)).await.unwrap_or_default();
+                let tables = service
+                    .db()
+                    .get_tables(&conn_id, Some(&schema.name))
+                    .await
+                    .unwrap_or_default();
                 tables_by_schema.insert(schema.name.clone(), tables);
             }
 
             if schemas.is_empty() {
-                let tables = db.get_tables(&conn_id, None).await.unwrap_or_default();
+                let tables = service
+                    .db()
+                    .get_tables(&conn_id, None)
+                    .await
+                    .unwrap_or_default();
                 tables_by_schema.insert(String::new(), tables);
             }
 
-            let _ = tx.send(SchemaLoadResult { schemas, tables_by_schema }).await;
+            let _ = tx
+                .send(SchemaLoadResult {
+                    schemas,
+                    tables_by_schema,
+                })
+                .await;
         });
 
         self.schema_rx = Some(rx);
@@ -401,7 +422,11 @@ impl App {
         if self.schemas.is_empty() {
             if let Some(tables) = self.tables_by_schema.get("") {
                 for table in tables {
-                    let icon = if table.table_type == "view" { "\u{2299}" } else { "\u{25AA}" };
+                    let icon = if table.table_type == "view" {
+                        "\u{2299}"
+                    } else {
+                        "\u{25AA}"
+                    };
                     let expanded = self.expanded_tables.contains(&table.name);
                     let exp_icon = if expanded { "\u{25BE}" } else { "\u{25B8}" };
 
@@ -448,7 +473,11 @@ impl App {
             if expanded {
                 if let Some(tables) = self.tables_by_schema.get(&schema.name) {
                     for table in tables {
-                        let icon = if table.table_type == "view" { "\u{2299}" } else { "\u{25AA}" };
+                        let icon = if table.table_type == "view" {
+                            "\u{2299}"
+                        } else {
+                            "\u{25AA}"
+                        };
                         let tbl_expanded = self.expanded_tables.contains(&table.full_name);
                         let exp_icon = if tbl_expanded { "\u{25BE}" } else { "\u{25B8}" };
 
@@ -527,10 +556,10 @@ impl App {
 
     fn disconnect_and_return_to_list(&mut self) {
         if let Some(ref conn) = self.active_connection {
-            let db = self.db.clone();
+            let service = self.service.clone();
             let id = conn.id.clone();
             self.rt.spawn(async move {
-                db.disconnect(&id).await;
+                let _ = service.disconnect_database(&id).await;
             });
         }
         self.active_connection = None;
@@ -546,7 +575,7 @@ impl App {
         self.editor = tui_textarea::TextArea::default();
         self.mode = AppMode::ConnectionList;
         self.connect_error = None;
-        self.connections = self.config.get_connections().unwrap_or_default();
+        self.connections = Self::load_connections(&self.service);
         if !self.connections.is_empty() {
             self.conn_list_state.select(Some(0));
         }
@@ -618,10 +647,10 @@ impl App {
             return;
         }
 
-        let db = self.db.clone();
         let Some(ref conn) = self.active_connection else {
             return;
         };
+        let service = self.service.clone();
         let conn_id = conn.id.clone();
         let schema_clone = schema.clone();
         let table_clone = table.clone();
@@ -630,12 +659,18 @@ impl App {
         self.column_rx = Some(rx);
 
         self.rt.spawn(async move {
-            let columns = db.get_columns(&conn_id, &table_clone, schema_clone.as_deref()).await.unwrap_or_default();
-            let _ = tx.send(ColumnLoadResult {
-                schema: schema_clone,
-                table: table_clone,
-                columns,
-            }).await;
+            let columns = service
+                .db()
+                .get_columns(&conn_id, &table_clone, schema_clone.as_deref())
+                .await
+                .unwrap_or_default();
+            let _ = tx
+                .send(ColumnLoadResult {
+                    schema: schema_clone,
+                    table: table_clone,
+                    columns,
+                })
+                .await;
         });
     }
 
@@ -694,9 +729,9 @@ impl App {
         self.result_rows.clear();
         self.result_status = "Executing...".into();
 
-        let db = self.db.clone();
+        let service = self.service.clone();
         self.rt.spawn(async move {
-            let _ = db.execute_query(&conn_id, &sql, tx).await;
+            let _ = service.db().execute_query(&conn_id, &sql, tx).await;
         });
 
         self.focus = FocusPane::Results;

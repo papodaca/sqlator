@@ -1,16 +1,13 @@
 use crate::state::AppState;
-use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
-use sqlator_core::docker::inspector::ContainerInspector;
+use sqlator_core::credentials::VaultSettings;
 use sqlator_core::models::{
-    ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, QueryEvent, SavedConnection,
-    SchemaColumnInfo, SchemaInfo, SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams,
-    TableQueryResult,
+    ConnectionConfig, ConnectionGroup, ConnectionInfo, QueryEvent, SchemaColumnInfo, SchemaInfo,
+    SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams, TableQueryResult,
 };
-use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
+use sqlator_core::ssh::{config_parser, HostEntry};
 use sqlator_core::BatchResult;
 use tauri::ipc::Channel;
 use tauri::State;
-use tracing::{debug, info, warn};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -26,8 +23,7 @@ fn map_svc(e: sqlator_service::ServiceError) -> String {
 
 #[tauri::command]
 pub async fn get_connections(state: State<'_, AppState>) -> CmdResult<Vec<ConnectionInfo>> {
-    let connections = state.config.get_connections().map_err(map_err)?;
-    Ok(connections.iter().map(ConnectionInfo::from).collect())
+    state.service.list_connections().await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -35,13 +31,7 @@ pub async fn save_connection(
     state: State<'_, AppState>,
     config: ConnectionConfig,
 ) -> CmdResult<ConnectionInfo> {
-    let conn = sqlator_service::build_saved_connection(uuid::Uuid::new_v4().to_string(), config)
-        .map_err(map_svc)?;
-    state
-        .config
-        .save_connection(conn.clone())
-        .map_err(map_err)?;
-    Ok(ConnectionInfo::from(&conn))
+    state.service.save_connection(config).await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -50,261 +40,42 @@ pub async fn update_connection(
     id: String,
     config: ConnectionConfig,
 ) -> CmdResult<ConnectionInfo> {
-    let conn = sqlator_service::build_saved_connection(id, config).map_err(map_svc)?;
     state
-        .config
-        .update_connection(conn.clone())
-        .map_err(map_err)?;
-    Ok(ConnectionInfo::from(&conn))
+        .service
+        .update_connection(id, config)
+        .await
+        .map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.db.disconnect(&id).await;
-    state.config.delete_connection(&id).map_err(map_err)
+    state.service.delete_connection(id).await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn clone_connection(state: State<'_, AppState>, id: String) -> CmdResult<ConnectionInfo> {
-    let connections = state.config.get_connections().map_err(map_err)?;
-    let original = connections
-        .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| format!("Connection '{}' not found", id))?;
-    let mut cloned = original.clone();
-    cloned.id = uuid::Uuid::new_v4().to_string();
-    cloned.name = format!("{} (Copy)", original.name);
-    state
-        .config
-        .save_connection(cloned.clone())
-        .map_err(map_err)?;
-    Ok(ConnectionInfo::from(&cloned))
+    state.service.clone_connection(id).await.map_err(map_svc)
 }
 
 #[tauri::command]
-pub async fn test_connection(url: String) -> CmdResult<String> {
-    sqlator_core::db::DbManager::test_connection(&url)
-        .await
-        .map_err(map_err)
+pub async fn test_connection(state: State<'_, AppState>, url: String) -> CmdResult<String> {
+    state.service.test_connection(&url).await.map_err(map_svc)
 }
 
 // --- Active connection ---
 
 #[tauri::command]
 pub async fn connect_database(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let connections = state.config.get_connections().map_err(map_err)?;
-    let conn = connections
-        .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| format!("Connection '{}' not found", id))?
-        .clone();
-
-    let url = match conn.connection_type {
-        ConnectionType::DockerContainer => connect_docker_container(&state, &id, &conn).await?,
-        ConnectionType::SshTunnel | ConnectionType::Direct if conn.ssh_profile_id.is_some() => {
-            connect_ssh_tunnel(&state, &id, &conn).await?
-        }
-        ConnectionType::LocalDockerContainer => connect_local_docker(&state, &id, &conn).await?,
-        _ => {
-            debug!(
-                "connect_database '{}': no SSH profile, direct connection",
-                id
-            );
-            conn.url.clone()
-        }
-    };
-
-    state.db.connect(&id, &url).await.map_err(map_err)
-}
-
-async fn connect_docker_container(
-    state: &AppState,
-    id: &str,
-    conn: &SavedConnection,
-) -> CmdResult<String> {
-    let ssh_profile_id = conn
-        .ssh_profile_id
-        .as_ref()
-        .ok_or_else(|| "DockerContainer connection requires an SSH profile".to_string())?;
-
-    info!(
-        "connect_database '{}': Docker container, setting up tunnel via SSH profile '{}'",
-        id, ssh_profile_id
-    );
-
-    let profile = state
-        .config
-        .get_ssh_profile(ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-
-    let container_name = conn
-        .container_name
-        .as_ref()
-        .ok_or_else(|| "DockerContainer connection requires a container name".to_string())?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let container_info = ContainerInspector::inspect(
-        &ssh_config,
-        auth_config.clone(),
-        jump_hosts.clone(),
-        container_name,
-    )
-    .await
-    .map_err(|e| format!("Docker inspect failed: {}", e))?;
-
-    if container_info.status != sqlator_core::ContainerStatus::Running {
-        return Err(format!("Container '{}' is not running", container_name));
-    }
-
-    let container_port = conn
-        .container_port
-        .unwrap_or_else(|| sqlator_service::default_port_for_db_type(&conn.db_type));
-
-    if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
-        warn!(
-            "connect_database: closing stale tunnel for connection '{}'",
-            id
-        );
-        SshTunnel::close(old_tunnel).await.ok();
-    }
-
-    let tunnel = SshTunnel::create(
-        id.to_string(),
-        &ssh_config,
-        auth_config,
-        container_info.ip_address.clone(),
-        container_port,
-        jump_hosts,
-    )
-    .await
-    .map_err(map_err)?;
-
-    SshTunnel::start_forwarding(&tunnel)
-        .await
-        .map_err(map_err)?;
-    let local_port = tunnel.local_port;
-    state.tunnels.insert(id.to_string(), tunnel);
-
-    info!(
-        "connect_database: Docker tunnel ready on localhost:{} -> {}:{}",
-        local_port, container_info.ip_address, container_port
-    );
-
-    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
-    let mut tunneled_url = parsed_url;
-    let _ = tunneled_url.set_host(Some("127.0.0.1"));
-    let _ = tunneled_url.set_port(Some(local_port));
-    Ok(tunneled_url.to_string())
-}
-
-async fn connect_ssh_tunnel(
-    state: &AppState,
-    id: &str,
-    conn: &SavedConnection,
-) -> CmdResult<String> {
-    let ssh_profile_id = conn.ssh_profile_id.as_ref().unwrap();
-
-    info!(
-        "connect_database '{}': SSH tunnel via profile '{}'",
-        id, ssh_profile_id
-    );
-
-    let profile = state
-        .config
-        .get_ssh_profile(ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
-    let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
-    let default_port = match parsed_url.scheme() {
-        "postgres" | "postgresql" => 5432u16,
-        "mysql" | "mariadb" => 3306,
-        _ => 0,
-    };
-    let target_port = parsed_url.port().unwrap_or(default_port);
-
-    if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
-        warn!(
-            "connect_database: closing stale tunnel for connection '{}'",
-            id
-        );
-        SshTunnel::close(old_tunnel).await.ok();
-    }
-
-    let tunnel = SshTunnel::create(
-        id.to_string(),
-        &ssh_config,
-        auth_config,
-        target_host,
-        target_port,
-        jump_hosts,
-    )
-    .await
-    .map_err(map_err)?;
-
-    SshTunnel::start_forwarding(&tunnel)
-        .await
-        .map_err(map_err)?;
-    let local_port = tunnel.local_port;
-    state.tunnels.insert(id.to_string(), tunnel);
-
-    let mut tunneled_url = parsed_url;
-    let _ = tunneled_url.set_host(Some("127.0.0.1"));
-    let _ = tunneled_url.set_port(Some(local_port));
-    Ok(tunneled_url.to_string())
-}
-
-async fn connect_local_docker(
-    _state: &AppState,
-    _id: &str,
-    conn: &SavedConnection,
-) -> CmdResult<String> {
-    let container_name = conn
-        .container_name
-        .as_ref()
-        .ok_or_else(|| "LocalDockerContainer connection requires a container name".to_string())?;
-
-    let local_docker = sqlator_core::docker::LocalDockerAccess::new()
-        .map_err(|e| format!("Local Docker access failed: {}", e))?;
-
-    let container_info = local_docker
-        .inspect(container_name)
-        .await
-        .map_err(|e| format!("Docker inspect failed: {}", e))?;
-
-    if container_info.status != sqlator_core::ContainerStatus::Running {
-        return Err(format!("Container '{}' is not running", container_name));
-    }
-
-    let container_port = conn
-        .container_port
-        .unwrap_or_else(|| sqlator_service::default_port_for_db_type(&conn.db_type));
-
-    let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
-    let mut docker_url = parsed_url;
-    let _ = docker_url.set_host(Some(&container_info.ip_address));
-    let _ = docker_url.set_port(Some(container_port));
-    Ok(docker_url.to_string())
+    state.service.connect_database(&id).await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn disconnect_database(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.db.disconnect(&id).await;
-    if let Some((_, tunnel)) = state.tunnels.remove(&id) {
-        SshTunnel::close(tunnel).await.ok();
-    }
-    Ok(())
+    state
+        .service
+        .disconnect_database(&id)
+        .await
+        .map_err(map_svc)
 }
 
 // --- Query execution ---
@@ -317,37 +88,29 @@ pub async fn execute_query(
     on_event: Channel<QueryEvent>,
 ) -> CmdResult<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<QueryEvent>(256);
-
-    // Spawn the core query execution
-    let db = &state.db;
-    let exec_result = {
-        let connection_id = connection_id.clone();
-        let sql = sql.clone();
-
-        // Bridge: core mpsc → tauri Channel
-        let bridge_handle = tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                let _ = on_event.send(event);
-            }
-        });
-
-        let result = db.execute_query(&connection_id, &sql, tx).await;
-        // Wait for bridge to flush
-        let _ = bridge_handle.await;
-        result
-    };
-
-    exec_result.map_err(map_err)
+    let db = state.service.db();
+    let bridge_handle = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = on_event.send(event);
+        }
+    });
+    let result = db.execute_query(&connection_id, &sql, tx).await;
+    let _ = bridge_handle.await;
+    result.map_err(map_err)
 }
 
-// --- Query persistence ---
+// --- Query / tab / theme persistence ---
 
 #[tauri::command]
 pub async fn get_query(
     state: State<'_, AppState>,
     connection_id: String,
 ) -> CmdResult<Option<String>> {
-    state.config.get_query(&connection_id).map_err(map_err)
+    state
+        .service
+        .get_query(connection_id)
+        .await
+        .map_err(map_svc)
 }
 
 #[tauri::command]
@@ -357,16 +120,15 @@ pub async fn save_query(
     query: String,
 ) -> CmdResult<()> {
     state
-        .config
-        .save_query(&connection_id, &query)
-        .map_err(map_err)
+        .service
+        .save_query(connection_id, query)
+        .await
+        .map_err(map_svc)
 }
-
-// --- Tab state ---
 
 #[tauri::command]
 pub async fn get_tab_state(state: State<'_, AppState>) -> CmdResult<Option<serde_json::Value>> {
-    state.config.get_tab_state().map_err(map_err)
+    state.service.get_tab_state().await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -374,290 +136,103 @@ pub async fn save_tab_state(
     state: State<'_, AppState>,
     tab_state: serde_json::Value,
 ) -> CmdResult<()> {
-    state.config.save_tab_state(tab_state).map_err(map_err)
+    state
+        .service
+        .save_tab_state(tab_state)
+        .await
+        .map_err(map_svc)
 }
-
-// --- Theme ---
 
 #[tauri::command]
 pub async fn get_theme(state: State<'_, AppState>) -> CmdResult<String> {
-    state.config.get_theme().map_err(map_err)
+    state.service.get_theme().await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn save_theme(state: State<'_, AppState>, theme: String) -> CmdResult<()> {
-    state.config.save_theme(&theme).map_err(map_err)
+    state.service.save_theme(theme).await.map_err(map_svc)
 }
 
-// --- SSH Config ---
+// --- SSH Config / tunnels / profiles ---
 
 #[tauri::command]
 pub async fn list_ssh_hosts() -> CmdResult<Vec<HostEntry>> {
     config_parser::load_ssh_config().map_err(map_err)
 }
 
-// --- SSH Tunnels ---
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct SshTunnelRequest {
-    pub profile_id: String,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub auth_method: String,
-    pub key_path: Option<String>,
-    pub key_passphrase: Option<String>,
-    pub password: Option<String>,
-    pub target_host: String,
-    pub target_port: u16,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct SshTunnelInfo {
-    pub profile_id: String,
-    pub local_port: u16,
-    pub target_host: String,
-    pub target_port: u16,
-}
-
 #[tauri::command]
 pub async fn create_ssh_tunnel(
     state: State<'_, AppState>,
-    request: SshTunnelRequest,
-) -> CmdResult<SshTunnelInfo> {
-    let auth_config = match request.auth_method.as_str() {
-        "key" => {
-            let key_path = request.key_path.clone().unwrap_or_default();
-            if let Some(passphrase) = &request.key_passphrase {
-                SshAuthConfig::with_key_and_passphrase(&request.username, key_path, passphrase)
-            } else {
-                SshAuthConfig::with_key(&request.username, key_path)
-            }
-        }
-        "password" => {
-            let password = request.password.clone().unwrap_or_default();
-            SshAuthConfig::with_password(&request.username, password)
-        }
-        "agent" => SshAuthConfig::with_agent(&request.username),
-        _ => return Err(format!("Unsupported auth method: {}", request.auth_method)),
-    };
-
-    let ssh_config = SshHostConfig::new(&request.host, request.port, auth_config.clone());
-
-    let tunnel = SshTunnel::create(
-        request.profile_id.clone(),
-        &ssh_config,
-        auth_config,
-        request.target_host.clone(),
-        request.target_port,
-        vec![],
-    )
-    .await
-    .map_err(map_err)?;
-
-    SshTunnel::start_forwarding(&tunnel)
+    request: sqlator_service::SshTunnelRequest,
+) -> CmdResult<sqlator_service::SshTunnelInfo> {
+    state
+        .service
+        .create_ssh_tunnel(request)
         .await
-        .map_err(map_err)?;
-
-    let info = SshTunnelInfo {
-        profile_id: tunnel.profile_id.clone(),
-        local_port: tunnel.local_port,
-        target_host: tunnel.target_host.clone(),
-        target_port: tunnel.target_port,
-    };
-
-    state.tunnels.insert(request.profile_id, tunnel);
-
-    Ok(info)
+        .map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn close_ssh_tunnel(state: State<'_, AppState>, profile_id: String) -> CmdResult<()> {
-    let (_, tunnel) = state
-        .tunnels
-        .remove(&profile_id)
-        .ok_or_else(|| format!("Tunnel '{}' not found", profile_id))?;
-
-    SshTunnel::close(tunnel).await.map_err(map_err)?;
-
-    Ok(())
+    state
+        .service
+        .close_ssh_tunnel(&profile_id)
+        .await
+        .map_err(map_svc)
 }
 
 #[tauri::command]
-pub async fn get_active_tunnels(state: State<'_, AppState>) -> CmdResult<Vec<SshTunnelInfo>> {
-    let tunnels: Vec<SshTunnelInfo> = state
-        .tunnels
-        .iter()
-        .map(|entry| SshTunnelInfo {
-            profile_id: entry.profile_id.clone(),
-            local_port: entry.local_port,
-            target_host: entry.target_host.clone(),
-            target_port: entry.target_port,
-        })
-        .collect();
-
-    Ok(tunnels)
-}
-
-// --- SSH Profiles ---
-
-/// Frontend-facing SSH profile (no secrets).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct SshProfileConfig {
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub auth_method: String,
-    pub key_path: Option<String>,
-    /// Set to store/update a password in the keyring (not returned on read)
-    pub password: Option<String>,
-    /// Set to store/update a key passphrase in the keyring (not returned on read)
-    pub key_passphrase: Option<String>,
-    pub proxy_jump: Vec<sqlator_core::models::SshJumpHost>,
-    pub local_port_binding: Option<u16>,
-    pub keepalive_interval: Option<u32>,
+pub async fn get_active_tunnels(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<sqlator_service::SshTunnelInfo>> {
+    Ok(state.service.get_active_tunnels())
 }
 
 #[tauri::command]
 pub async fn get_ssh_profiles(state: State<'_, AppState>) -> CmdResult<Vec<SshProfile>> {
-    state.config.get_ssh_profiles().map_err(map_err)
+    state.service.get_ssh_profiles().map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn save_ssh_profile(
     state: State<'_, AppState>,
-    config: SshProfileConfig,
+    config: sqlator_service::SshProfileConfig,
 ) -> CmdResult<SshProfile> {
-    let id = uuid::Uuid::new_v4().to_string();
-
-    let auth_method = sqlator_service::parse_auth_method(&config.auth_method).map_err(map_svc)?;
-
-    let profile = SshProfile {
-        id: id.clone(),
-        name: config.name,
-        host: config.host,
-        port: config.port,
-        username: config.username,
-        auth_method,
-        key_path: config.key_path,
-        proxy_jump: config.proxy_jump,
-        local_port_binding: config.local_port_binding,
-        keepalive_interval: config.keepalive_interval,
-    };
-
-    state
-        .config
-        .save_ssh_profile(profile.clone())
-        .map_err(map_err)?;
-
-    // Store secrets in credential store if provided
-    if let Some(pw) = &config.password {
-        if !pw.is_empty() {
-            state
-                .credentials
-                .store_credential(&id, "password", pw)
-                .map_err(map_err)?;
-        }
-    }
-    if let Some(pp) = &config.key_passphrase {
-        if !pp.is_empty() {
-            state
-                .credentials
-                .store_credential(&id, "passphrase", pp)
-                .map_err(map_err)?;
-        }
-    }
-
-    Ok(profile)
+    state.service.save_ssh_profile(config).map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn update_ssh_profile(
     state: State<'_, AppState>,
     id: String,
-    config: SshProfileConfig,
+    config: sqlator_service::SshProfileConfig,
 ) -> CmdResult<SshProfile> {
-    // Check profile exists
     state
-        .config
-        .get_ssh_profile(&id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{id}' not found"))?;
-
-    let auth_method = sqlator_service::parse_auth_method(&config.auth_method).map_err(map_svc)?;
-
-    let profile = SshProfile {
-        id: id.clone(),
-        name: config.name,
-        host: config.host,
-        port: config.port,
-        username: config.username,
-        auth_method,
-        key_path: config.key_path,
-        proxy_jump: config.proxy_jump,
-        local_port_binding: config.local_port_binding,
-        keepalive_interval: config.keepalive_interval,
-    };
-
-    state
-        .config
-        .update_ssh_profile(profile.clone())
-        .map_err(map_err)?;
-
-    // Update secrets if provided (empty string = leave unchanged)
-    if let Some(pw) = &config.password {
-        if !pw.is_empty() {
-            state
-                .credentials
-                .store_credential(&id, "password", pw)
-                .map_err(map_err)?;
-        }
-    }
-    if let Some(pp) = &config.key_passphrase {
-        if !pp.is_empty() {
-            state
-                .credentials
-                .store_credential(&id, "passphrase", pp)
-                .map_err(map_err)?;
-        }
-    }
-
-    Ok(profile)
+        .service
+        .update_ssh_profile(&id, config)
+        .map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn delete_ssh_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    // This returns an error (PROFILE_IN_USE) if connections reference it
-    state.config.delete_ssh_profile(&id).map_err(map_err)?;
-    // Clean up credential entries
-    state
-        .credentials
-        .delete_all_credentials(&id)
-        .map_err(map_err)?;
-    Ok(())
+    state.service.delete_ssh_profile(&id).map_err(map_svc)
 }
 
-/// Returns connection IDs that use a given profile — used to warn before delete.
 #[tauri::command]
 pub async fn connections_using_ssh_profile(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> CmdResult<Vec<String>> {
     state
-        .config
-        .connections_using_profile(&profile_id)
-        .map_err(map_err)
+        .service
+        .connections_using_ssh_profile(&profile_id)
+        .map_err(map_svc)
 }
-
-// --- Connection URL parsing ---
 
 #[tauri::command]
 pub async fn parse_connection_url(url: String) -> CmdResult<sqlator_service::ParsedConnectionUrl> {
     sqlator_service::parse_connection_url(&url).map_err(map_svc)
 }
-
-// --- SSH-tunneled connection test ---
 
 #[tauri::command]
 pub async fn test_connection_with_ssh(
@@ -665,71 +240,23 @@ pub async fn test_connection_with_ssh(
     url: String,
     ssh_profile_id: String,
 ) -> CmdResult<String> {
-    // Look up SSH profile
-    let profile = state
-        .config
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{ssh_profile_id}' not found"))?;
-
-    // Parse DB URL to get target host/port
-    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
-    let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
-    let default_port = match parsed_url.scheme() {
-        "postgres" | "postgresql" => 5432u16,
-        "mysql" | "mariadb" => 3306,
-        _ => 0,
-    };
-    let target_port = parsed_url.port().unwrap_or(default_port);
-
-    // Build auth config from profile + credential store
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-    let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
-    let tunnel = SshTunnel::create(
-        tunnel_id,
-        &ssh_config,
-        auth_config,
-        target_host,
-        target_port,
-        jump_hosts,
-    )
-    .await
-    .map_err(map_err)?;
-
-    SshTunnel::start_forwarding(&tunnel)
+    state
+        .service
+        .test_connection_with_ssh(&url, &ssh_profile_id)
         .await
-        .map_err(map_err)?;
-    let local_port = tunnel.local_port;
-
-    // Rewrite DB URL to point at the local tunnel endpoint
-    let mut test_url = parsed_url.clone();
-    let _ = test_url.set_host(Some("127.0.0.1"));
-    let _ = test_url.set_port(Some(local_port));
-    let test_url_str = test_url.to_string();
-
-    // Test the connection through the tunnel
-    let result = sqlator_core::db::DbManager::test_connection(&test_url_str).await;
-
-    // Always close the ephemeral tunnel, even on error
-    SshTunnel::close(tunnel).await.ok();
-
-    result.map_err(map_err)
+        .map_err(map_svc)
 }
 
-// ── Credential storage settings ───────────────────────────────────────────────
+// --- Credentials / vault ---
 
 #[tauri::command]
 pub async fn check_keyring_available() -> bool {
-    CredentialStore::keyring_available()
+    sqlator_service::AppService::keyring_available()
 }
 
 #[tauri::command]
 pub async fn get_storage_mode(state: State<'_, AppState>) -> CmdResult<String> {
-    Ok(state.credentials.mode().to_string())
+    state.service.get_storage_mode().await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -738,58 +265,41 @@ pub async fn set_storage_mode(
     mode: String,
     migrate: bool,
 ) -> CmdResult<()> {
-    let new_mode: StorageMode = mode.parse().map_err(map_err)?;
-
-    if migrate {
-        let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
-        let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
-        state
-            .credentials
-            .migrate_to(&new_mode, &ids)
-            .map_err(map_err)?;
-    }
-
-    state.credentials.set_mode(new_mode);
-    state.config.save_storage_mode(&mode).map_err(map_err)?;
-    Ok(())
+    state
+        .service
+        .set_storage_mode(mode, migrate)
+        .await
+        .map_err(map_svc)
 }
-
-// ── Vault commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn vault_exists(state: State<'_, AppState>) -> CmdResult<bool> {
-    Ok(state.credentials.vault.is_initialized())
+    state.service.vault_exists().await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn is_vault_locked(state: State<'_, AppState>) -> CmdResult<bool> {
-    Ok(state.credentials.vault.is_locked())
+    state.service.is_vault_locked().await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn create_vault(state: State<'_, AppState>, password: String) -> CmdResult<()> {
-    state.credentials.vault.create(&password).map_err(map_err)?;
-    // Auto-switch mode to vault after creation
-    state.credentials.set_mode(StorageMode::Vault);
-    state.config.save_storage_mode("vault").map_err(map_err)?;
-    Ok(())
+    state.service.create_vault(password).await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn unlock_vault(state: State<'_, AppState>, password: String) -> CmdResult<()> {
-    state.credentials.vault.unlock(&password).map_err(map_err)
+    state.service.unlock_vault(password).await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn lock_vault(state: State<'_, AppState>) -> CmdResult<()> {
-    state.credentials.vault.lock();
-    Ok(())
+    state.service.lock_vault().await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn get_vault_settings(state: State<'_, AppState>) -> CmdResult<VaultSettings> {
-    let timeout_secs = state.config.get_vault_timeout_secs().map_err(map_err)?;
-    Ok(VaultSettings { timeout_secs })
+    state.service.get_vault_settings().await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -797,47 +307,26 @@ pub async fn save_vault_settings(
     state: State<'_, AppState>,
     settings: VaultSettings,
 ) -> CmdResult<()> {
-    state.credentials.vault.set_timeout(settings.timeout_secs);
     state
-        .config
-        .save_vault_timeout_secs(settings.timeout_secs)
-        .map_err(map_err)?;
-    Ok(())
+        .service
+        .save_vault_settings(settings)
+        .await
+        .map_err(map_svc)
 }
 
-// ── Connection Groups ─────────────────────────────────────────────────────────
+// --- Groups ---
 
 #[tauri::command]
 pub async fn get_groups(state: State<'_, AppState>) -> CmdResult<Vec<ConnectionGroup>> {
-    state.config.get_groups().map_err(map_err)
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct SaveGroupPayload {
-    pub name: String,
-    pub color: Option<String>,
-    pub parent_group_id: Option<String>,
+    state.service.get_groups().await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn save_group(
     state: State<'_, AppState>,
-    payload: SaveGroupPayload,
+    payload: sqlator_service::SaveGroupPayload,
 ) -> CmdResult<ConnectionGroup> {
-    let groups = state.config.get_groups().map_err(map_err)?;
-    let order = groups.len() as u32;
-
-    let group = ConnectionGroup {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: payload.name,
-        color: payload.color,
-        parent_group_id: payload.parent_group_id,
-        order,
-        collapsed: false,
-    };
-
-    state.config.save_group(group.clone()).map_err(map_err)?;
-    Ok(group)
+    state.service.save_group(payload).await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -845,13 +334,12 @@ pub async fn update_group(
     state: State<'_, AppState>,
     group: ConnectionGroup,
 ) -> CmdResult<ConnectionGroup> {
-    state.config.update_group(group.clone()).map_err(map_err)?;
-    Ok(group)
+    state.service.update_group(group).await.map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn delete_group(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.config.delete_group(&id).map_err(map_err)
+    state.service.delete_group(id).await.map_err(map_svc)
 }
 
 #[tauri::command]
@@ -861,44 +349,29 @@ pub async fn move_connection_to_group(
     group_id: Option<String>,
 ) -> CmdResult<ConnectionInfo> {
     state
-        .config
-        .move_connection_to_group(&connection_id, group_id.as_deref())
-        .map_err(map_err)?;
-
-    let connections = state.config.get_connections().map_err(map_err)?;
-    let conn = connections
-        .iter()
-        .find(|c| c.id == connection_id)
-        .ok_or_else(|| format!("Connection '{connection_id}' not found"))?;
-
-    Ok(ConnectionInfo::from(conn))
+        .service
+        .move_connection_to_group(connection_id, group_id)
+        .await
+        .map_err(map_svc)
 }
 
-// ── Import / Export ───────────────────────────────────────────────────────────
-/// Build the export JSON via sqlator-service (payload only; this command still persists).
-fn build_export_json(state: &AppState) -> Result<String, String> {
-    let connections = state.config.get_connections().map_err(map_err)?;
-    let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
-    let groups = state.config.get_groups().map_err(map_err)?;
-    sqlator_service::build_export_json(&connections, &profiles, &groups).map_err(map_svc)
-}
+// --- Import / Export ---
 
-/// Write the export JSON to ~/Downloads (or home dir) and return the file path.
-/// Blob-URL downloads don't work in Tauri's webview, so we write from Rust.
 #[tauri::command]
 pub async fn export_connections(state: State<'_, AppState>) -> CmdResult<String> {
-    let json = build_export_json(&state)?;
+    let json = state
+        .service
+        .export_connections_json()
+        .await
+        .map_err(map_svc)?;
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let filename = format!("sqlator-export-{date}.json");
-
     let dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .ok_or("Could not determine export directory")?;
-
     let path = dir.join(&filename);
     std::fs::write(&path, json).map_err(map_err)?;
-
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -906,282 +379,42 @@ pub async fn export_connections(state: State<'_, AppState>) -> CmdResult<String>
 pub async fn import_connections(
     state: State<'_, AppState>,
     json: String,
-    duplicate_mode: String, // "skip" or "rename"
+    duplicate_mode: String,
 ) -> CmdResult<sqlator_service::ImportResult> {
-    let file = sqlator_service::parse_export_json(&json).map_err(map_svc)?;
-
-    let rename = duplicate_mode == "rename";
-
-    // ── 1. Import groups (roots first, then children) ─────────────────────────
-    let existing_groups = state.config.get_groups().map_err(map_err)?;
-    let existing_group_names: std::collections::HashSet<String> =
-        existing_groups.iter().map(|g| g.name.clone()).collect();
-
-    // name → new id
-    let mut group_id_map: std::collections::HashMap<String, String> = existing_groups
-        .iter()
-        .map(|g| (g.name.clone(), g.id.clone()))
-        .collect();
-
-    let mut groups_added = 0usize;
-
-    // Up to 3 passes to handle nesting depth
-    let mut remaining: Vec<&sqlator_service::ExportedGroup> = file.groups.iter().collect();
-    for _ in 0..3 {
-        let mut next_remaining = Vec::new();
-        for eg in remaining {
-            // If it has a parent, the parent must already be in group_id_map
-            if let Some(ref parent_name) = eg.parent_group_name {
-                if !group_id_map.contains_key(parent_name.as_str()) {
-                    next_remaining.push(eg);
-                    continue;
-                }
-            }
-            // Skip if already exists (by name)
-            if existing_group_names.contains(&eg.name) {
-                continue;
-            }
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let group = sqlator_core::models::ConnectionGroup {
-                id: new_id.clone(),
-                name: eg.name.clone(),
-                color: eg.color.clone(),
-                parent_group_id: eg
-                    .parent_group_name
-                    .as_ref()
-                    .and_then(|n| group_id_map.get(n))
-                    .cloned(),
-                order: eg.order,
-                collapsed: false,
-            };
-            state.config.save_group(group).map_err(map_err)?;
-            group_id_map.insert(eg.name.clone(), new_id);
-            groups_added += 1;
-        }
-        remaining = next_remaining;
-        if remaining.is_empty() {
-            break;
-        }
-    }
-
-    // ── 2. Import SSH profiles ────────────────────────────────────────────────
-    let existing_profiles = state.config.get_ssh_profiles().map_err(map_err)?;
-    let existing_profile_names: std::collections::HashSet<String> =
-        existing_profiles.iter().map(|p| p.name.clone()).collect();
-
-    // name → new id
-    let mut profile_id_map: std::collections::HashMap<String, String> = existing_profiles
-        .iter()
-        .map(|p| (p.name.clone(), p.id.clone()))
-        .collect();
-
-    let mut profiles_added = 0usize;
-
-    for ep in &file.ssh_profiles {
-        let final_name = if existing_profile_names.contains(&ep.name) {
-            if !rename {
-                continue;
-            }
-            sqlator_service::unique_name(&ep.name, &profile_id_map.keys().cloned().collect())
-        } else {
-            ep.name.clone()
-        };
-
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let auth_method = sqlator_service::parse_auth_method(&ep.auth_method).map_err(map_svc)?;
-        let profile = SshProfile {
-            id: new_id.clone(),
-            name: final_name.clone(),
-            host: ep.host.clone(),
-            port: ep.port,
-            username: ep.username.clone(),
-            auth_method,
-            key_path: ep.key_path.clone(),
-            proxy_jump: ep
-                .proxy_jump
-                .iter()
-                .map(|j| sqlator_core::models::SshJumpHost {
-                    host: j.host.clone(),
-                    port: j.port,
-                    username: j.username.clone(),
-                    auth_method: sqlator_service::parse_auth_method(&j.auth_method)
-                        .unwrap_or(sqlator_core::models::SshAuthMethod::Key),
-                    key_path: j.key_path.clone(),
-                })
-                .collect(),
-            local_port_binding: ep.local_port_binding,
-            keepalive_interval: ep.keepalive_interval,
-        };
-        state.config.save_ssh_profile(profile).map_err(map_err)?;
-        profile_id_map.insert(ep.name.clone(), new_id);
-        profiles_added += 1;
-    }
-
-    // ── 3. Import connections ─────────────────────────────────────────────────
-    let existing_connections = state.config.get_connections().map_err(map_err)?;
-    let existing_conn_names: std::collections::HashSet<String> = existing_connections
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
-
-    let mut all_conn_names: std::collections::HashSet<String> = existing_conn_names.clone();
-    let mut connections_added = 0usize;
-    let mut connections_skipped = 0usize;
-
-    for ec in &file.connections {
-        let final_name = if existing_conn_names.contains(&ec.name) {
-            if !rename {
-                connections_skipped += 1;
-                continue;
-            }
-            sqlator_service::unique_name(&ec.name, &all_conn_names)
-        } else {
-            ec.name.clone()
-        };
-
-        // Reconstruct a URL without a password
-        let url = sqlator_service::build_url_no_password(
-            &ec.db_type,
-            &ec.host,
-            ec.port,
-            &ec.database,
-            &ec.username,
-        );
-
-        let conn = sqlator_core::models::SavedConnection {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: final_name.clone(),
-            color_id: ec.color_id.clone(),
-            db_type: ec.db_type.clone(),
-            host: ec.host.clone(),
-            port: ec.port,
-            database: ec.database.clone(),
-            username: ec.username.clone(),
-            url,
-            ssh_profile_id: ec
-                .ssh_profile_name
-                .as_ref()
-                .and_then(|n| profile_id_map.get(n))
-                .cloned(),
-            group_id: ec
-                .group_name
-                .as_ref()
-                .and_then(|n| group_id_map.get(n))
-                .cloned(),
-            connection_type: ConnectionType::default(),
-            container_name: None,
-            container_port: None,
-        };
-        state.config.save_connection(conn).map_err(map_err)?;
-        all_conn_names.insert(final_name);
-        connections_added += 1;
-    }
-
-    Ok(sqlator_service::ImportResult {
-        groups_added,
-        profiles_added,
-        connections_added,
-        connections_skipped,
-    })
+    state
+        .service
+        .import_connections(json, duplicate_mode)
+        .await
+        .map_err(map_svc)
 }
 
-// ── Docker Container Discovery ────────────────────────────────────────────────
+// --- Docker ---
 
 #[tauri::command]
 pub async fn discover_container(
     state: State<'_, AppState>,
     ssh_profile_id: String,
     container_name: String,
-) -> CmdResult<DockerContainerInfo> {
-    let profile = state
-        .config
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let info = ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, &container_name)
+) -> CmdResult<sqlator_service::DockerContainerInfo> {
+    state
+        .service
+        .discover_container(&ssh_profile_id, &container_name)
         .await
-        .map_err(|e| format!("{}", e))?;
-
-    Ok(DockerContainerInfo {
-        ip_address: info.ip_address,
-        status: match info.status {
-            sqlator_core::ContainerStatus::Running => "running".to_string(),
-            sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
-            sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
-        },
-        ports: info
-            .ports
-            .into_iter()
-            .map(|p| ContainerPortInfo {
-                container_port: p.container_port,
-                protocol: p.protocol,
-            })
-            .collect(),
-        database_type_hint: info.database_type_hint,
-    })
+        .map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn list_running_containers(
     state: State<'_, AppState>,
     ssh_profile_id: String,
-) -> CmdResult<Vec<ContainerSummaryInfo>> {
-    let profile = state
-        .config
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let containers = ContainerInspector::list_running(&ssh_config, auth_config, jump_hosts)
+) -> CmdResult<Vec<sqlator_service::ContainerSummaryInfo>> {
+    state
+        .service
+        .list_running_containers(&ssh_profile_id)
         .await
-        .map_err(|e| format!("{}", e))?;
-
-    Ok(containers
-        .into_iter()
-        .map(|c| ContainerSummaryInfo {
-            name: c.name,
-            image: c.image,
-            status: c.status,
-            database_type_hint: c.database_type_hint,
-        })
-        .collect())
+        .map_err(map_svc)
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct DockerContainerInfo {
-    pub ip_address: String,
-    pub status: String,
-    pub ports: Vec<ContainerPortInfo>,
-    pub database_type_hint: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ContainerPortInfo {
-    pub container_port: u16,
-    pub protocol: String,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ContainerSummaryInfo {
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub database_type_hint: Option<String>,
-}
-
-/// Test a Docker container connection with a fresh docker inspect + ephemeral tunnel.
-/// Mirrors connect_docker_container exactly, but tears the tunnel down after testing.
 #[tauri::command]
 pub async fn test_docker_connection(
     state: State<'_, AppState>,
@@ -1190,152 +423,53 @@ pub async fn test_docker_connection(
     container_port: u16,
     url: String,
 ) -> CmdResult<String> {
-    info!(
-        "test_docker_connection: SSH profile='{}', container='{}'",
-        ssh_profile_id, container_name
-    );
-
-    let profile = state
-        .config
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let container_info = ContainerInspector::inspect(
-        &ssh_config,
-        auth_config.clone(),
-        jump_hosts.clone(),
-        &container_name,
-    )
-    .await
-    .map_err(|e| format!("Docker inspect failed: {}", e))?;
-
-    if container_info.status != sqlator_core::ContainerStatus::Running {
-        return Err(format!("Container '{}' is not running", container_name));
-    }
-
-    let tunnel_id = format!("test-docker-{}", uuid::Uuid::new_v4());
-    let tunnel = SshTunnel::create(
-        tunnel_id,
-        &ssh_config,
-        auth_config,
-        container_info.ip_address.clone(),
-        container_port,
-        jump_hosts,
-    )
-    .await
-    .map_err(map_err)?;
-
-    SshTunnel::start_forwarding(&tunnel)
+    state
+        .service
+        .test_docker_connection(
+            &ssh_profile_id,
+            &container_name,
+            Some(container_port),
+            &url,
+            "",
+        )
         .await
-        .map_err(map_err)?;
-    let local_port = tunnel.local_port;
-
-    info!(
-        "test_docker_connection: tunnel ready localhost:{} -> {}:{}",
-        local_port, container_info.ip_address, container_port
-    );
-
-    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
-    let mut test_url = parsed_url;
-    let _ = test_url.set_host(Some("127.0.0.1"));
-    let _ = test_url.set_port(Some(local_port));
-
-    let result = sqlator_core::db::DbManager::test_connection(test_url.as_str()).await;
-    SshTunnel::close(tunnel).await.ok();
-    result.map_err(map_err)
+        .map_err(map_svc)
 }
-
-// ── Local Docker commands ──────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn discover_local_container(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     container_name: String,
-) -> CmdResult<DockerContainerInfo> {
-    let local = sqlator_core::docker::LocalDockerAccess::new()
-        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
-
-    let info = local
-        .inspect(&container_name)
+) -> CmdResult<sqlator_service::DockerContainerInfo> {
+    state
+        .service
+        .discover_local_container(&container_name)
         .await
-        .map_err(|e| format!("{}", e))?;
-
-    Ok(DockerContainerInfo {
-        ip_address: info.ip_address,
-        status: match info.status {
-            sqlator_core::ContainerStatus::Running => "running".to_string(),
-            sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
-            sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
-        },
-        ports: info
-            .ports
-            .into_iter()
-            .map(|p| ContainerPortInfo {
-                container_port: p.container_port,
-                protocol: p.protocol,
-            })
-            .collect(),
-        database_type_hint: info.database_type_hint,
-    })
+        .map_err(map_svc)
 }
 
 #[tauri::command]
 pub async fn list_local_containers(
-    _state: State<'_, AppState>,
-) -> CmdResult<Vec<ContainerSummaryInfo>> {
-    let local = sqlator_core::docker::LocalDockerAccess::new()
-        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
-
-    let containers = local.list_running().await.map_err(|e| format!("{}", e))?;
-
-    Ok(containers
-        .into_iter()
-        .map(|c| ContainerSummaryInfo {
-            name: c.name,
-            image: c.image,
-            status: c.status,
-            database_type_hint: c.database_type_hint,
-        })
-        .collect())
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<sqlator_service::ContainerSummaryInfo>> {
+    state.service.list_local_containers().await.map_err(map_svc)
 }
 
-/// Test a local Docker container connection — inspects via local socket, connects directly.
 #[tauri::command]
 pub async fn test_local_docker_connection(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     container_name: String,
     container_port: u16,
     url: String,
 ) -> CmdResult<String> {
-    let local = sqlator_core::docker::LocalDockerAccess::new()
-        .map_err(|e| format!("Local Docker unavailable: {}", e))?;
-
-    let container_info = local
-        .inspect(&container_name)
+    state
+        .service
+        .test_local_docker_connection(&container_name, Some(container_port), &url, "")
         .await
-        .map_err(|e| format!("Docker inspect failed: {}", e))?;
-
-    if container_info.status != sqlator_core::ContainerStatus::Running {
-        return Err(format!("Container '{}' is not running", container_name));
-    }
-
-    let parsed_url = url::Url::parse(&url).map_err(map_err)?;
-    let mut test_url = parsed_url;
-    let _ = test_url.set_host(Some(&container_info.ip_address));
-    let _ = test_url.set_port(Some(container_port));
-
-    sqlator_core::db::DbManager::test_connection(test_url.as_ref())
-        .await
-        .map_err(map_err)
+        .map_err(map_svc)
 }
 
-// ── Schema Metadata ───────────────────────────────────────────────────────────
+// --- Schema metadata / browser / batch ---
 
 #[tauri::command]
 pub async fn fetch_schema_metadata(
@@ -1343,64 +477,24 @@ pub async fn fetch_schema_metadata(
     connection_id: String,
     sql: String,
 ) -> CmdResult<Option<TableMeta>> {
-    let is_select = {
-        let trimmed = sql.trim().to_uppercase();
-        trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
-    };
-    if !is_select {
-        return Ok(None);
-    }
-
-    // Parse table reference
-    let (table_name, schema_name) = match sqlator_service::extract_single_table(&sql) {
-        sqlator_service::TableExtract::Found(t, s) => (t, s),
-        sqlator_service::TableExtract::NotSingleTable => {
-            return Ok(Some(sqlator_service::non_editable_meta(
-                "Cannot edit: query joins multiple tables or uses a subquery",
-            )));
-        }
-        sqlator_service::TableExtract::Undetermined => {
-            return Ok(Some(sqlator_service::non_editable_meta(
-                "Cannot determine a single source table for this query",
-            )));
-        }
-    };
-
-    // Check cache
-    let cache_key = sqlator_service::schema_cache_key(&connection_id, &schema_name, &table_name);
-    if let Some(cached) = state.schema_cache.get(&cache_key) {
-        let (meta, expires_at) = cached.clone();
-        if std::time::Instant::now() < expires_at {
-            return Ok(Some(meta));
-        }
-        drop(cached);
-        state.schema_cache.remove(&cache_key);
-    }
-
-    let meta = state
-        .db
-        .fetch_schema_metadata(&connection_id, &table_name, schema_name.as_deref())
-        .await
-        .map_err(map_err)?;
-
-    // Cache for 5 minutes
-    let expires = std::time::Instant::now()
-        + std::time::Duration::from_secs(sqlator_service::SCHEMA_CACHE_TTL_SECS);
     state
-        .schema_cache
-        .insert(cache_key, (meta.clone(), expires));
-
-    Ok(Some(meta))
+        .service
+        .fetch_schema_metadata_for_sql(&connection_id, &sql)
+        .await
+        .map_err(map_svc)
 }
-
-// ── Schema Browser ────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_schemas(
     state: State<'_, AppState>,
     connection_id: String,
 ) -> CmdResult<Vec<SchemaInfo>> {
-    state.db.get_schemas(&connection_id).await.map_err(map_err)
+    state
+        .service
+        .db()
+        .get_schemas(&connection_id)
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1410,7 +504,8 @@ pub async fn get_tables(
     schema: Option<String>,
 ) -> CmdResult<Vec<TableInfo>> {
     state
-        .db
+        .service
+        .db()
         .get_tables(&connection_id, schema.as_deref())
         .await
         .map_err(map_err)
@@ -1424,7 +519,8 @@ pub async fn get_columns(
     schema: Option<String>,
 ) -> CmdResult<Vec<SchemaColumnInfo>> {
     state
-        .db
+        .service
+        .db()
         .get_columns(&connection_id, &table_name, schema.as_deref())
         .await
         .map_err(map_err)
@@ -1437,7 +533,8 @@ pub async fn query_table(
 ) -> CmdResult<TableQueryResult> {
     let connection_id = params.connection_id.clone();
     state
-        .db
+        .service
+        .db()
         .query_table(&connection_id, &params)
         .await
         .map_err(map_err)
@@ -1451,13 +548,12 @@ pub async fn get_ddl(
     schema: Option<String>,
 ) -> CmdResult<String> {
     state
-        .db
+        .service
+        .db()
         .get_ddl(&connection_id, &table_name, schema.as_deref())
         .await
         .map_err(map_err)
 }
-
-// ── Batch Execute ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn execute_batch(
@@ -1466,7 +562,8 @@ pub async fn execute_batch(
     batch: SqlBatch,
 ) -> CmdResult<BatchResult> {
     state
-        .db
+        .service
+        .db()
         .execute_batch(&connection_id, &batch)
         .await
         .map_err(map_err)
@@ -1475,10 +572,7 @@ pub async fn execute_batch(
 #[cfg(test)]
 mod group_a_tests {
     use super::*;
-    use sqlator_core::config::ConfigManager;
-    use sqlator_core::credentials::{CredentialStore, StorageMode};
-    use sqlator_core::db::DbManager;
-    use sqlator_core::models::{ConnectionGroup, SshAuthMethod, SshProfile};
+    use sqlator_core::models::{ConnectionGroup, ConnectionType, SshAuthMethod, SshProfile};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1505,15 +599,11 @@ mod group_a_tests {
     fn make_fixture() -> TestFixture {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-a-{id}");
-        let config = ConfigManager::new(&app_name).expect("ConfigManager");
         let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
-        let vault_path = cleanup_dir.join("vault.enc");
         let state = AppState {
-            config,
-            db: DbManager::new(),
-            tunnels: dashmap::DashMap::new(),
-            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
-            schema_cache: dashmap::DashMap::new(),
+            service: Arc::new(
+                sqlator_service::AppService::with_app_name(&app_name).expect("AppService"),
+            ),
             terminals: dashmap::DashMap::new(),
         };
         let app = tauri::test::mock_builder()
@@ -1552,7 +642,13 @@ mod group_a_tests {
             .expect("import");
         assert_eq!(result.groups_added, 3);
 
-        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        let groups = fx
+            .app
+            .state::<AppState>()
+            .service
+            .config()
+            .get_groups()
+            .unwrap();
         assert_eq!(groups.len(), 3);
         let parent = groups.iter().find(|g| g.name == "parent").unwrap();
         let child = groups.iter().find(|g| g.name == "child").unwrap();
@@ -1583,7 +679,13 @@ mod group_a_tests {
             .await
             .expect("import");
         assert_eq!(result.groups_added, 2);
-        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        let groups = fx
+            .app
+            .state::<AppState>()
+            .service
+            .config()
+            .get_groups()
+            .unwrap();
         let parent = groups.iter().find(|g| g.name == "parent").unwrap();
         let child = groups.iter().find(|g| g.name == "child").unwrap();
         assert_eq!(child.parent_group_id.as_deref(), Some(parent.id.as_str()));
@@ -1608,7 +710,8 @@ mod group_a_tests {
         assert!(fx
             .app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .get_groups()
             .unwrap()
             .is_empty());
@@ -1620,7 +723,8 @@ mod group_a_tests {
         let existing_id = uuid::Uuid::new_v4().to_string();
         fx.app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .save_group(ConnectionGroup {
                 id: existing_id.clone(),
                 name: "Shared".into(),
@@ -1641,7 +745,13 @@ mod group_a_tests {
             .await
             .expect("import rename");
         assert_eq!(result.groups_added, 0);
-        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        let groups = fx
+            .app
+            .state::<AppState>()
+            .service
+            .config()
+            .get_groups()
+            .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].id, existing_id);
         assert_eq!(groups[0].color.as_deref(), Some("#111"));
@@ -1657,7 +767,8 @@ mod group_a_tests {
         let fx = make_fixture();
         fx.app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .save_connection(sqlator_core::models::SavedConnection {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Prod".into(),
@@ -1702,7 +813,8 @@ mod group_a_tests {
         assert_eq!(
             fx.app
                 .state::<AppState>()
-                .config
+                .service
+                .config()
                 .get_connections()
                 .unwrap()
                 .len(),
@@ -1717,7 +829,8 @@ mod group_a_tests {
         let names: HashSet<_> = fx
             .app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .get_connections()
             .unwrap()
             .into_iter()
@@ -1733,7 +846,8 @@ mod group_a_tests {
         let profile_id = uuid::Uuid::new_v4().to_string();
         fx.app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .save_ssh_profile(SshProfile {
                 id: profile_id.clone(),
                 name: "bastion".into(),
@@ -1749,7 +863,8 @@ mod group_a_tests {
             .unwrap();
         fx.app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .save_group(ConnectionGroup {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Work".into(),
@@ -1761,7 +876,8 @@ mod group_a_tests {
             .unwrap();
         fx.app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .save_connection(sqlator_core::models::SavedConnection {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "App DB".into(),
@@ -1776,7 +892,8 @@ mod group_a_tests {
                 group_id: fx
                     .app
                     .state::<AppState>()
-                    .config
+                    .service
+                    .config()
                     .get_groups()
                     .unwrap()
                     .into_iter()
@@ -1788,7 +905,13 @@ mod group_a_tests {
             })
             .unwrap();
 
-        let exported = build_export_json(&fx.app.state()).expect("export");
+        let exported = fx
+            .app
+            .state::<AppState>()
+            .service
+            .export_connections_json()
+            .await
+            .expect("export");
         assert!(
             !exported.to_lowercase().contains("password"),
             "export must not contain password material: {exported}"
@@ -1806,7 +929,8 @@ mod group_a_tests {
         let profiles = fx2
             .app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .get_ssh_profiles()
             .unwrap();
         assert_eq!(profiles.len(), 1);
@@ -1817,7 +941,8 @@ mod group_a_tests {
         let conns = fx2
             .app
             .state::<AppState>()
-            .config
+            .service
+            .config()
             .get_connections()
             .unwrap();
         assert_eq!(conns.len(), 1);
@@ -1830,9 +955,6 @@ mod group_a_tests {
 #[cfg(test)]
 mod group_b_tests {
     use super::*;
-    use sqlator_core::config::ConfigManager;
-    use sqlator_core::credentials::{CredentialStore, StorageMode};
-    use sqlator_core::db::DbManager;
     use sqlator_core::models::{PrimaryKeyMeta, TableMeta};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1902,35 +1024,35 @@ mod group_b_tests {
         let key_other = schema_cache_key("c1", &None, "users");
 
         let meta = sample_meta("users");
-        state.schema_cache.insert(
+        state.service.schema_cache().insert(
             key_hit.clone(),
             (meta.clone(), Instant::now() + Duration::from_secs(300)),
         );
 
         // Hit
         {
-            let cached = state.schema_cache.get(&key_hit).expect("hit");
+            let cached = state.service.schema_cache().get(&key_hit).expect("hit");
             let (m, expires_at) = cached.clone();
             assert!(Instant::now() < expires_at);
             assert_eq!(m.table_name, "users");
         }
 
         // Miss — different key (None vs Some("public"))
-        assert!(state.schema_cache.get(&key_other).is_none());
+        assert!(state.service.schema_cache().get(&key_other).is_none());
 
         // Expiry — past expires_at → remove (mirrors production branch)
         let expired_key = schema_cache_key("c1", &Some("public".into()), "old");
-        state.schema_cache.insert(
+        state.service.schema_cache().insert(
             expired_key.clone(),
             (sample_meta("old"), Instant::now() - Duration::from_secs(1)),
         );
-        if let Some(cached) = state.schema_cache.get(&expired_key) {
+        if let Some(cached) = state.service.schema_cache().get(&expired_key) {
             let (_meta, expires_at) = cached.clone();
             assert!(Instant::now() >= expires_at);
             drop(cached);
-            state.schema_cache.remove(&expired_key);
+            state.service.schema_cache().remove(&expired_key);
         }
-        assert!(state.schema_cache.get(&expired_key).is_none());
+        assert!(state.service.schema_cache().get(&expired_key).is_none());
     }
 
     // ── Tunnel registry ───────────────────────────────────────────────────────
@@ -1956,7 +1078,7 @@ mod group_b_tests {
     #[test]
     fn appstate_tunnels_map_starts_empty() {
         let fx = make_fixture();
-        assert!(fx.app.state::<AppState>().tunnels.is_empty());
+        assert!(fx.app.state::<AppState>().service.tunnels().is_empty());
     }
 
     /// Full cleanup (reconnect closes old tunnel; failing test_connection_with_ssh
@@ -1964,7 +1086,7 @@ mod group_b_tests {
     #[tokio::test]
     #[ignore = "needs live SSH; overlaps Group C tunnel tests — see plan Group B tunnel registry"]
     async fn tunnel_ephemeral_teardown_on_test_connection_failure_live_ssh() {
-        // Stub: when SSH is available, assert state.tunnels is empty after a failing
+        // Stub: when SSH is available, assert state.service.tunnels() is empty after a failing
         // test_connection_with_ssh and that the forwarded local port can be rebound.
         panic!("not implemented without live SSH");
     }
@@ -1985,15 +1107,11 @@ mod group_b_tests {
     fn make_fixture() -> TestFixture {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-b-{id}");
-        let config = ConfigManager::new(&app_name).expect("ConfigManager");
         let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
-        let vault_path = cleanup_dir.join("vault.enc");
         let state = AppState {
-            config,
-            db: DbManager::new(),
-            tunnels: dashmap::DashMap::new(),
-            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
-            schema_cache: dashmap::DashMap::new(),
+            service: Arc::new(
+                sqlator_service::AppService::with_app_name(&app_name).expect("AppService"),
+            ),
             terminals: dashmap::DashMap::new(),
         };
         let app = tauri::test::mock_builder()

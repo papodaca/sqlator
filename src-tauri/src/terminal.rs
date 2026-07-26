@@ -369,7 +369,7 @@ pub async fn spawn_db_terminal(
     rows: u16,
     on_data: Channel<String>,
 ) -> CmdResult<String> {
-    let connections = state.config.get_connections().map_err(map_err)?;
+    let connections = state.service.config().get_connections().map_err(map_err)?;
     let conn = connections
         .iter()
         .find(|c| c.id == connection_id)
@@ -384,7 +384,8 @@ pub async fn spawn_db_terminal(
                 .as_ref()
                 .ok_or("DockerContainer connection requires an SSH profile")?;
             let profile = state
-                .config
+                .service
+                .config()
                 .get_ssh_profile(ssh_profile_id)
                 .map_err(map_err)?
                 .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
@@ -392,23 +393,26 @@ pub async fn spawn_db_terminal(
                 .container_name
                 .as_deref()
                 .ok_or("DockerContainer connection requires a container name")?;
-            let auth = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-                .map_err(|e| e.message())?;
+            let auth = sqlator_service::build_auth_config_for_profile(
+                &profile,
+                state.service.credentials(),
+            )
+            .map_err(|e| e.message())?;
             ssh_docker_exec_spec(&conn, &profile, &auth, container)?
         }
         // Local Docker: docker exec -it <container> <cli>
         ConnectionType::LocalDockerContainer => docker_exec_cli_spec(&conn)?,
-        // SSH tunnel: the tunnel is already forwarded to localhost:local_port
-        _ if state.tunnels.contains_key(&connection_id) => {
-            let local_port = state
-                .tunnels
-                .get(&connection_id)
-                .map(|t| t.local_port)
-                .unwrap();
-            direct_cli_spec(&conn, "127.0.0.1", local_port)?
+        // SSH tunnel or direct: prefer shared tunnel local port when present
+        _ => {
+            if let Some(local_port) = state
+                .service
+                .tunnel_local_port_for_connection(&connection_id)
+            {
+                direct_cli_spec(&conn, "127.0.0.1", local_port)?
+            } else {
+                direct_cli_spec(&conn, &conn.host.clone(), conn.port)?
+            }
         }
-        // Direct connection
-        _ => direct_cli_spec(&conn, &conn.host.clone(), conn.port)?,
     };
 
     let binary_path = resolve_binary(&spec.binary)?;

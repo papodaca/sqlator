@@ -58,7 +58,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     });
 
     let _ = state
-        .db
+        .service
+        .db()
         .execute_query(&request.connection_id, &request.sql, tx)
         .await;
 

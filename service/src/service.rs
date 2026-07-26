@@ -3,6 +3,9 @@
 //! Owns config, pools, profile+target tunnels, credentials, and the schema TTL
 //! cache.
 
+use crate::connection_source::{
+    ConfigConnectionSource, ConnectionSource, SingleDbConnectionSource, SingleDbInfo,
+};
 use crate::error::ServiceError;
 use crate::tunnels::{ManagedTunnel, TunnelKey};
 use dashmap::DashMap;
@@ -15,7 +18,7 @@ use std::time::Instant;
 
 /// Central application layer between `sqlator-core` and frontends.
 pub struct AppService {
-    pub(crate) config: ConfigManager,
+    pub(crate) config: Arc<ConfigManager>,
     pub(crate) db: DbManager,
     /// Tunnel registry keyed by [`TunnelKey`] `(profile_id, target_host, target_port)`.
     pub(crate) tunnels: DashMap<TunnelKey, ManagedTunnel>,
@@ -24,19 +27,46 @@ pub struct AppService {
     pub(crate) credentials: Arc<CredentialStore>,
     /// Cache: key = `connection_id:schema:table_name` → `(TableMeta, expiry)`.
     pub(crate) schema_cache: DashMap<String, (TableMeta, Instant)>,
+    /// Multi-db config store or fixed single-db singleton.
+    pub(crate) connection_source: Arc<dyn ConnectionSource>,
 }
 
 impl AppService {
     /// Construct with the same on-disk layout as today's Tauri/web `AppState`.
     pub fn new() -> Result<Self, ServiceError> {
-        let config = ConfigManager::new("sqlator")?;
+        Self::with_app_name("sqlator")
+    }
 
-        let vault_path = dirs::config_dir()
-            .ok_or_else(|| {
-                ServiceError::app("CONFIG_ERROR", "Could not determine config directory")
-            })?
-            .join("sqlator")
-            .join("vault.enc");
+    /// Construct using a custom config app name (isolated fixtures / tests).
+    pub fn with_app_name(app_name: &str) -> Result<Self, ServiceError> {
+        let config = Arc::new(ConfigManager::new(app_name)?);
+        let connection_source: Arc<dyn ConnectionSource> =
+            Arc::new(ConfigConnectionSource::new(Arc::clone(&config)));
+        Self::from_parts(config, connection_source)
+    }
+
+    /// Single-database mode (web `-c` / future GTK `--config`).
+    ///
+    /// Pre-connects the pool so the first page load has no cold-start delay.
+    pub async fn with_single_db(url: String, name: String) -> Result<Self, ServiceError> {
+        let config = Arc::new(ConfigManager::new("sqlator")?);
+        let source = SingleDbConnectionSource::new(url.clone(), name)?;
+        let connection_id = source
+            .single_db_info()
+            .expect("single-db source always has info")
+            .connection_id
+            .clone();
+        let connection_source: Arc<dyn ConnectionSource> = Arc::new(source);
+        let service = Self::from_parts(config, connection_source)?;
+        service.db.connect(&connection_id, &url).await?;
+        Ok(service)
+    }
+
+    fn from_parts(
+        config: Arc<ConfigManager>,
+        connection_source: Arc<dyn ConnectionSource>,
+    ) -> Result<Self, ServiceError> {
+        let vault_path = config.vault_path();
 
         let stored_mode = config.get_storage_mode()?;
         let mode = match stored_mode.as_deref() {
@@ -62,6 +92,7 @@ impl AppService {
             connection_tunnels: DashMap::new(),
             credentials,
             schema_cache: DashMap::new(),
+            connection_source,
         })
     }
 
@@ -84,4 +115,29 @@ impl AppService {
     pub fn schema_cache(&self) -> &DashMap<String, (TableMeta, Instant)> {
         &self.schema_cache
     }
+
+    pub fn connection_source(&self) -> &dyn ConnectionSource {
+        self.connection_source.as_ref()
+    }
+
+    /// Single-db chrome metadata when running with a fixed connection source.
+    pub fn single_db_info(&self) -> Option<&SingleDbInfo> {
+        self.connection_source.single_db_info()
+    }
+
+    /// Guard for connection CRUD / import.
+    pub fn require_multi_db(&self) -> Result<(), ServiceError> {
+        self.connection_source.require_multi_db()
+    }
+}
+
+/// Run blocking config/vault work off the async runtime.
+pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T, ServiceError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ServiceError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ServiceError::app("BLOCKING_JOIN", format!("background task failed: {e}")))?
 }

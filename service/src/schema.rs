@@ -3,10 +3,13 @@
 //! Exactly one regex fallback lives here — the plan-007-corrected implementation
 //! (comma/`JOIN` checks apply only inside the delimited FROM region).
 
+use crate::error::ServiceError;
+use crate::service::AppService;
 use sqlator_core::models::{PrimaryKeyMeta, TableMeta};
 use sqlparser::ast::{SetExpr, Statement, TableFactor};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use std::time::{Duration, Instant};
 
 /// Schema metadata cache TTL used by both frontends (5 minutes).
 pub const SCHEMA_CACHE_TTL_SECS: u64 = 300;
@@ -211,6 +214,59 @@ fn split_schema_table(token: &str) -> Option<(String, Option<String>)> {
             Some(unquote_ident(&token[..i])),
         )),
         None => Some((unquote_ident(token), None)),
+    }
+}
+
+// ── AppService schema-cache fetch ─────────────────────────────────────────────
+
+impl AppService {
+    /// Resolve editability metadata for a SQL query, using the TTL cache.
+    pub async fn fetch_schema_metadata_for_sql(
+        &self,
+        connection_id: &str,
+        sql: &str,
+    ) -> Result<Option<TableMeta>, ServiceError> {
+        let is_select = {
+            let trimmed = sql.trim().to_uppercase();
+            trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
+        };
+        if !is_select {
+            return Ok(None);
+        }
+
+        let (table_name, schema_name) = match extract_single_table(sql) {
+            TableExtract::Found(t, s) => (t, s),
+            TableExtract::NotSingleTable => {
+                return Ok(Some(non_editable_meta(
+                    "Cannot edit: query joins multiple tables or uses a subquery",
+                )));
+            }
+            TableExtract::Undetermined => {
+                return Ok(Some(non_editable_meta(
+                    "Cannot determine a single source table for this query",
+                )));
+            }
+        };
+
+        let cache_key = schema_cache_key(connection_id, &schema_name, &table_name);
+        if let Some(cached) = self.schema_cache.get(&cache_key) {
+            let (meta, expires_at) = cached.clone();
+            if Instant::now() < expires_at {
+                return Ok(Some(meta));
+            }
+            drop(cached);
+            self.schema_cache.remove(&cache_key);
+        }
+
+        let meta = self
+            .db
+            .fetch_schema_metadata(connection_id, &table_name, schema_name.as_deref())
+            .await?;
+
+        let expires = Instant::now() + Duration::from_secs(SCHEMA_CACHE_TTL_SECS);
+        self.schema_cache.insert(cache_key, (meta.clone(), expires));
+
+        Ok(Some(meta))
     }
 }
 

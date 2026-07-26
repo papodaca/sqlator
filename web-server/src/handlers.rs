@@ -6,22 +6,17 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use sqlator_core::{
-    credentials::{CredentialStore, StorageMode, VaultSettings},
-    db::DbManager,
-    docker::inspector::ContainerInspector,
-    models::{
-        BatchResult, ConnectionConfig, ConnectionGroup, ConnectionInfo, SavedConnection,
-        SchemaColumnInfo, SchemaInfo, SqlBatch, SshProfile, TableInfo, TableQueryParams,
-        TableQueryResult,
-    },
-    ssh::{config_parser, SshAuthConfig, SshHostConfig, SshTunnel},
+use sqlator_core::credentials::VaultSettings;
+use sqlator_core::models::{
+    ConnectionConfig, ConnectionGroup, SchemaColumnInfo, SchemaInfo, SqlBatch, TableInfo,
+    TableQueryParams, TableQueryResult,
 };
+use sqlator_core::ssh::config_parser;
+use sqlator_core::BatchResult;
 use std::sync::Arc;
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
-// Inner handlers return plain Value; dispatch() wraps it in Json.
 type HandlerResult = Result<Value, (StatusCode, String)>;
 
 fn err(msg: impl std::fmt::Display) -> (StatusCode, String) {
@@ -39,7 +34,7 @@ fn server_err(msg: impl std::fmt::Display) -> (StatusCode, String) {
 /// Extract a required field from the JSON args body.
 fn get<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, (StatusCode, String)> {
     serde_json::from_value(args[key].clone())
-        .map_err(|e| err(format!("missing/invalid '{}': {}", key, e)))
+        .map_err(|e| err(format!("missing/invalid '{key}': {e}")))
 }
 
 /// Extract an optional field (returns None if missing or null).
@@ -48,13 +43,12 @@ fn get_opt<T: serde::de::DeserializeOwned>(
     key: &str,
 ) -> Result<Option<T>, (StatusCode, String)> {
     let v = &args[key];
-    // serde_json returns Value::Null for both missing keys and explicit nulls
     if v.is_null() {
         return Ok(None);
     }
     serde_json::from_value(v.clone())
         .map(Some)
-        .map_err(|e| err(format!("invalid '{}': {}", key, e)))
+        .map_err(|e| err(format!("invalid '{key}': {e}")))
 }
 
 // ── Main dispatch handler ─────────────────────────────────────────────────────
@@ -78,80 +72,421 @@ async fn handle(command: &str, state: &Arc<AppState>, args: &Value) -> HandlerRe
         "server-info" => server_info(state),
 
         // ── Connection CRUD ───────────────────────────────────────────────────
-        "get-connections" => get_connections(state).await,
-        "save-connection" => require_multi_db(state, || save_connection(state, args)).await,
-        "update-connection" => require_multi_db(state, || update_connection(state, args)).await,
-        "clone-connection" => require_multi_db(state, || clone_connection(state, args)).await,
-        "delete-connection" => require_multi_db(state, || delete_connection(state, args)).await,
-        "test-connection" => test_connection(args).await,
-        "connect-database" => connect_database(state, args).await,
-        "disconnect-database" => disconnect_database(state, args).await,
-
-        // ── Query & tab state ─────────────────────────────────────────────────
-        "get-query" => get_query(state, args).await,
-        "save-query" => save_query(state, args).await,
-        "get-tab-state" => get_tab_state(state).await,
-        "save-tab-state" => save_tab_state(state, args).await,
-
-        // ── Theme ─────────────────────────────────────────────────────────────
-        "get-theme" => get_theme(state).await,
-        "save-theme" => save_theme(state, args).await,
-
-        // ── SSH config & profiles ─────────────────────────────────────────────
-        "list-ssh-hosts" => list_ssh_hosts().await,
-        "get-ssh-profiles" => get_ssh_profiles(state).await,
-        "save-ssh-profile" => save_ssh_profile(state, args).await,
-        "update-ssh-profile" => update_ssh_profile(state, args).await,
-        "delete-ssh-profile" => delete_ssh_profile(state, args).await,
-        "connections-using-ssh-profile" => connections_using_ssh_profile(state, args).await,
-
-        // ── SSH tunnels ───────────────────────────────────────────────────────
-        "create-ssh-tunnel" => create_ssh_tunnel(state, args).await,
-        "close-ssh-tunnel" => close_ssh_tunnel(state, args).await,
-        "get-active-tunnels" => get_active_tunnels(state).await,
-
-        // ── Credential storage ────────────────────────────────────────────────
-        "check-keyring-available" => Ok(json!(CredentialStore::keyring_available())),
-        "get-storage-mode" => get_storage_mode(state).await,
-        "set-storage-mode" => set_storage_mode(state, args).await,
-        "vault-exists" => Ok(json!(state.credentials.vault.is_initialized())),
-        "is-vault-locked" => Ok(json!(state.credentials.vault.is_locked())),
-        "create-vault" => create_vault(state, args).await,
-        "unlock-vault" => unlock_vault(state, args).await,
-        "lock-vault" => {
-            state.credentials.vault.lock();
+        "get-connections" => Ok(json!(state
+            .service
+            .list_connections()
+            .await
+            .map_err(map_svc)?)),
+        "save-connection" => {
+            let config: ConnectionConfig = get(args, "config")?;
+            Ok(json!(state
+                .service
+                .save_connection(config)
+                .await
+                .map_err(map_svc)?))
+        }
+        "update-connection" => {
+            let id: String = get(args, "id")?;
+            let config: ConnectionConfig = get(args, "config")?;
+            Ok(json!(state
+                .service
+                .update_connection(id, config)
+                .await
+                .map_err(map_svc)?))
+        }
+        "clone-connection" => {
+            let id: String = get(args, "id")?;
+            Ok(json!(state
+                .service
+                .clone_connection(id)
+                .await
+                .map_err(map_svc)?))
+        }
+        "delete-connection" => {
+            let id: String = get(args, "id")?;
+            state.service.delete_connection(id).await.map_err(map_svc)?;
             Ok(json!(null))
         }
-        "get-vault-settings" => get_vault_settings(state).await,
-        "save-vault-settings" => save_vault_settings(state, args).await,
+        "test-connection" => {
+            let url: String = get(args, "url")?;
+            Ok(json!(state
+                .service
+                .test_connection(&url)
+                .await
+                .map_err(map_svc)?))
+        }
+        "connect-database" => {
+            let id: String = get(args, "id")?;
+            state.service.connect_database(&id).await.map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "disconnect-database" => {
+            let id: String = get(args, "id")?;
+            state
+                .service
+                .disconnect_database(&id)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+
+        // ── Query & tab state ─────────────────────────────────────────────────
+        "get-query" => {
+            let connection_id: String = get(args, "connectionId")?;
+            Ok(json!(state
+                .service
+                .get_query(connection_id)
+                .await
+                .map_err(map_svc)?))
+        }
+        "save-query" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let query: String = get(args, "query")?;
+            state
+                .service
+                .save_query(connection_id, query)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "get-tab-state" => Ok(json!(state
+            .service
+            .get_tab_state()
+            .await
+            .map_err(map_svc)?)),
+        "save-tab-state" => {
+            let tab_state = args["tabState"].clone();
+            state
+                .service
+                .save_tab_state(tab_state)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+
+        // ── Theme ─────────────────────────────────────────────────────────────
+        "get-theme" => Ok(json!(state.service.get_theme().await.map_err(map_svc)?)),
+        "save-theme" => {
+            let theme: String = get(args, "theme")?;
+            state.service.save_theme(theme).await.map_err(map_svc)?;
+            Ok(json!(null))
+        }
+
+        // ── SSH config & profiles ─────────────────────────────────────────────
+        "list-ssh-hosts" => Ok(json!(config_parser::load_ssh_config().map_err(err)?)),
+        "get-ssh-profiles" => Ok(json!(state.service.get_ssh_profiles().map_err(map_svc)?)),
+        "save-ssh-profile" => {
+            let config: sqlator_service::SshProfileConfig = get(args, "config")?;
+            Ok(json!(state
+                .service
+                .save_ssh_profile(config)
+                .map_err(map_svc)?))
+        }
+        "update-ssh-profile" => {
+            let id: String = get(args, "id")?;
+            let config: sqlator_service::SshProfileConfig = get(args, "config")?;
+            Ok(json!(state
+                .service
+                .update_ssh_profile(&id, config)
+                .map_err(map_svc)?))
+        }
+        "delete-ssh-profile" => {
+            let id: String = get(args, "id")?;
+            state.service.delete_ssh_profile(&id).map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "connections-using-ssh-profile" => {
+            let profile_id: String = get(args, "profileId")?;
+            Ok(json!(state
+                .service
+                .connections_using_ssh_profile(&profile_id)
+                .map_err(map_svc)?))
+        }
+
+        // ── SSH tunnels ───────────────────────────────────────────────────────
+        "create-ssh-tunnel" => {
+            let request: sqlator_service::SshTunnelRequest = get(args, "request")?;
+            Ok(json!(state
+                .service
+                .create_ssh_tunnel(request)
+                .await
+                .map_err(map_svc)?))
+        }
+        "close-ssh-tunnel" => {
+            let profile_id: String = get(args, "profileId")?;
+            state
+                .service
+                .close_ssh_tunnel(&profile_id)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "get-active-tunnels" => Ok(json!(state.service.get_active_tunnels())),
+
+        // ── Credential storage ────────────────────────────────────────────────
+        "check-keyring-available" => Ok(json!(sqlator_service::AppService::keyring_available())),
+        "get-storage-mode" => Ok(json!(state
+            .service
+            .get_storage_mode()
+            .await
+            .map_err(map_svc)?)),
+        "set-storage-mode" => {
+            let mode: String = get(args, "mode")?;
+            let migrate: bool = get(args, "migrate")?;
+            state
+                .service
+                .set_storage_mode(mode, migrate)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "vault-exists" => Ok(json!(state
+            .service
+            .vault_exists()
+            .await
+            .map_err(map_svc)?)),
+        "is-vault-locked" => Ok(json!(state
+            .service
+            .is_vault_locked()
+            .await
+            .map_err(map_svc)?)),
+        "create-vault" => {
+            let password: String = get(args, "password")?;
+            state
+                .service
+                .create_vault(password)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "unlock-vault" => {
+            let password: String = get(args, "password")?;
+            state
+                .service
+                .unlock_vault(password)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "lock-vault" => {
+            state.service.lock_vault().await.map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "get-vault-settings" => Ok(json!(state
+            .service
+            .get_vault_settings()
+            .await
+            .map_err(map_svc)?)),
+        "save-vault-settings" => {
+            let settings: VaultSettings = get(args, "settings")?;
+            state
+                .service
+                .save_vault_settings(settings)
+                .await
+                .map_err(map_svc)?;
+            Ok(json!(null))
+        }
 
         // ── Connection groups ─────────────────────────────────────────────────
-        "get-groups" => get_groups(state).await,
-        "save-group" => save_group(state, args).await,
-        "update-group" => update_group(state, args).await,
-        "delete-group" => delete_group(state, args).await,
-        "move-connection-to-group" => move_connection_to_group(state, args).await,
+        "get-groups" => Ok(json!(state.service.get_groups().await.map_err(map_svc)?)),
+        "save-group" => {
+            let payload: sqlator_service::SaveGroupPayload = get(args, "payload")?;
+            Ok(json!(state
+                .service
+                .save_group(payload)
+                .await
+                .map_err(map_svc)?))
+        }
+        "update-group" => {
+            let group: ConnectionGroup = get(args, "group")?;
+            Ok(json!(state
+                .service
+                .update_group(group)
+                .await
+                .map_err(map_svc)?))
+        }
+        "delete-group" => {
+            let id: String = get(args, "id")?;
+            state.service.delete_group(id).await.map_err(map_svc)?;
+            Ok(json!(null))
+        }
+        "move-connection-to-group" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let group_id: Option<String> = get_opt(args, "groupId")?;
+            Ok(json!(state
+                .service
+                .move_connection_to_group(connection_id, group_id)
+                .await
+                .map_err(map_svc)?))
+        }
 
         // ── Import / Export ───────────────────────────────────────────────────
         "export-connections" => export_connections(state).await,
-        "import-connections" => import_connections(state, args).await,
+        "import-connections" => {
+            let json_str: String = get(args, "json")?;
+            let duplicate_mode: String = get(args, "duplicateMode")?;
+            Ok(json!(state
+                .service
+                .import_connections(json_str, duplicate_mode)
+                .await
+                .map_err(map_svc)?))
+        }
 
         // ── URL parsing ───────────────────────────────────────────────────────
-        "parse-connection-url" => parse_connection_url(args).await,
-        "test-connection-with-ssh" => test_connection_with_ssh(state, args).await,
+        "parse-connection-url" => {
+            let url_str: String = get(args, "url")?;
+            Ok(json!(
+                sqlator_service::parse_connection_url(&url_str).map_err(map_svc)?
+            ))
+        }
+        "test-connection-with-ssh" => {
+            let url: String = get(args, "url")?;
+            let ssh_profile_id: String = get(args, "sshProfileId")?;
+            Ok(json!(state
+                .service
+                .test_connection_with_ssh(&url, &ssh_profile_id)
+                .await
+                .map_err(map_svc)?))
+        }
 
         // ── Schema & query ────────────────────────────────────────────────────
-        "fetch-schema-metadata" => fetch_schema_metadata(state, args).await,
-        "get-schemas" => get_schemas(state, args).await,
-        "get-tables" => get_tables(state, args).await,
-        "get-columns" => get_columns(state, args).await,
-        "query-table" => query_table(state, args).await,
-        "execute-batch" => execute_batch(state, args).await,
-        "discover-container" => discover_container(state, args).await,
-        "list-running-containers" => list_running_containers(state, args).await,
-        "test-docker-connection" => test_docker_connection(state, args).await,
+        "fetch-schema-metadata" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let sql: String = get(args, "sql")?;
+            Ok(json!(state
+                .service
+                .fetch_schema_metadata_for_sql(&connection_id, &sql)
+                .await
+                .map_err(map_svc)?))
+        }
+        "get-schemas" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let schemas: Vec<SchemaInfo> = state
+                .service
+                .db()
+                .get_schemas(&connection_id)
+                .await
+                .map_err(err)?;
+            Ok(json!(schemas))
+        }
+        "get-tables" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let schema: Option<String> = get_opt(args, "schema")?;
+            let tables: Vec<TableInfo> = state
+                .service
+                .db()
+                .get_tables(&connection_id, schema.as_deref())
+                .await
+                .map_err(err)?;
+            Ok(json!(tables))
+        }
+        "get-columns" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let table_name: String = get(args, "tableName")?;
+            let schema: Option<String> = get_opt(args, "schema")?;
+            let cols: Vec<SchemaColumnInfo> = state
+                .service
+                .db()
+                .get_columns(&connection_id, &table_name, schema.as_deref())
+                .await
+                .map_err(err)?;
+            Ok(json!(cols))
+        }
+        "query-table" => {
+            let params: TableQueryParams = get(args, "params")?;
+            let connection_id = params.connection_id.clone();
+            let result: TableQueryResult = state
+                .service
+                .db()
+                .query_table(&connection_id, &params)
+                .await
+                .map_err(err)?;
+            Ok(json!(result))
+        }
+        "get-ddl" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let table_name: String = get(args, "tableName")?;
+            let schema: Option<String> = get_opt(args, "schema")?;
+            let ddl = state
+                .service
+                .db()
+                .get_ddl(&connection_id, &table_name, schema.as_deref())
+                .await
+                .map_err(err)?;
+            Ok(json!(ddl))
+        }
+        "execute-batch" => {
+            let connection_id: String = get(args, "connectionId")?;
+            let batch: SqlBatch = get(args, "batch")?;
+            let result: BatchResult = state
+                .service
+                .db()
+                .execute_batch(&connection_id, &batch)
+                .await
+                .map_err(err)?;
+            Ok(json!(result))
+        }
 
-        other => Err(err(format!("unknown command: {}", other))),
+        // ── Docker ────────────────────────────────────────────────────────────
+        "discover-container" => {
+            let ssh_profile_id: String = get(args, "sshProfileId")?;
+            let container_name: String = get(args, "containerName")?;
+            Ok(json!(state
+                .service
+                .discover_container(&ssh_profile_id, &container_name)
+                .await
+                .map_err(map_svc)?))
+        }
+        "list-running-containers" => {
+            let ssh_profile_id: String = get(args, "sshProfileId")?;
+            Ok(json!(state
+                .service
+                .list_running_containers(&ssh_profile_id)
+                .await
+                .map_err(map_svc)?))
+        }
+        "test-docker-connection" => {
+            let ssh_profile_id: String = get(args, "sshProfileId")?;
+            let container_name: String = get(args, "containerName")?;
+            let container_port: u16 = get(args, "containerPort")?;
+            let url: String = get(args, "url")?;
+            Ok(json!(state
+                .service
+                .test_docker_connection(
+                    &ssh_profile_id,
+                    &container_name,
+                    Some(container_port),
+                    &url,
+                    "",
+                )
+                .await
+                .map_err(map_svc)?))
+        }
+        "discover-local-container" => {
+            let container_name: String = get(args, "containerName")?;
+            Ok(json!(state
+                .service
+                .discover_local_container(&container_name)
+                .await
+                .map_err(map_svc)?))
+        }
+        "list-local-containers" => Ok(json!(state
+            .service
+            .list_local_containers()
+            .await
+            .map_err(map_svc)?)),
+        "test-local-docker-connection" => {
+            let container_name: String = get(args, "containerName")?;
+            let container_port: u16 = get(args, "containerPort")?;
+            let url: String = get(args, "url")?;
+            Ok(json!(state
+                .service
+                .test_local_docker_connection(&container_name, Some(container_port), &url, "")
+                .await
+                .map_err(map_svc)?))
+        }
+
+        other => Err(err(format!("unknown command: {other}"))),
     }
 }
 
@@ -183,7 +518,7 @@ pub async fn export_file(Query(q): Query<ExportFileQuery>) -> impl IntoResponse 
 // ── Server info ───────────────────────────────────────────────────────────────
 
 fn server_info(state: &Arc<AppState>) -> HandlerResult {
-    match &state.single_db {
+    match state.service.single_db_info() {
         Some(cfg) => Ok(json!({
             "mode": "single-db",
             "connectionId": cfg.connection_id,
@@ -193,1072 +528,32 @@ fn server_info(state: &Arc<AppState>) -> HandlerResult {
     }
 }
 
-/// Returns an error if the server is running in single-db mode.
-async fn require_multi_db<F, Fut>(state: &Arc<AppState>, f: F) -> HandlerResult
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = HandlerResult>,
-{
-    if state.single_db.is_some() {
-        return Err(err("connection management is disabled in single-db mode"));
-    }
-    f().await
-}
-
-// ── Connection CRUD ───────────────────────────────────────────────────────────
-
-async fn get_connections(state: &Arc<AppState>) -> HandlerResult {
-    // In single-db mode return a synthetic locked connection.
-    if let Some(cfg) = &state.single_db {
-        let parsed = url::Url::parse(&cfg.url).map_err(err)?;
-        let db_type = match parsed.scheme() {
-            "postgres" | "postgresql" => "postgres",
-            "mysql" => "mysql",
-            "mariadb" => "mariadb",
-            "sqlite" => "sqlite",
-            "mssql" | "sqlserver" | "tds" => "mssql",
-            "oracle" => "oracle",
-            "clickhouse" => "clickhouse",
-            _ => "unknown",
-        };
-        return Ok(json!([{
-            "id": cfg.connection_id,
-            "name": cfg.connection_name,
-            "color_id": "blue",
-            "db_type": db_type,
-            "host": parsed.host_str().unwrap_or("localhost"),
-            "port": parsed.port().unwrap_or(0),
-            "database": parsed.path().trim_start_matches('/'),
-            "username": parsed.username(),
-            "masked_url": mask_url(&cfg.url),
-            "ssh_profile_id": null,
-            "group_id": null,
-        }]));
-    }
-    let config = state.config.lock().await;
-    let connections = config.get_connections().map_err(err)?;
-    let infos: Vec<ConnectionInfo> = connections.iter().map(ConnectionInfo::from).collect();
-    Ok(json!(infos))
-}
-
-fn mask_url(url: &str) -> String {
-    if let Ok(mut parsed) = url::Url::parse(url) {
-        if parsed.password().is_some() {
-            let _ = parsed.set_password(Some("***"));
-        }
-        parsed.to_string()
-    } else {
-        url.to_string()
-    }
-}
-
-async fn save_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let config: ConnectionConfig = get(args, "config")?;
-    let conn = sqlator_service::build_saved_connection(uuid::Uuid::new_v4().to_string(), config)
-        .map_err(map_svc)?;
-    state
-        .config
-        .lock()
-        .await
-        .save_connection(conn.clone())
-        .map_err(err)?;
-    Ok(json!(ConnectionInfo::from(&conn)))
-}
-
-async fn update_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    let config: ConnectionConfig = get(args, "config")?;
-    let conn = sqlator_service::build_saved_connection(id, config).map_err(map_svc)?;
-    state
-        .config
-        .lock()
-        .await
-        .update_connection(conn.clone())
-        .map_err(err)?;
-    Ok(json!(ConnectionInfo::from(&conn)))
-}
-
-async fn clone_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    let config = state.config.lock().await;
-    let connections = config.get_connections().map_err(err)?;
-    let original = connections
-        .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| err(format!("connection '{}' not found", id)))?;
-    let mut cloned = original.clone();
-    cloned.id = uuid::Uuid::new_v4().to_string();
-    cloned.name = format!("{} (Copy)", original.name);
-    drop(config);
-    state
-        .config
-        .lock()
-        .await
-        .save_connection(cloned.clone())
-        .map_err(err)?;
-    Ok(json!(ConnectionInfo::from(&cloned)))
-}
-
-async fn delete_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    state.db.disconnect(&id).await;
-    state
-        .config
-        .lock()
-        .await
-        .delete_connection(&id)
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn test_connection(args: &Value) -> HandlerResult {
-    let url: String = get(args, "url")?;
-    let result = DbManager::test_connection(&url).await.map_err(err)?;
-    Ok(json!(result))
-}
-
-async fn connect_database(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    // In single-db mode the pool is pre-connected at startup — no-op.
-    if let Some(cfg) = &state.single_db {
-        if id == cfg.connection_id {
-            return Ok(json!(null));
-        }
-        return Err(err("cannot connect to other databases in single-db mode"));
-    }
-    let config = state.config.lock().await;
-    let connections = config.get_connections().map_err(err)?;
-    let conn = connections
-        .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| err(format!("connection '{}' not found", id)))?;
-    let url = conn.url.clone();
-    drop(config);
-    state.db.connect(&id, &url).await.map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn disconnect_database(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    state.db.disconnect(&id).await;
-    Ok(json!(null))
-}
-
-// ── Query & tab state ─────────────────────────────────────────────────────────
-
-async fn get_query(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let q = state
-        .config
-        .lock()
-        .await
-        .get_query(&connection_id)
-        .map_err(err)?;
-    Ok(json!(q))
-}
-
-async fn save_query(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let query: String = get(args, "query")?;
-    state
-        .config
-        .lock()
-        .await
-        .save_query(&connection_id, &query)
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn get_tab_state(state: &Arc<AppState>) -> HandlerResult {
-    let ts = state.config.lock().await.get_tab_state().map_err(err)?;
-    Ok(json!(ts))
-}
-
-async fn save_tab_state(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let tab_state = args["tabState"].clone();
-    state
-        .config
-        .lock()
-        .await
-        .save_tab_state(tab_state)
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-// ── Theme ─────────────────────────────────────────────────────────────────────
-
-async fn get_theme(state: &Arc<AppState>) -> HandlerResult {
-    let theme = state.config.lock().await.get_theme().map_err(err)?;
-    Ok(json!(theme))
-}
-
-async fn save_theme(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let theme: String = get(args, "theme")?;
-    state.config.lock().await.save_theme(&theme).map_err(err)?;
-    Ok(json!(null))
-}
-
-// ── SSH config ────────────────────────────────────────────────────────────────
-
-async fn list_ssh_hosts() -> HandlerResult {
-    let hosts = config_parser::load_ssh_config().map_err(err)?;
-    Ok(json!(hosts))
-}
-
-// ── SSH profiles ──────────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct SshProfileConfig {
-    name: String,
-    host: String,
-    port: u16,
-    username: String,
-    auth_method: String,
-    key_path: Option<String>,
-    password: Option<String>,
-    key_passphrase: Option<String>,
-    proxy_jump: Vec<sqlator_core::models::SshJumpHost>,
-    local_port_binding: Option<u16>,
-    keepalive_interval: Option<u32>,
-}
-
-async fn get_ssh_profiles(state: &Arc<AppState>) -> HandlerResult {
-    let profiles = state.config.lock().await.get_ssh_profiles().map_err(err)?;
-    Ok(json!(profiles))
-}
-
-async fn save_ssh_profile(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let c: SshProfileConfig = get(args, "config")?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let auth_method = sqlator_service::parse_auth_method(&c.auth_method).map_err(map_svc)?;
-    let profile = SshProfile {
-        id: id.clone(),
-        name: c.name,
-        host: c.host,
-        port: c.port,
-        username: c.username,
-        auth_method,
-        key_path: c.key_path,
-        proxy_jump: c.proxy_jump,
-        local_port_binding: c.local_port_binding,
-        keepalive_interval: c.keepalive_interval,
-    };
-    state
-        .config
-        .lock()
-        .await
-        .save_ssh_profile(profile.clone())
-        .map_err(err)?;
-    store_ssh_credentials(
-        state,
-        &id,
-        c.password.as_deref(),
-        c.key_passphrase.as_deref(),
-    )?;
-    Ok(json!(profile))
-}
-
-async fn update_ssh_profile(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    let c: SshProfileConfig = get(args, "config")?;
-    {
-        let config = state.config.lock().await;
-        config
-            .get_ssh_profile(&id)
-            .map_err(err)?
-            .ok_or_else(|| err(format!("SSH profile '{}' not found", id)))?;
-    }
-    let auth_method = sqlator_service::parse_auth_method(&c.auth_method).map_err(map_svc)?;
-    let profile = SshProfile {
-        id: id.clone(),
-        name: c.name,
-        host: c.host,
-        port: c.port,
-        username: c.username,
-        auth_method,
-        key_path: c.key_path,
-        proxy_jump: c.proxy_jump,
-        local_port_binding: c.local_port_binding,
-        keepalive_interval: c.keepalive_interval,
-    };
-    state
-        .config
-        .lock()
-        .await
-        .update_ssh_profile(profile.clone())
-        .map_err(err)?;
-    store_ssh_credentials(
-        state,
-        &id,
-        c.password.as_deref(),
-        c.key_passphrase.as_deref(),
-    )?;
-    Ok(json!(profile))
-}
-
-fn store_ssh_credentials(
-    state: &Arc<AppState>,
-    id: &str,
-    password: Option<&str>,
-    passphrase: Option<&str>,
-) -> Result<(), (StatusCode, String)> {
-    if let Some(pw) = password {
-        if !pw.is_empty() {
-            state
-                .credentials
-                .store_credential(id, "password", pw)
-                .map_err(err)?;
-        }
-    }
-    if let Some(pp) = passphrase {
-        if !pp.is_empty() {
-            state
-                .credentials
-                .store_credential(id, "passphrase", pp)
-                .map_err(err)?;
-        }
-    }
-    Ok(())
-}
-
-async fn delete_ssh_profile(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    state
-        .config
-        .lock()
-        .await
-        .delete_ssh_profile(&id)
-        .map_err(err)?;
-    state.credentials.delete_all_credentials(&id).map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn connections_using_ssh_profile(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let profile_id: String = get(args, "profileId")?;
-    let ids = state
-        .config
-        .lock()
-        .await
-        .connections_using_profile(&profile_id)
-        .map_err(err)?;
-    Ok(json!(ids))
-}
-
-// ── SSH tunnels ───────────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct SshTunnelRequest {
-    profile_id: String,
-    host: String,
-    port: u16,
-    username: String,
-    auth_method: String,
-    key_path: Option<String>,
-    key_passphrase: Option<String>,
-    password: Option<String>,
-    target_host: String,
-    target_port: u16,
-}
-
-#[derive(serde::Serialize)]
-struct SshTunnelInfo {
-    profile_id: String,
-    local_port: u16,
-    target_host: String,
-    target_port: u16,
-}
-
-async fn create_ssh_tunnel(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let req: SshTunnelRequest = get(args, "request")?;
-    let auth_config = match req.auth_method.as_str() {
-        "key" => {
-            let key_path = req.key_path.clone().unwrap_or_default();
-            if let Some(passphrase) = &req.key_passphrase {
-                SshAuthConfig::with_key_and_passphrase(&req.username, key_path, passphrase)
-            } else {
-                SshAuthConfig::with_key(&req.username, key_path)
-            }
-        }
-        "password" => {
-            let pw = req.password.clone().unwrap_or_default();
-            SshAuthConfig::with_password(&req.username, pw)
-        }
-        "agent" => SshAuthConfig::with_agent(&req.username),
-        m => return Err(err(format!("unsupported auth method: {}", m))),
-    };
-
-    let ssh_config = SshHostConfig::new(&req.host, req.port, auth_config.clone());
-    let tunnel = SshTunnel::create(
-        req.profile_id.clone(),
-        &ssh_config,
-        auth_config,
-        req.target_host.clone(),
-        req.target_port,
-        vec![],
-    )
-    .await
-    .map_err(err)?;
-
-    SshTunnel::start_forwarding(&tunnel).await.map_err(err)?;
-
-    let info = SshTunnelInfo {
-        profile_id: tunnel.profile_id.clone(),
-        local_port: tunnel.local_port,
-        target_host: tunnel.target_host.clone(),
-        target_port: tunnel.target_port,
-    };
-    state.tunnels.insert(req.profile_id, tunnel);
-    Ok(json!(info))
-}
-
-async fn close_ssh_tunnel(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let profile_id: String = get(args, "profileId")?;
-    let (_, tunnel) = state
-        .tunnels
-        .remove(&profile_id)
-        .ok_or_else(|| err(format!("tunnel '{}' not found", profile_id)))?;
-    SshTunnel::close(tunnel).await.map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn get_active_tunnels(state: &Arc<AppState>) -> HandlerResult {
-    let tunnels: Vec<SshTunnelInfo> = state
-        .tunnels
-        .iter()
-        .map(|e| SshTunnelInfo {
-            profile_id: e.profile_id.clone(),
-            local_port: e.local_port,
-            target_host: e.target_host.clone(),
-            target_port: e.target_port,
-        })
-        .collect();
-    Ok(json!(tunnels))
-}
-
-// ── Credential storage ────────────────────────────────────────────────────────
-
-async fn get_storage_mode(state: &Arc<AppState>) -> HandlerResult {
-    Ok(json!(state.credentials.mode().to_string()))
-}
-
-async fn set_storage_mode(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let mode_str: String = get(args, "mode")?;
-    let migrate: bool = get(args, "migrate")?;
-    let new_mode: StorageMode = mode_str.parse().map_err(err)?;
-
-    if migrate {
-        let profiles = state.config.lock().await.get_ssh_profiles().map_err(err)?;
-        let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
-        state.credentials.migrate_to(&new_mode, &ids).map_err(err)?;
-    }
-
-    state.credentials.set_mode(new_mode);
-    state
-        .config
-        .lock()
-        .await
-        .save_storage_mode(&mode_str)
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn create_vault(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let password: String = get(args, "password")?;
-    state.credentials.vault.create(&password).map_err(err)?;
-    state.credentials.set_mode(StorageMode::Vault);
-    state
-        .config
-        .lock()
-        .await
-        .save_storage_mode("vault")
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn unlock_vault(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let password: String = get(args, "password")?;
-    state.credentials.vault.unlock(&password).map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn get_vault_settings(state: &Arc<AppState>) -> HandlerResult {
-    let timeout_secs = state
-        .config
-        .lock()
-        .await
-        .get_vault_timeout_secs()
-        .map_err(err)?;
-    Ok(json!(VaultSettings { timeout_secs }))
-}
-
-async fn save_vault_settings(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let settings: VaultSettings = get(args, "settings")?;
-    state.credentials.vault.set_timeout(settings.timeout_secs);
-    state
-        .config
-        .lock()
-        .await
-        .save_vault_timeout_secs(settings.timeout_secs)
-        .map_err(err)?;
-    Ok(json!(null))
-}
-
-// ── Connection groups ─────────────────────────────────────────────────────────
-
-async fn get_groups(state: &Arc<AppState>) -> HandlerResult {
-    let groups = state.config.lock().await.get_groups().map_err(err)?;
-    Ok(json!(groups))
-}
-
-#[derive(serde::Deserialize)]
-struct SaveGroupPayload {
-    name: String,
-    color: Option<String>,
-    parent_group_id: Option<String>,
-}
-
-async fn save_group(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let payload: SaveGroupPayload = get(args, "payload")?;
-    let config = state.config.lock().await;
-    let groups = config.get_groups().map_err(err)?;
-    let order = groups.len() as u32;
-    drop(config);
-    let group = ConnectionGroup {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: payload.name,
-        color: payload.color,
-        parent_group_id: payload.parent_group_id,
-        order,
-        collapsed: false,
-    };
-    state
-        .config
-        .lock()
-        .await
-        .save_group(group.clone())
-        .map_err(err)?;
-    Ok(json!(group))
-}
-
-async fn update_group(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let group: ConnectionGroup = get(args, "group")?;
-    state
-        .config
-        .lock()
-        .await
-        .update_group(group.clone())
-        .map_err(err)?;
-    Ok(json!(group))
-}
-
-async fn delete_group(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let id: String = get(args, "id")?;
-    state.config.lock().await.delete_group(&id).map_err(err)?;
-    Ok(json!(null))
-}
-
-async fn move_connection_to_group(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let group_id: Option<String> = get_opt(args, "groupId")?;
-    let config = state.config.lock().await;
-    config
-        .move_connection_to_group(&connection_id, group_id.as_deref())
-        .map_err(err)?;
-    let connections = config.get_connections().map_err(err)?;
-    let conn = connections
-        .iter()
-        .find(|c| c.id == connection_id)
-        .ok_or_else(|| err(format!("connection '{}' not found", connection_id)))?;
-    Ok(json!(ConnectionInfo::from(conn)))
-}
-
-// ── Import / Export ───────────────────────────────────────────────────────────
-
-fn build_export(
-    state_config: &sqlator_core::config::ConfigManager,
-) -> Result<String, (StatusCode, String)> {
-    let connections = state_config.get_connections().map_err(err)?;
-    let profiles = state_config.get_ssh_profiles().map_err(err)?;
-    let groups = state_config.get_groups().map_err(err)?;
-    sqlator_service::build_export_json(&connections, &profiles, &groups).map_err(map_svc)
-}
+// ── Import / Export (web persists to a downloadable temp path) ─────────────────
 
 async fn export_connections(state: &Arc<AppState>) -> HandlerResult {
-    let config = state.config.lock().await;
-    let json = build_export(&config)?;
-    drop(config);
+    let json = state
+        .service
+        .export_connections_json()
+        .await
+        .map_err(map_svc)?;
 
-    // Write to a temp file; the web-adapter's openPath will call GET /api/export-file?path=
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let filename = format!("sqlator-export-{}.json", date);
+    let filename = format!("sqlator-export-{date}.json");
     let dir = dirs::download_dir()
         .or_else(dirs::home_dir)
-        .or_else(|| std::env::temp_dir().into())
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        .unwrap_or_else(std::env::temp_dir);
     let path = dir.join(&filename);
     std::fs::write(&path, &json).map_err(server_err)?;
     Ok(json!(path.to_string_lossy()))
 }
 
-async fn import_connections(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let json_str: String = get(args, "json")?;
-    let duplicate_mode: String = get(args, "duplicateMode")?;
-    let rename = duplicate_mode == "rename";
-    let file = sqlator_service::parse_export_json(&json_str).map_err(map_svc)?;
-
-    let config = state.config.lock().await;
-    let existing_groups = config.get_groups().map_err(err)?;
-    let existing_group_names: std::collections::HashSet<String> =
-        existing_groups.iter().map(|g| g.name.clone()).collect();
-    let mut group_id_map: std::collections::HashMap<String, String> = existing_groups
-        .iter()
-        .map(|g| (g.name.clone(), g.id.clone()))
-        .collect();
-    let mut groups_added = 0usize;
-
-    let mut remaining: Vec<&sqlator_service::ExportedGroup> = file.groups.iter().collect();
-    for _ in 0..3 {
-        let mut next = Vec::new();
-        for eg in remaining {
-            if let Some(ref pn) = eg.parent_group_name {
-                if !group_id_map.contains_key(pn.as_str()) {
-                    next.push(eg);
-                    continue;
-                }
-            }
-            if existing_group_names.contains(&eg.name) {
-                continue;
-            }
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let group = ConnectionGroup {
-                id: new_id.clone(),
-                name: eg.name.clone(),
-                color: eg.color.clone(),
-                parent_group_id: eg
-                    .parent_group_name
-                    .as_ref()
-                    .and_then(|n| group_id_map.get(n))
-                    .cloned(),
-                order: eg.order,
-                collapsed: false,
-            };
-            config.save_group(group).map_err(err)?;
-            group_id_map.insert(eg.name.clone(), new_id);
-            groups_added += 1;
-        }
-        remaining = next;
-        if remaining.is_empty() {
-            break;
-        }
-    }
-
-    let existing_profiles = config.get_ssh_profiles().map_err(err)?;
-    let existing_profile_names: std::collections::HashSet<String> =
-        existing_profiles.iter().map(|p| p.name.clone()).collect();
-    let mut profile_id_map: std::collections::HashMap<String, String> = existing_profiles
-        .iter()
-        .map(|p| (p.name.clone(), p.id.clone()))
-        .collect();
-    let mut profiles_added = 0usize;
-
-    for ep in &file.ssh_profiles {
-        let final_name = if existing_profile_names.contains(&ep.name) {
-            if !rename {
-                continue;
-            }
-            sqlator_service::unique_name(&ep.name, &profile_id_map.keys().cloned().collect())
-        } else {
-            ep.name.clone()
-        };
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let auth_method = sqlator_service::parse_auth_method(&ep.auth_method).map_err(map_svc)?;
-        let profile = SshProfile {
-            id: new_id.clone(),
-            name: final_name.clone(),
-            host: ep.host.clone(),
-            port: ep.port,
-            username: ep.username.clone(),
-            auth_method,
-            key_path: ep.key_path.clone(),
-            proxy_jump: ep
-                .proxy_jump
-                .iter()
-                .map(|j| sqlator_core::models::SshJumpHost {
-                    host: j.host.clone(),
-                    port: j.port,
-                    username: j.username.clone(),
-                    auth_method: sqlator_service::parse_auth_method(&j.auth_method)
-                        .unwrap_or(sqlator_core::models::SshAuthMethod::Key),
-                    key_path: j.key_path.clone(),
-                })
-                .collect(),
-            local_port_binding: None,
-            keepalive_interval: None,
-        };
-        config.save_ssh_profile(profile).map_err(err)?;
-        profile_id_map.insert(ep.name.clone(), new_id);
-        profiles_added += 1;
-    }
-
-    let existing_conns = config.get_connections().map_err(err)?;
-    let existing_conn_names: std::collections::HashSet<String> =
-        existing_conns.iter().map(|c| c.name.clone()).collect();
-    let mut all_conn_names = existing_conn_names.clone();
-    let mut connections_added = 0usize;
-    let mut connections_skipped = 0usize;
-
-    for ec in &file.connections {
-        let final_name = if existing_conn_names.contains(&ec.name) {
-            if !rename {
-                connections_skipped += 1;
-                continue;
-            }
-            sqlator_service::unique_name(&ec.name, &all_conn_names)
-        } else {
-            ec.name.clone()
-        };
-        let url = sqlator_service::build_url_no_password(
-            &ec.db_type,
-            &ec.host,
-            ec.port,
-            &ec.database,
-            &ec.username,
-        );
-        let conn = SavedConnection {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: final_name.clone(),
-            color_id: ec.color_id.clone(),
-            db_type: ec.db_type.clone(),
-            host: ec.host.clone(),
-            port: ec.port,
-            database: ec.database.clone(),
-            username: ec.username.clone(),
-            url,
-            ssh_profile_id: ec
-                .ssh_profile_name
-                .as_ref()
-                .and_then(|n| profile_id_map.get(n))
-                .cloned(),
-            group_id: ec
-                .group_name
-                .as_ref()
-                .and_then(|n| group_id_map.get(n))
-                .cloned(),
-            connection_type: sqlator_core::models::ConnectionType::default(),
-            container_name: None,
-            container_port: None,
-        };
-        config.save_connection(conn).map_err(err)?;
-        all_conn_names.insert(final_name);
-        connections_added += 1;
-    }
-
-    Ok(json!(sqlator_service::ImportResult {
-        groups_added,
-        profiles_added,
-        connections_added,
-        connections_skipped
-    }))
-}
-
-// ── URL parsing ───────────────────────────────────────────────────────────────
-
-async fn parse_connection_url(args: &Value) -> HandlerResult {
-    let url_str: String = get(args, "url")?;
-    let parsed = sqlator_service::parse_connection_url(&url_str).map_err(map_svc)?;
-    Ok(json!(parsed))
-}
-
-async fn test_connection_with_ssh(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let url: String = get(args, "url")?;
-    let ssh_profile_id: String = get(args, "sshProfileId")?;
-
-    let profile = state
-        .config
-        .lock()
-        .await
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(err)?
-        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
-
-    let parsed_url = url::Url::parse(&url).map_err(err)?;
-    let target_host = parsed_url.host_str().unwrap_or("localhost").to_string();
-    let db_type = sqlator_service::db_type_from_url(&url).map_err(map_svc)?;
-    let target_port = parsed_url
-        .port()
-        .unwrap_or_else(|| sqlator_service::default_port_for_db_type(db_type));
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-
-    let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
-    let tunnel = SshTunnel::create(
-        tunnel_id,
-        &ssh_config,
-        auth_config,
-        target_host,
-        target_port,
-        vec![],
-    )
-    .await
-    .map_err(err)?;
-
-    SshTunnel::start_forwarding(&tunnel).await.map_err(err)?;
-    let local_port = tunnel.local_port;
-
-    let mut test_url = parsed_url.clone();
-    let _ = test_url.set_host(Some("127.0.0.1"));
-    let _ = test_url.set_port(Some(local_port));
-
-    let result = DbManager::test_connection(test_url.as_ref()).await;
-    SshTunnel::close(tunnel).await.ok();
-    let msg = result.map_err(err)?;
-    Ok(json!(msg))
-}
-
-// ── Schema metadata ───────────────────────────────────────────────────────────
-
-async fn fetch_schema_metadata(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let sql: String = get(args, "sql")?;
-
-    let is_select = {
-        let t = sql.trim().to_uppercase();
-        t.starts_with("SELECT") || t.starts_with("WITH")
-    };
-    if !is_select {
-        return Ok(json!(null));
-    }
-
-    let (table_name, schema_name) = match sqlator_service::extract_single_table(&sql) {
-        sqlator_service::TableExtract::Found(t, s) => (t, s),
-        sqlator_service::TableExtract::NotSingleTable => {
-            return Ok(json!(sqlator_service::non_editable_meta(
-                "Cannot edit: query joins multiple tables or uses a subquery",
-            )));
-        }
-        sqlator_service::TableExtract::Undetermined => {
-            return Ok(json!(sqlator_service::non_editable_meta(
-                "Cannot determine a single source table for this query",
-            )));
-        }
-    };
-
-    let cache_key = sqlator_service::schema_cache_key(&connection_id, &schema_name, &table_name);
-    if let Some(cached) = state.schema_cache.get(&cache_key) {
-        let (meta, expires_at) = cached.clone();
-        if std::time::Instant::now() < expires_at {
-            return Ok(json!(meta));
-        }
-        drop(cached);
-        state.schema_cache.remove(&cache_key);
-    }
-
-    let meta = state
-        .db
-        .fetch_schema_metadata(&connection_id, &table_name, schema_name.as_deref())
-        .await
-        .map_err(err)?;
-
-    let expires = std::time::Instant::now()
-        + std::time::Duration::from_secs(sqlator_service::SCHEMA_CACHE_TTL_SECS);
-    state
-        .schema_cache
-        .insert(cache_key, (meta.clone(), expires));
-    Ok(json!(meta))
-}
-
-async fn get_schemas(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let schemas: Vec<SchemaInfo> = state.db.get_schemas(&connection_id).await.map_err(err)?;
-    Ok(json!(schemas))
-}
-
-async fn get_tables(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let schema: Option<String> = get_opt(args, "schema")?;
-    let tables: Vec<TableInfo> = state
-        .db
-        .get_tables(&connection_id, schema.as_deref())
-        .await
-        .map_err(err)?;
-    Ok(json!(tables))
-}
-
-async fn get_columns(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let table_name: String = get(args, "tableName")?;
-    let schema: Option<String> = get_opt(args, "schema")?;
-    let cols: Vec<SchemaColumnInfo> = state
-        .db
-        .get_columns(&connection_id, &table_name, schema.as_deref())
-        .await
-        .map_err(err)?;
-    Ok(json!(cols))
-}
-
-async fn query_table(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let params: TableQueryParams = get(args, "params")?;
-    let connection_id = params.connection_id.clone();
-    let result: TableQueryResult = state
-        .db
-        .query_table(&connection_id, &params)
-        .await
-        .map_err(err)?;
-    Ok(json!(result))
-}
-
-async fn execute_batch(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let connection_id: String = get(args, "connectionId")?;
-    let batch: SqlBatch = get(args, "batch")?;
-    let result: BatchResult = state
-        .db
-        .execute_batch(&connection_id, &batch)
-        .await
-        .map_err(err)?;
-    Ok(json!(result))
-}
-
-// ── Docker Container Discovery ────────────────────────────────────────────────
-
-async fn discover_container(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let ssh_profile_id: String = get(args, "sshProfileId")?;
-    let container_name: String = get(args, "containerName")?;
-
-    let profile = state
-        .config
-        .lock()
-        .await
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(err)?
-        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let info = ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, &container_name)
-        .await
-        .map_err(|e| err(format!("{}", e)))?;
-
-    Ok(json!({
-        "ip_address": info.ip_address,
-        "status": match info.status {
-            sqlator_core::ContainerStatus::Running => "running",
-            sqlator_core::ContainerStatus::Stopped => "stopped",
-            sqlator_core::ContainerStatus::NotFound => "not_found",
-        },
-        "ports": info.ports,
-        "database_type_hint": info.database_type_hint,
-    }))
-}
-
-async fn list_running_containers(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let ssh_profile_id: String = get(args, "sshProfileId")?;
-
-    let profile = state
-        .config
-        .lock()
-        .await
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(err)?
-        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let containers = ContainerInspector::list_running(&ssh_config, auth_config, jump_hosts)
-        .await
-        .map_err(|e| err(format!("{}", e)))?;
-
-    Ok(json!(containers))
-}
-
-async fn test_docker_connection(state: &Arc<AppState>, args: &Value) -> HandlerResult {
-    let ssh_profile_id: String = get(args, "sshProfileId")?;
-    let container_name: String = get(args, "containerName")?;
-    let container_port: u16 = get(args, "containerPort")?;
-    let url: String = get(args, "url")?;
-
-    let profile = state
-        .config
-        .lock()
-        .await
-        .get_ssh_profile(&ssh_profile_id)
-        .map_err(err)?
-        .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
-
-    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
-        .map_err(map_svc)?;
-    let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
-
-    let container_info = ContainerInspector::inspect(
-        &ssh_config,
-        auth_config.clone(),
-        jump_hosts.clone(),
-        &container_name,
-    )
-    .await
-    .map_err(|e| err(format!("Docker inspect failed: {}", e)))?;
-
-    if container_info.status != sqlator_core::ContainerStatus::Running {
-        return Err(err(format!(
-            "Container '{}' is not running",
-            container_name
-        )));
-    }
-
-    let tunnel_id = format!("test-docker-{}", uuid::Uuid::new_v4());
-    let tunnel = SshTunnel::create(
-        tunnel_id,
-        &ssh_config,
-        auth_config,
-        container_info.ip_address.clone(),
-        container_port,
-        jump_hosts,
-    )
-    .await
-    .map_err(err)?;
-
-    SshTunnel::start_forwarding(&tunnel).await.map_err(err)?;
-    let local_port = tunnel.local_port;
-
-    let parsed_url = url::Url::parse(&url).map_err(err)?;
-    let mut test_url = parsed_url;
-    let _ = test_url.set_host(Some("127.0.0.1"));
-    let _ = test_url.set_port(Some(local_port));
-
-    let result = DbManager::test_connection(test_url.as_ref()).await;
-    SshTunnel::close(tunnel).await.ok();
-    let msg = result.map_err(err)?;
-    Ok(json!(msg))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod group_a_tests {
     use super::*;
-    use sqlator_core::config::ConfigManager;
-    use sqlator_core::credentials::{CredentialStore, StorageMode};
-    use sqlator_core::db::DbManager;
     use sqlator_core::models::{ConnectionGroup, ConnectionType, SshAuthMethod, SshProfile};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    // Pure helpers moved to sqlator-service; characterization tests live there.
-
-    // Pure helpers live in sqlator-service now.
-    // extract_single_table tests live in sqlator-service::schema.
-
-    // ── import / export fixtures ──────────────────────────────────────────────
 
     struct TestFixture {
         state: Arc<AppState>,
@@ -1274,16 +569,11 @@ mod group_a_tests {
     fn make_fixture() -> TestFixture {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-a-web-{id}");
-        let config = ConfigManager::new(&app_name).expect("ConfigManager");
         let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
-        let vault_path = cleanup_dir.join("vault.enc");
         let state = Arc::new(AppState {
-            config: Mutex::new(config),
-            db: DbManager::new(),
-            tunnels: dashmap::DashMap::new(),
-            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
-            schema_cache: dashmap::DashMap::new(),
-            single_db: None,
+            service: Arc::new(
+                sqlator_service::AppService::with_app_name(&app_name).expect("AppService"),
+            ),
         });
         TestFixture { state, cleanup_dir }
     }
@@ -1304,6 +594,10 @@ mod group_a_tests {
         json!({ "json": json, "duplicateMode": mode })
     }
 
+    async fn import_connections_handler(state: &Arc<AppState>, args: &Value) -> HandlerResult {
+        handle("import-connections", state, args).await
+    }
+
     #[tokio::test]
     async fn import_nested_groups_remaps_parent_ids() {
         let fx = make_fixture();
@@ -1316,12 +610,12 @@ mod group_a_tests {
             "[]",
             "[]",
         );
-        let result = import_connections(&fx.state, &import_args(&payload, "skip"))
+        let result = import_connections_handler(&fx.state, &import_args(&payload, "skip"))
             .await
             .expect("import");
         assert_eq!(result["groups_added"], 3);
 
-        let groups = fx.state.config.lock().await.get_groups().unwrap();
+        let groups = fx.state.service.config().get_groups().unwrap();
         assert_eq!(groups.len(), 3);
         let parent = groups.iter().find(|g| g.name == "parent").unwrap();
         let child = groups.iter().find(|g| g.name == "child").unwrap();
@@ -1346,11 +640,11 @@ mod group_a_tests {
             "[]",
             "[]",
         );
-        let result = import_connections(&fx.state, &import_args(&payload, "skip"))
+        let result = import_connections_handler(&fx.state, &import_args(&payload, "skip"))
             .await
             .expect("import");
         assert_eq!(result["groups_added"], 2);
-        let groups = fx.state.config.lock().await.get_groups().unwrap();
+        let groups = fx.state.service.config().get_groups().unwrap();
         let parent = groups.iter().find(|g| g.name == "parent").unwrap();
         let child = groups.iter().find(|g| g.name == "child").unwrap();
         assert_eq!(child.parent_group_id.as_deref(), Some(parent.id.as_str()));
@@ -1367,18 +661,11 @@ mod group_a_tests {
             "[]",
             "[]",
         );
-        let result = import_connections(&fx.state, &import_args(&payload, "skip"))
+        let result = import_connections_handler(&fx.state, &import_args(&payload, "skip"))
             .await
             .expect("import");
         assert_eq!(result["groups_added"], 0);
-        assert!(fx
-            .state
-            .config
-            .lock()
-            .await
-            .get_groups()
-            .unwrap()
-            .is_empty());
+        assert!(fx.state.service.config().get_groups().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1386,9 +673,8 @@ mod group_a_tests {
         let fx = make_fixture();
         let existing_id = uuid::Uuid::new_v4().to_string();
         fx.state
-            .config
-            .lock()
-            .await
+            .service
+            .config()
             .save_group(ConnectionGroup {
                 id: existing_id.clone(),
                 name: "Shared".into(),
@@ -1404,16 +690,16 @@ mod group_a_tests {
             "[]",
             "[]",
         );
-        let result = import_connections(&fx.state, &import_args(&payload, "rename"))
+        let result = import_connections_handler(&fx.state, &import_args(&payload, "rename"))
             .await
             .expect("import rename");
         assert_eq!(result["groups_added"], 0);
-        let groups = fx.state.config.lock().await.get_groups().unwrap();
+        let groups = fx.state.service.config().get_groups().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].id, existing_id);
         assert_eq!(groups[0].color.as_deref(), Some("#111"));
 
-        let result = import_connections(&fx.state, &import_args(&payload, "skip"))
+        let result = import_connections_handler(&fx.state, &import_args(&payload, "skip"))
             .await
             .expect("import skip");
         assert_eq!(result["groups_added"], 0);
@@ -1423,10 +709,9 @@ mod group_a_tests {
     async fn import_connection_name_collision_skip_and_rename() {
         let fx = make_fixture();
         fx.state
-            .config
-            .lock()
-            .await
-            .save_connection(SavedConnection {
+            .service
+            .config()
+            .save_connection(sqlator_core::models::SavedConnection {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Prod".into(),
                 color_id: "blue".into(),
@@ -1462,32 +747,25 @@ mod group_a_tests {
             ]"#,
         );
 
-        let skip = import_connections(&fx.state, &import_args(&payload, "skip"))
+        let skip = import_connections_handler(&fx.state, &import_args(&payload, "skip"))
             .await
             .expect("skip");
         assert_eq!(skip["connections_added"], 0);
         assert_eq!(skip["connections_skipped"], 1);
         assert_eq!(
-            fx.state
-                .config
-                .lock()
-                .await
-                .get_connections()
-                .unwrap()
-                .len(),
+            fx.state.service.config().get_connections().unwrap().len(),
             1
         );
 
-        let rename = import_connections(&fx.state, &import_args(&payload, "rename"))
+        let rename = import_connections_handler(&fx.state, &import_args(&payload, "rename"))
             .await
             .expect("rename");
         assert_eq!(rename["connections_added"], 1);
         assert_eq!(rename["connections_skipped"], 0);
         let names: HashSet<_> = fx
             .state
-            .config
-            .lock()
-            .await
+            .service
+            .config()
             .get_connections()
             .unwrap()
             .into_iter()
@@ -1497,85 +775,89 @@ mod group_a_tests {
         assert!(names.contains("Prod (1)"));
     }
 
-    /// Ledger row 4: web import hard-codes `local_port_binding` / `keepalive_interval` to None.
-    /// This round-trip would fail today; keep it ignored until phase 1 adopts Tauri's winner.
     #[tokio::test]
-    #[ignore = "ledger row 4: web import drops local_port_binding / keepalive_interval"]
     async fn export_import_round_trip_preserves_ssh_tunnel_settings() {
         let fx = make_fixture();
         let profile_id = uuid::Uuid::new_v4().to_string();
-        {
-            let config = fx.state.config.lock().await;
-            config
-                .save_ssh_profile(SshProfile {
-                    id: profile_id.clone(),
-                    name: "bastion".into(),
-                    host: "ssh.example".into(),
-                    port: 22,
-                    username: "deploy".into(),
-                    auth_method: SshAuthMethod::Key,
-                    key_path: Some("/tmp/id_rsa".into()),
-                    proxy_jump: vec![],
-                    local_port_binding: Some(15432),
-                    keepalive_interval: Some(30),
-                })
-                .unwrap();
-            config
-                .save_group(ConnectionGroup {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: "Work".into(),
-                    color: None,
-                    parent_group_id: None,
-                    order: 0,
-                    collapsed: false,
-                })
-                .unwrap();
-            let group_id = config
-                .get_groups()
-                .unwrap()
-                .into_iter()
-                .find(|g| g.name == "Work")
-                .map(|g| g.id);
-            config
-                .save_connection(SavedConnection {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: "App DB".into(),
-                    color_id: "green".into(),
-                    db_type: "postgres".into(),
-                    host: "db.internal".into(),
-                    port: 5432,
-                    database: "app".into(),
-                    username: "app".into(),
-                    url: "postgres://app@db.internal:5432/app".into(),
-                    ssh_profile_id: Some(profile_id),
-                    group_id,
-                    connection_type: ConnectionType::SshTunnel,
-                    container_name: None,
-                    container_port: None,
-                })
-                .unwrap();
-        }
+        fx.state
+            .service
+            .config()
+            .save_ssh_profile(SshProfile {
+                id: profile_id.clone(),
+                name: "bastion".into(),
+                host: "ssh.example".into(),
+                port: 22,
+                username: "deploy".into(),
+                auth_method: SshAuthMethod::Key,
+                key_path: Some("/tmp/id_rsa".into()),
+                proxy_jump: vec![],
+                local_port_binding: Some(15432),
+                keepalive_interval: Some(30),
+            })
+            .unwrap();
+        fx.state
+            .service
+            .config()
+            .save_group(ConnectionGroup {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Work".into(),
+                color: None,
+                parent_group_id: None,
+                order: 0,
+                collapsed: false,
+            })
+            .unwrap();
+        let group_id = fx
+            .state
+            .service
+            .config()
+            .get_groups()
+            .unwrap()
+            .into_iter()
+            .find(|g| g.name == "Work")
+            .map(|g| g.id);
+        fx.state
+            .service
+            .config()
+            .save_connection(sqlator_core::models::SavedConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "App DB".into(),
+                color_id: "green".into(),
+                db_type: "postgres".into(),
+                host: "db.internal".into(),
+                port: 5432,
+                database: "app".into(),
+                username: "app".into(),
+                url: "postgres://app@db.internal:5432/app".into(),
+                ssh_profile_id: Some(profile_id),
+                group_id,
+                connection_type: ConnectionType::SshTunnel,
+                container_name: None,
+                container_port: None,
+            })
+            .unwrap();
 
-        let exported = {
-            let config = fx.state.config.lock().await;
-            build_export(&config).expect("export")
-        };
+        let exported = fx
+            .state
+            .service
+            .export_connections_json()
+            .await
+            .expect("export");
         assert!(
             !exported.to_lowercase().contains("password"),
             "export must not contain password material: {exported}"
         );
 
         let fx2 = make_fixture();
-        let result = import_connections(&fx2.state, &import_args(&exported, "skip"))
+        let result = import_connections_handler(&fx2.state, &import_args(&exported, "skip"))
             .await
             .expect("import");
         assert_eq!(result["groups_added"], 1);
         assert_eq!(result["profiles_added"], 1);
         assert_eq!(result["connections_added"], 1);
 
-        let profiles = fx2.state.config.lock().await.get_ssh_profiles().unwrap();
+        let profiles = fx2.state.service.config().get_ssh_profiles().unwrap();
         assert_eq!(profiles.len(), 1);
-        // These assertions fail on web today (ledger row 4) — that is why the test is ignored.
         assert_eq!(profiles[0].local_port_binding, Some(15432));
         assert_eq!(profiles[0].keepalive_interval, Some(30));
         assert_eq!(profiles[0].name, "bastion");
@@ -1585,16 +867,10 @@ mod group_a_tests {
 #[cfg(test)]
 mod group_b_tests {
     use super::*;
-    use sqlator_core::config::ConfigManager;
-    use sqlator_core::credentials::{CredentialStore, StorageMode};
-    use sqlator_core::db::DbManager;
     use sqlator_core::models::{PrimaryKeyMeta, TableMeta};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::sync::Mutex;
-
-    // ── Schema cache key format (same Debug-on-Option formula as Tauri) ───────
 
     use sqlator_service::schema_cache_key;
 
@@ -1631,7 +907,6 @@ mod group_b_tests {
 
     #[test]
     fn schema_cache_ttl_constant_is_300_seconds() {
-        // Production insert: Instant::now() + Duration::from_secs(sqlator_service::SCHEMA_CACHE_TTL_SECS)
         const SCHEMA_CACHE_TTL_SECS: u64 = sqlator_service::SCHEMA_CACHE_TTL_SECS;
         let expires = Instant::now() + Duration::from_secs(SCHEMA_CACHE_TTL_SECS);
         let remaining = expires.saturating_duration_since(Instant::now());
@@ -1644,7 +919,7 @@ mod group_b_tests {
         let key_hit = schema_cache_key("c1", &Some("public".into()), "users");
         let key_other = schema_cache_key("c1", &None, "users");
 
-        fx.state.schema_cache.insert(
+        fx.state.service.schema_cache().insert(
             key_hit.clone(),
             (
                 sample_meta("users"),
@@ -1653,31 +928,26 @@ mod group_b_tests {
         );
 
         {
-            let cached = fx.state.schema_cache.get(&key_hit).expect("hit");
+            let cached = fx.state.service.schema_cache().get(&key_hit).expect("hit");
             let (m, expires_at) = cached.clone();
             assert!(Instant::now() < expires_at);
             assert_eq!(m.table_name, "users");
         }
-        assert!(fx.state.schema_cache.get(&key_other).is_none());
+        assert!(fx.state.service.schema_cache().get(&key_other).is_none());
 
         let expired_key = schema_cache_key("c1", &Some("public".into()), "old");
-        fx.state.schema_cache.insert(
+        fx.state.service.schema_cache().insert(
             expired_key.clone(),
             (sample_meta("old"), Instant::now() - Duration::from_secs(1)),
         );
-        if let Some(cached) = fx.state.schema_cache.get(&expired_key) {
+        if let Some(cached) = fx.state.service.schema_cache().get(&expired_key) {
             let (_meta, expires_at) = cached.clone();
             assert!(Instant::now() >= expires_at);
             drop(cached);
-            fx.state.schema_cache.remove(&expired_key);
+            fx.state.service.schema_cache().remove(&expired_key);
         }
-        assert!(fx.state.schema_cache.get(&expired_key).is_none());
+        assert!(fx.state.service.schema_cache().get(&expired_key).is_none());
     }
-
-    // ── Tunnel registry ───────────────────────────────────────────────────────
-    // Web connect_database does not manage tunnels (ledger row 1). Ephemeral
-    // test_connection_with_ssh still closes its tunnel (handlers.rs close after test).
-    // Unit-test DashMap replace pattern; live SSH teardown → Group C / #[ignore].
 
     #[test]
     fn tunnel_registry_replace_same_id_does_not_leak_entries() {
@@ -1694,7 +964,7 @@ mod group_b_tests {
     #[test]
     fn appstate_tunnels_map_starts_empty() {
         let fx = make_fixture();
-        assert!(fx.state.tunnels.is_empty());
+        assert!(fx.state.service.tunnels().is_empty());
     }
 
     #[tokio::test]
@@ -1717,16 +987,11 @@ mod group_b_tests {
     fn make_fixture() -> TestFixture {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-b-web-{id}");
-        let config = ConfigManager::new(&app_name).expect("ConfigManager");
         let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
-        let vault_path = cleanup_dir.join("vault.enc");
         let state = Arc::new(AppState {
-            config: Mutex::new(config),
-            db: DbManager::new(),
-            tunnels: dashmap::DashMap::new(),
-            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
-            schema_cache: dashmap::DashMap::new(),
-            single_db: None,
+            service: Arc::new(
+                sqlator_service::AppService::with_app_name(&app_name).expect("AppService"),
+            ),
         });
         TestFixture { state, cleanup_dir }
     }

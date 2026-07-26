@@ -19,17 +19,18 @@ use tracing::{debug, info, warn};
 impl AppService {
     /// Connect a saved connection (direct / SSH tunnel / remote Docker / local Docker).
     pub async fn connect_database(&self, connection_id: &str) -> Result<(), ServiceError> {
-        let connections = self.config.get_connections()?;
-        let conn = connections
-            .iter()
-            .find(|c| c.id == connection_id)
-            .ok_or_else(|| {
-                ServiceError::app(
-                    "CONNECTION_NOT_FOUND",
-                    format!("Connection '{connection_id}' not found"),
-                )
-            })?
-            .clone();
+        // Single-db mode: pool is pre-connected at startup.
+        if let Some(info) = self.single_db_info() {
+            if connection_id == info.connection_id {
+                return Ok(());
+            }
+            return Err(ServiceError::app(
+                "SINGLE_DB_ONLY",
+                "cannot connect to other databases in single-db mode",
+            ));
+        }
+
+        let conn = self.find_saved_connection(connection_id)?;
 
         let url = match conn.connection_type {
             ConnectionType::DockerContainer => {

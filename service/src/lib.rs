@@ -16,10 +16,11 @@ pub mod ssh;
 pub mod terminal_spec;
 pub mod tunnels;
 
-pub use connection_source::ConnectionSource;
+pub use connection_source::{ConnectionSource, SingleDbInfo, SINGLE_DB_CONN_ID};
 pub use connections::{
     build_saved_connection, build_url_no_password, db_type_from_url, default_port_for_db_type,
     parse_connection_url, resolve_connection_type, unique_name, ParsedConnectionUrl,
+    SaveGroupPayload,
 };
 pub use docker::{ContainerPortInfo, ContainerSummaryInfo, DockerContainerInfo};
 pub use error::ServiceError;
