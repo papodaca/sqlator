@@ -39,8 +39,75 @@ impl QueryTab {
         );
 
         tab.setup_actions();
+        tab.setup_editor();
         tab.set_placeholder_sql();
         tab
+    }
+
+    fn setup_editor(&self) {
+        use sourceview::prelude::*;
+
+        let editor = self.imp().editor.get();
+        editor.set_smart_backspace(true);
+
+        let buffer = editor
+            .buffer()
+            .downcast::<sourceview::Buffer>()
+            .expect("GtkSource.View provides a SourceBuffer");
+        buffer.set_highlight_syntax(true);
+        buffer.set_highlight_matching_brackets(true);
+        buffer.set_enable_undo(true);
+        match sourceview::LanguageManager::default().language("sql") {
+            Some(language) => buffer.set_language(Some(&language)),
+            None => {
+                tracing::warn!("GtkSourceView sql language not found; editor will not highlight")
+            }
+        }
+        Self::apply_editor_style_scheme(&buffer);
+
+        // GtkSourceView is not libadwaita-aware — follow AdwStyleManager manually.
+        adw::StyleManager::default().connect_dark_notify(glib::clone!(
+            #[weak]
+            buffer,
+            move |_| {
+                Self::apply_editor_style_scheme(&buffer);
+            }
+        ));
+
+        // SourceView/TextView would otherwise insert a newline on Ctrl+Return
+        // before the application accelerator can activate tab.run.
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.set_scope(gtk::ShortcutScope::Local);
+        shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
+        for (trigger, action) in [
+            ("<Control>Return", "tab.run"),
+            ("<Control>KP_Enter", "tab.run"),
+            ("<Control><Shift>Return", "tab.run-all"),
+            ("<Control><Shift>KP_Enter", "tab.run-all"),
+            ("<Control><Alt>Return", "tab.run-selection"),
+            ("<Control><Alt>KP_Enter", "tab.run-selection"),
+        ] {
+            if let Some(trigger) = gtk::ShortcutTrigger::parse_string(trigger) {
+                shortcuts.add_shortcut(gtk::Shortcut::new(
+                    Some(trigger),
+                    Some(gtk::NamedAction::new(action)),
+                ));
+            }
+        }
+        editor.add_controller(shortcuts);
+    }
+
+    fn apply_editor_style_scheme(buffer: &sourceview::Buffer) {
+        use sourceview::prelude::*;
+        let name = if adw::StyleManager::default().is_dark() {
+            "Adwaita-dark"
+        } else {
+            "Adwaita"
+        };
+        match sourceview::StyleSchemeManager::default().scheme(name) {
+            Some(scheme) => buffer.set_style_scheme(Some(&scheme)),
+            None => tracing::warn!("GtkSourceView style scheme `{name}` not found"),
+        }
     }
 
     fn setup_actions(&self) {
