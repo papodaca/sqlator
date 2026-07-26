@@ -160,6 +160,20 @@ corpus.
 
 Any further divergences found while writing group A tests get appended here.
 
+### Found while writing Group A characterization tests
+
+| # | Behavior | Tauri | Web | Recommended winner |
+|---|---|---|---|---|
+| 8 | `parse_auth_method` unknown-method error string | `"Unknown auth method: {other}"` | `"unknown auth method: {}"` via `err()` (also wraps `StatusCode::BAD_REQUEST`) | Tauri (clearer casing); map to a typed error in phase 1 |
+| 9 | `default_port_for_db_type` helper | Present (`commands.rs`) — 5432/3306/3306/1433/1521/8123, unknown→0 | **Absent** as a standalone fn; port defaults live inside `detect_db_type(url)` which also validates the scheme | Tauri shape (pure `db_type → port`) in `sqlator-service`; web can call it after scheme detect |
+
+Notes pinned by Group A that are **not** divergences (same in both copies):
+
+- `unique_name` never returns `base` itself — always starts at `base (1)`.
+- `resolve_connection_type`: `container_name` alone (no SSH) falls through to `Direct`; there is no local-Docker inference path today.
+- Import **groups** always skip on name collision; `duplicate_mode` / `duplicateMode` only affects connections and SSH profiles.
+- Cyclic `parent_group_name` references are silently dropped after three passes (`groups_added == 0`).
+
 ---
 
 ## Technical Considerations
@@ -199,11 +213,11 @@ Any further divergences found while writing group A tests get appended here.
 
 ## Acceptance Criteria
 
-- [ ] Group A: every function in the table has inline tests covering the listed cases, in both
+- [x] Group A: every function in the table has inline tests covering the listed cases, in both
       `commands.rs` and `handlers.rs` where both copies exist
-- [ ] Group A: import re-parenting covered for nested groups, both duplicate policies, out-of-order
+- [x] Group A: import re-parenting covered for nested groups, both duplicate policies, out-of-order
       parents, and a cyclic parent reference
-- [ ] Group A: export → import round-trip test exists and **is marked `#[ignore]` with a ledger
+- [x] Group A: export → import round-trip test exists and **is marked `#[ignore]` with a ledger
       reference on the web side, where it currently fails**
 - [ ] Group B: vault idle-timeout, vault round-trip, `SshAuthConfig` zeroization + no-`Clone`
       guard, schema cache key/TTL, tunnel registry cleanup, and connect timeout all covered

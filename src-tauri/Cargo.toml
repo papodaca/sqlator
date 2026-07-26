@@ -30,3 +30,6 @@ sqlparser = "0.54"
 portable-pty = "0.8"
 base64 = "0.22"
 which = "7"
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

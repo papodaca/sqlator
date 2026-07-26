@@ -1676,3 +1676,65 @@ async fn execute_statement_any(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod group_a_tests {
+    use super::*;
+
+    #[test]
+    fn detect_database_type_every_scheme_alias() {
+        assert_eq!(
+            detect_database_type("postgres://h/db"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            detect_database_type("postgresql://h/db"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            detect_database_type("mysql://h/db"),
+            Some(DatabaseType::MySql)
+        );
+        assert_eq!(
+            detect_database_type("mariadb://h/db"),
+            Some(DatabaseType::MySql)
+        );
+        assert_eq!(
+            detect_database_type("sqlite:///tmp/x.db"),
+            Some(DatabaseType::Sqlite)
+        );
+        assert_eq!(
+            detect_database_type("mssql://h/db"),
+            Some(DatabaseType::Mssql)
+        );
+        assert_eq!(
+            detect_database_type("sqlserver://h/db"),
+            Some(DatabaseType::Mssql)
+        );
+        assert_eq!(
+            detect_database_type("tds://h/db"),
+            Some(DatabaseType::Mssql)
+        );
+        assert_eq!(
+            detect_database_type("oracle://h/db"),
+            Some(DatabaseType::Oracle)
+        );
+        assert_eq!(
+            detect_database_type("clickhouse://h/db"),
+            Some(DatabaseType::ClickHouse)
+        );
+    }
+
+    #[test]
+    fn detect_database_type_unknown_scheme_is_none() {
+        assert_eq!(detect_database_type("redis://h/db"), None);
+        assert_eq!(detect_database_type("http://h/db"), None);
+    }
+
+    #[test]
+    fn detect_database_type_malformed_without_scheme_separator() {
+        // No "://" → split yields the whole string as scheme → unknown → None
+        assert_eq!(detect_database_type("not-a-url"), None);
+        assert_eq!(detect_database_type(""), None);
+    }
+}

@@ -1936,3 +1936,539 @@ mod table_extract_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod group_a_tests {
+    use super::*;
+    use sqlator_core::config::ConfigManager;
+    use sqlator_core::credentials::{CredentialStore, StorageMode};
+    use sqlator_core::db::DbManager;
+    use sqlator_core::models::{ConnectionGroup, SshAuthMethod, SshProfile};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    // ── unique_name ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn unique_name_never_returns_base_even_when_free() {
+        // Characterization: impl always starts at "{base} (1)", never returns base itself.
+        let existing = HashSet::new();
+        assert_eq!(unique_name("alpha", &existing), "alpha (1)");
+    }
+
+    #[test]
+    fn unique_name_skips_taken_suffixes() {
+        let existing: HashSet<String> = ["alpha (1)".into(), "alpha (2)".into()].into();
+        assert_eq!(unique_name("alpha", &existing), "alpha (3)");
+    }
+
+    #[test]
+    fn unique_name_ignores_whether_base_itself_is_taken() {
+        let existing: HashSet<String> = ["alpha".into()].into();
+        assert_eq!(unique_name("alpha", &existing), "alpha (1)");
+    }
+
+    // ── build_url_no_password ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_url_no_password_all_engines() {
+        assert_eq!(
+            build_url_no_password("postgres", "h", 5432, "db", "u"),
+            "postgres://u@h:5432/db"
+        );
+        assert_eq!(
+            build_url_no_password("mysql", "h", 3306, "db", "u"),
+            "mysql://u@h:3306/db"
+        );
+        assert_eq!(
+            build_url_no_password("mariadb", "h", 3306, "db", "u"),
+            "mariadb://u@h:3306/db"
+        );
+        assert_eq!(
+            build_url_no_password("mssql", "h", 1433, "db", "u"),
+            "mssql://u@h:1433/db"
+        );
+        assert_eq!(
+            build_url_no_password("oracle", "h", 1521, "db", "u"),
+            "oracle://u@h:1521/db"
+        );
+        assert_eq!(
+            build_url_no_password("clickhouse", "h", 8123, "db", "u"),
+            "clickhouse://u@h:8123/db"
+        );
+        assert_eq!(
+            build_url_no_password("sqlite", "ignored", 0, "/tmp/x.db", "u"),
+            "sqlite:///tmp/x.db"
+        );
+    }
+
+    #[test]
+    fn build_url_no_password_empty_username_omits_at() {
+        assert_eq!(
+            build_url_no_password("postgres", "h", 5432, "db", ""),
+            "postgres://h:5432/db"
+        );
+    }
+
+    // ── resolve_connection_type ───────────────────────────────────────────────
+
+    fn conn_cfg(
+        connection_type: Option<ConnectionType>,
+        ssh_profile_id: Option<&str>,
+        container_name: Option<&str>,
+    ) -> ConnectionConfig {
+        ConnectionConfig {
+            name: "n".into(),
+            color_id: "c".into(),
+            url: "postgres://h/db".into(),
+            ssh_profile_id: ssh_profile_id.map(str::to_string),
+            group_id: None,
+            connection_type,
+            container_name: container_name.map(str::to_string),
+            container_port: None,
+        }
+    }
+
+    #[test]
+    fn resolve_connection_type_explicit_wins() {
+        let cfg = conn_cfg(Some(ConnectionType::Direct), Some("ssh"), Some("ctr"));
+        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
+
+        let cfg = conn_cfg(Some(ConnectionType::LocalDockerContainer), None, None);
+        assert_eq!(
+            resolve_connection_type(&cfg),
+            ConnectionType::LocalDockerContainer
+        );
+    }
+
+    #[test]
+    fn resolve_connection_type_inference_paths() {
+        // container + ssh → DockerContainer
+        let cfg = conn_cfg(None, Some("ssh"), Some("ctr"));
+        assert_eq!(resolve_connection_type(&cfg), ConnectionType::DockerContainer);
+
+        // ssh only → SshTunnel
+        let cfg = conn_cfg(None, Some("ssh"), None);
+        assert_eq!(resolve_connection_type(&cfg), ConnectionType::SshTunnel);
+
+        // plain → Direct
+        let cfg = conn_cfg(None, None, None);
+        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
+
+        // container alone does NOT infer LocalDockerContainer — falls through to Direct
+        let cfg = conn_cfg(None, None, Some("ctr"));
+        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
+    }
+
+    // ── default_port_for_db_type (Tauri-only) ─────────────────────────────────
+
+    #[test]
+    fn default_port_for_db_type_known_and_unknown() {
+        assert_eq!(default_port_for_db_type("postgres"), 5432);
+        assert_eq!(default_port_for_db_type("mysql"), 3306);
+        assert_eq!(default_port_for_db_type("mariadb"), 3306);
+        assert_eq!(default_port_for_db_type("mssql"), 1433);
+        assert_eq!(default_port_for_db_type("oracle"), 1521);
+        assert_eq!(default_port_for_db_type("clickhouse"), 8123);
+        assert_eq!(default_port_for_db_type("sqlite"), 0);
+        assert_eq!(default_port_for_db_type("nope"), 0);
+    }
+
+    // ── parse_auth_method ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_auth_method_key_password_agent() {
+        assert!(matches!(parse_auth_method("key"), Ok(SshAuthMethod::Key)));
+        assert!(matches!(
+            parse_auth_method("password"),
+            Ok(SshAuthMethod::Password)
+        ));
+        assert!(matches!(parse_auth_method("agent"), Ok(SshAuthMethod::Agent)));
+    }
+
+    #[test]
+    fn parse_auth_method_unknown_error_string() {
+        // Ledger row 8: Tauri uses "Unknown auth method: {other}"
+        assert_eq!(
+            parse_auth_method("token").unwrap_err(),
+            "Unknown auth method: token"
+        );
+    }
+
+    // ── extract_single_table (sqlparser path) ─────────────────────────────────
+
+    #[test]
+    fn extract_single_table_simple_select() {
+        match extract_single_table("SELECT a FROM t") {
+            TableExtract::Found(t, s) => {
+                assert_eq!(t, "t");
+                assert_eq!(s, None);
+            }
+            other => panic!("expected Found, got discriminant {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn extract_single_table_schema_qualified() {
+        match extract_single_table("SELECT a FROM public.users") {
+            TableExtract::Found(t, s) => {
+                assert_eq!(t, "users");
+                assert_eq!(s.as_deref(), Some("public"));
+            }
+            other => panic!("expected Found, got discriminant {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn extract_single_table_join_is_not_single() {
+        assert!(matches!(
+            extract_single_table("SELECT a FROM t1 JOIN t2 ON t1.id = t2.id"),
+            TableExtract::NotSingleTable
+        ));
+    }
+
+    #[test]
+    fn extract_single_table_subquery_is_not_single() {
+        assert!(matches!(
+            extract_single_table("SELECT a FROM (SELECT 1 AS a) AS sub"),
+            TableExtract::NotSingleTable
+        ));
+    }
+
+    #[test]
+    fn extract_single_table_cte_is_not_single() {
+        assert!(matches!(
+            extract_single_table("WITH c AS (SELECT 1 AS a) SELECT a FROM c"),
+            TableExtract::NotSingleTable
+        ));
+    }
+
+    #[test]
+    fn extract_single_table_non_select_is_not_single() {
+        assert!(matches!(
+            extract_single_table("INSERT INTO t (a) VALUES (1)"),
+            TableExtract::NotSingleTable
+        ));
+        assert!(matches!(
+            extract_single_table("UPDATE t SET a = 1"),
+            TableExtract::NotSingleTable
+        ));
+    }
+
+    // ── import / export fixtures ──────────────────────────────────────────────
+
+    struct TestFixture {
+        app: tauri::App<tauri::test::MockRuntime>,
+        cleanup_dir: PathBuf,
+    }
+
+    impl Drop for TestFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.cleanup_dir);
+        }
+    }
+
+    fn make_fixture() -> TestFixture {
+        let id = uuid::Uuid::new_v4();
+        let app_name = format!("sqlator-char-a-{id}");
+        let config = ConfigManager::new(&app_name).expect("ConfigManager");
+        let cleanup_dir = dirs::config_dir()
+            .expect("config dir")
+            .join(&app_name);
+        let vault_path = cleanup_dir.join("vault.enc");
+        let state = AppState {
+            config,
+            db: DbManager::new(),
+            tunnels: dashmap::DashMap::new(),
+            credentials: Arc::new(CredentialStore::new(vault_path, StorageMode::Vault)),
+            schema_cache: dashmap::DashMap::new(),
+            terminals: dashmap::DashMap::new(),
+        };
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        TestFixture { app, cleanup_dir }
+    }
+
+    fn empty_export_json(groups: &str, profiles: &str, connections: &str) -> String {
+        format!(
+            r#"{{
+              "version": "1.0",
+              "exported_at": "2026-01-01T00:00:00Z",
+              "groups": {groups},
+              "ssh_profiles": {profiles},
+              "connections": {connections}
+            }}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn import_nested_groups_remaps_parent_ids() {
+        let fx = make_fixture();
+        let json = empty_export_json(
+            r#"[
+              {"name": "child", "color": null, "parent_group_name": "parent", "order": 1},
+              {"name": "parent", "color": "fff", "parent_group_name": null, "order": 0},
+              {"name": "grandchild", "color": null, "parent_group_name": "child", "order": 2}
+            ]"#,
+            "[]",
+            "[]",
+        );
+        let result = import_connections(fx.app.state(), json, "skip".into())
+            .await
+            .expect("import");
+        assert_eq!(result.groups_added, 3);
+
+        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        assert_eq!(groups.len(), 3);
+        let parent = groups.iter().find(|g| g.name == "parent").unwrap();
+        let child = groups.iter().find(|g| g.name == "child").unwrap();
+        let grandchild = groups.iter().find(|g| g.name == "grandchild").unwrap();
+        assert!(parent.parent_group_id.is_none());
+        assert_eq!(child.parent_group_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(grandchild.parent_group_id.as_deref(), Some(child.id.as_str()));
+        // IDs are freshly generated UUIDs, not export-time names
+        assert_ne!(parent.id, "parent");
+    }
+
+    #[tokio::test]
+    async fn import_parent_appearing_later_in_file() {
+        let fx = make_fixture();
+        // Child listed before parent — three-pass algorithm must still link them.
+        let json = empty_export_json(
+            r#"[
+              {"name": "child", "color": null, "parent_group_name": "parent", "order": 1},
+              {"name": "parent", "color": null, "parent_group_name": null, "order": 0}
+            ]"#,
+            "[]",
+            "[]",
+        );
+        let result = import_connections(fx.app.state(), json, "skip".into())
+            .await
+            .expect("import");
+        assert_eq!(result.groups_added, 2);
+        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        let parent = groups.iter().find(|g| g.name == "parent").unwrap();
+        let child = groups.iter().find(|g| g.name == "child").unwrap();
+        assert_eq!(child.parent_group_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn import_cyclic_parent_silently_drops_cycle() {
+        let fx = make_fixture();
+        let json = empty_export_json(
+            r#"[
+              {"name": "a", "color": null, "parent_group_name": "b", "order": 0},
+              {"name": "b", "color": null, "parent_group_name": "a", "order": 1}
+            ]"#,
+            "[]",
+            "[]",
+        );
+        let result = import_connections(fx.app.state(), json, "skip".into())
+            .await
+            .expect("import");
+        // After 3 passes neither side of the cycle can resolve — both dropped.
+        assert_eq!(result.groups_added, 0);
+        assert!(fx.app.state::<AppState>().config.get_groups().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_group_name_collision_always_skips_even_under_rename() {
+        let fx = make_fixture();
+        let existing_id = uuid::Uuid::new_v4().to_string();
+        fx.app
+            .state::<AppState>()
+            .config
+            .save_group(ConnectionGroup {
+                id: existing_id.clone(),
+                name: "Shared".into(),
+                color: Some("#111".into()),
+                parent_group_id: None,
+                order: 0,
+                collapsed: false,
+            })
+            .unwrap();
+
+        let json = empty_export_json(
+            r#"[{"name": "Shared", "color": "222", "parent_group_name": null, "order": 5}]"#,
+            "[]",
+            "[]",
+        );
+        // Groups ignore duplicate_mode — always skip on name collision.
+        let result = import_connections(fx.app.state(), json.clone(), "rename".into())
+            .await
+            .expect("import rename");
+        assert_eq!(result.groups_added, 0);
+        let groups = fx.app.state::<AppState>().config.get_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, existing_id);
+        assert_eq!(groups[0].color.as_deref(), Some("#111"));
+
+        let result = import_connections(fx.app.state(), json, "skip".into())
+            .await
+            .expect("import skip");
+        assert_eq!(result.groups_added, 0);
+    }
+
+    #[tokio::test]
+    async fn import_connection_name_collision_skip_and_rename() {
+        let fx = make_fixture();
+        fx.app
+            .state::<AppState>()
+            .config
+            .save_connection(sqlator_core::models::SavedConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Prod".into(),
+                color_id: "blue".into(),
+                db_type: "postgres".into(),
+                host: "localhost".into(),
+                port: 5432,
+                database: "db".into(),
+                username: "u".into(),
+                url: "postgres://u@localhost:5432/db".into(),
+                ssh_profile_id: None,
+                group_id: None,
+                connection_type: ConnectionType::Direct,
+                container_name: None,
+                container_port: None,
+            })
+            .unwrap();
+
+        let json = empty_export_json(
+            "[]",
+            "[]",
+            r#"[
+              {
+                "name": "Prod",
+                "color_id": "red",
+                "db_type": "postgres",
+                "host": "h",
+                "port": 5432,
+                "database": "other",
+                "username": "u",
+                "ssh_profile_name": null,
+                "group_name": null
+              }
+            ]"#,
+        );
+
+        let skip = import_connections(fx.app.state(), json.clone(), "skip".into())
+            .await
+            .expect("skip");
+        assert_eq!(skip.connections_added, 0);
+        assert_eq!(skip.connections_skipped, 1);
+        assert_eq!(
+            fx.app.state::<AppState>().config.get_connections().unwrap().len(),
+            1
+        );
+
+        let rename = import_connections(fx.app.state(), json, "rename".into())
+            .await
+            .expect("rename");
+        assert_eq!(rename.connections_added, 1);
+        assert_eq!(rename.connections_skipped, 0);
+        let names: HashSet<_> = fx
+            .app
+            .state::<AppState>()
+            .config
+            .get_connections()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(names.contains("Prod"));
+        assert!(names.contains("Prod (1)"));
+    }
+
+    #[tokio::test]
+    async fn export_import_round_trip_preserves_ssh_tunnel_settings() {
+        let fx = make_fixture();
+        let profile_id = uuid::Uuid::new_v4().to_string();
+        fx.app
+            .state::<AppState>()
+            .config
+            .save_ssh_profile(SshProfile {
+                id: profile_id.clone(),
+                name: "bastion".into(),
+                host: "ssh.example".into(),
+                port: 22,
+                username: "deploy".into(),
+                auth_method: SshAuthMethod::Key,
+                key_path: Some("/tmp/id_rsa".into()),
+                proxy_jump: vec![],
+                local_port_binding: Some(15432),
+                keepalive_interval: Some(30),
+            })
+            .unwrap();
+        fx.app
+            .state::<AppState>()
+            .config
+            .save_group(ConnectionGroup {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Work".into(),
+                color: None,
+                parent_group_id: None,
+                order: 0,
+                collapsed: false,
+            })
+            .unwrap();
+        fx.app
+            .state::<AppState>()
+            .config
+            .save_connection(sqlator_core::models::SavedConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "App DB".into(),
+                color_id: "green".into(),
+                db_type: "postgres".into(),
+                host: "db.internal".into(),
+                port: 5432,
+                database: "app".into(),
+                username: "app".into(),
+                url: "postgres://app@db.internal:5432/app".into(),
+                ssh_profile_id: Some(profile_id),
+                group_id: fx
+                    .app
+                    .state::<AppState>()
+                    .config
+                    .get_groups()
+                    .unwrap()
+                    .into_iter()
+                    .find(|g| g.name == "Work")
+                    .map(|g| g.id),
+                connection_type: ConnectionType::SshTunnel,
+                container_name: None,
+                container_port: None,
+            })
+            .unwrap();
+
+        let exported = build_export_json(&fx.app.state()).expect("export");
+        assert!(
+            !exported.to_lowercase().contains("password"),
+            "export must not contain password material: {exported}"
+        );
+
+        // Import into a fresh fixture
+        let fx2 = make_fixture();
+        let result = import_connections(fx2.app.state(), exported, "skip".into())
+            .await
+            .expect("import");
+        assert_eq!(result.groups_added, 1);
+        assert_eq!(result.profiles_added, 1);
+        assert_eq!(result.connections_added, 1);
+
+        let profiles = fx2.app.state::<AppState>().config.get_ssh_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].local_port_binding, Some(15432));
+        assert_eq!(profiles[0].keepalive_interval, Some(30));
+        assert_eq!(profiles[0].name, "bastion");
+
+        let conns = fx2.app.state::<AppState>().config.get_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].name, "App DB");
+        assert!(conns[0].ssh_profile_id.is_some());
+        assert!(conns[0].group_id.is_some());
+    }
+}
