@@ -200,17 +200,21 @@ template $SqlatorWindow: Adw.ApplicationWindow {
           vhomogeneous: true;
           hhomogeneous: true;
 
-          Adw.StatusPage {
+          StackPage {
             name: "empty";
-            icon-name: "network-server-symbolic";
-            title: _("No connection open");
-            description: _("Select a connection in the sidebar to open a query workspace.");
+            child: Adw.StatusPage {
+              icon-name: "network-server-symbolic";
+              title: _("No connection open");
+              description: _("Select a connection in the sidebar to open a query workspace.");
+            };
           }
 
-          Adw.TabView tab_view {
+          StackPage {
             name: "tabs";
-            hexpand: true;
-            vexpand: true;
+            child: Adw.TabView tab_view {
+              hexpand: true;
+              vexpand: true;
+            };
           }
         };
       };
