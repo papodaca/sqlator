@@ -6078,6 +6078,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlator-core",
+ "sqlator-service",
  "sqlparser",
  "tauri",
  "tauri-build",
@@ -6128,9 +6129,11 @@ version = "0.1.0"
 dependencies = [
  "dashmap",
  "dirs",
+ "serde",
  "sqlator-core",
  "thiserror 2.0.18",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -7876,6 +7879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlator-core",
+ "sqlator-service",
  "sqlparser",
  "tokio",
  "tower 0.4.13",

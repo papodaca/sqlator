@@ -1,9 +1,13 @@
 use crate::state::AppState;
 use sqlator_core::credentials::{CredentialStore, StorageMode, VaultSettings};
 use sqlator_core::docker::inspector::ContainerInspector;
-use sqlator_core::models::{ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, QueryEvent, SavedConnection, SqlBatch, SshProfile, TableMeta, SchemaInfo, TableInfo, SchemaColumnInfo, TableQueryParams, TableQueryResult};
+use sqlator_core::models::{
+    ConnectionConfig, ConnectionGroup, ConnectionInfo, ConnectionType, QueryEvent, SavedConnection,
+    SchemaColumnInfo, SchemaInfo, SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams,
+    TableQueryResult,
+};
 use sqlator_core::ssh::{config_parser, HostEntry, SshAuthConfig, SshHostConfig, SshTunnel};
-use sqlator_core::{BatchResult, DatabaseType};
+use sqlator_core::BatchResult;
 use tauri::ipc::Channel;
 use tauri::State;
 use tracing::{debug, info, warn};
@@ -12,6 +16,10 @@ type CmdResult<T> = Result<T, String>;
 
 fn map_err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+fn map_svc(e: sqlator_service::ServiceError) -> String {
+    e.message()
 }
 
 // --- Connection CRUD ---
@@ -23,48 +31,16 @@ pub async fn get_connections(state: State<'_, AppState>) -> CmdResult<Vec<Connec
 }
 
 #[tauri::command]
-pub async fn save_connection(state: State<'_, AppState>, config: ConnectionConfig) -> CmdResult<ConnectionInfo> {
-    let parsed = url::Url::parse(&config.url).map_err(map_err)?;
-
-    let db_type = match sqlator_core::detect_database_type(&config.url) {
-        Some(DatabaseType::Postgres) => "postgres",
-        Some(DatabaseType::MySql) => {
-            if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
-        }
-        Some(DatabaseType::Sqlite) => "sqlite",
-        Some(DatabaseType::Mssql) => "mssql",
-        Some(DatabaseType::Oracle) => "oracle",
-        Some(DatabaseType::ClickHouse) => "clickhouse",
-        None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
-    };
-
-    let connection_type = resolve_connection_type(&config);
-
-    let conn = SavedConnection {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: config.name,
-        color_id: config.color_id,
-        db_type: db_type.to_string(),
-        host: parsed.host_str().unwrap_or("localhost").to_string(),
-        port: parsed.port().unwrap_or(match db_type {
-            "postgres" => 5432,
-            "mysql" | "mariadb" => 3306,
-            "mssql" => 1433,
-            "oracle" => 1521,
-            "clickhouse" => 8123,
-            _ => 0,
-        }),
-        database: parsed.path().trim_start_matches('/').to_string(),
-        username: parsed.username().to_string(),
-        url: config.url,
-        ssh_profile_id: config.ssh_profile_id,
-        group_id: config.group_id,
-        connection_type,
-        container_name: config.container_name,
-        container_port: config.container_port,
-    };
-
-    state.config.save_connection(conn.clone()).map_err(map_err)?;
+pub async fn save_connection(
+    state: State<'_, AppState>,
+    config: ConnectionConfig,
+) -> CmdResult<ConnectionInfo> {
+    let conn = sqlator_service::build_saved_connection(uuid::Uuid::new_v4().to_string(), config)
+        .map_err(map_svc)?;
+    state
+        .config
+        .save_connection(conn.clone())
+        .map_err(map_err)?;
     Ok(ConnectionInfo::from(&conn))
 }
 
@@ -74,47 +50,11 @@ pub async fn update_connection(
     id: String,
     config: ConnectionConfig,
 ) -> CmdResult<ConnectionInfo> {
-    let parsed = url::Url::parse(&config.url).map_err(map_err)?;
-
-    let db_type = match sqlator_core::detect_database_type(&config.url) {
-        Some(DatabaseType::Postgres) => "postgres",
-        Some(DatabaseType::MySql) => {
-            if parsed.scheme() == "mariadb" { "mariadb" } else { "mysql" }
-        }
-        Some(DatabaseType::Sqlite) => "sqlite",
-        Some(DatabaseType::Mssql) => "mssql",
-        Some(DatabaseType::Oracle) => "oracle",
-        Some(DatabaseType::ClickHouse) => "clickhouse",
-        None => return Err(format!("Unsupported database scheme: {}", parsed.scheme())),
-    };
-
-    let connection_type = resolve_connection_type(&config);
-
-    let conn = SavedConnection {
-        id,
-        name: config.name,
-        color_id: config.color_id,
-        db_type: db_type.to_string(),
-        host: parsed.host_str().unwrap_or("localhost").to_string(),
-        port: parsed.port().unwrap_or(match db_type {
-            "postgres" => 5432,
-            "mysql" | "mariadb" => 3306,
-            "mssql" => 1433,
-            "oracle" => 1521,
-            "clickhouse" => 8123,
-            _ => 0,
-        }),
-        database: parsed.path().trim_start_matches('/').to_string(),
-        username: parsed.username().to_string(),
-        url: config.url,
-        ssh_profile_id: config.ssh_profile_id,
-        group_id: config.group_id,
-        connection_type,
-        container_name: config.container_name,
-        container_port: config.container_port,
-    };
-
-    state.config.update_connection(conn.clone()).map_err(map_err)?;
+    let conn = sqlator_service::build_saved_connection(id, config).map_err(map_svc)?;
+    state
+        .config
+        .update_connection(conn.clone())
+        .map_err(map_err)?;
     Ok(ConnectionInfo::from(&conn))
 }
 
@@ -134,7 +74,10 @@ pub async fn clone_connection(state: State<'_, AppState>, id: String) -> CmdResu
     let mut cloned = original.clone();
     cloned.id = uuid::Uuid::new_v4().to_string();
     cloned.name = format!("{} (Copy)", original.name);
-    state.config.save_connection(cloned.clone()).map_err(map_err)?;
+    state
+        .config
+        .save_connection(cloned.clone())
+        .map_err(map_err)?;
     Ok(ConnectionInfo::from(&cloned))
 }
 
@@ -157,17 +100,16 @@ pub async fn connect_database(state: State<'_, AppState>, id: String) -> CmdResu
         .clone();
 
     let url = match conn.connection_type {
-        ConnectionType::DockerContainer => {
-            connect_docker_container(&state, &id, &conn).await?
-        }
+        ConnectionType::DockerContainer => connect_docker_container(&state, &id, &conn).await?,
         ConnectionType::SshTunnel | ConnectionType::Direct if conn.ssh_profile_id.is_some() => {
             connect_ssh_tunnel(&state, &id, &conn).await?
         }
-        ConnectionType::LocalDockerContainer => {
-            connect_local_docker(&state, &id, &conn).await?
-        }
+        ConnectionType::LocalDockerContainer => connect_local_docker(&state, &id, &conn).await?,
         _ => {
-            debug!("connect_database '{}': no SSH profile, direct connection", id);
+            debug!(
+                "connect_database '{}': no SSH profile, direct connection",
+                id
+            );
             conn.url.clone()
         }
     };
@@ -180,15 +122,25 @@ async fn connect_docker_container(
     id: &str,
     conn: &SavedConnection,
 ) -> CmdResult<String> {
-    let ssh_profile_id = conn.ssh_profile_id.as_ref()
+    let ssh_profile_id = conn
+        .ssh_profile_id
+        .as_ref()
         .ok_or_else(|| "DockerContainer connection requires an SSH profile".to_string())?;
 
-    info!("connect_database '{}': Docker container, setting up tunnel via SSH profile '{}'", id, ssh_profile_id);
+    info!(
+        "connect_database '{}': Docker container, setting up tunnel via SSH profile '{}'",
+        id, ssh_profile_id
+    );
 
-    let profile = state.config.get_ssh_profile(ssh_profile_id).map_err(map_err)?
+    let profile = state
+        .config
+        .get_ssh_profile(ssh_profile_id)
+        .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
 
-    let container_name = conn.container_name.as_ref()
+    let container_name = conn
+        .container_name
+        .as_ref()
         .ok_or_else(|| "DockerContainer connection requires a container name".to_string())?;
 
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
@@ -208,11 +160,15 @@ async fn connect_docker_container(
         return Err(format!("Container '{}' is not running", container_name));
     }
 
-    let container_port = conn.container_port
-        .unwrap_or_else(|| default_port_for_db_type(&conn.db_type));
+    let container_port = conn
+        .container_port
+        .unwrap_or_else(|| sqlator_service::default_port_for_db_type(&conn.db_type));
 
     if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
-        warn!("connect_database: closing stale tunnel for connection '{}'", id);
+        warn!(
+            "connect_database: closing stale tunnel for connection '{}'",
+            id
+        );
         SshTunnel::close(old_tunnel).await.ok();
     }
 
@@ -227,11 +183,16 @@ async fn connect_docker_container(
     .await
     .map_err(map_err)?;
 
-    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    SshTunnel::start_forwarding(&tunnel)
+        .await
+        .map_err(map_err)?;
     let local_port = tunnel.local_port;
     state.tunnels.insert(id.to_string(), tunnel);
 
-    info!("connect_database: Docker tunnel ready on localhost:{} -> {}:{}", local_port, container_info.ip_address, container_port);
+    info!(
+        "connect_database: Docker tunnel ready on localhost:{} -> {}:{}",
+        local_port, container_info.ip_address, container_port
+    );
 
     let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
     let mut tunneled_url = parsed_url;
@@ -247,9 +208,15 @@ async fn connect_ssh_tunnel(
 ) -> CmdResult<String> {
     let ssh_profile_id = conn.ssh_profile_id.as_ref().unwrap();
 
-    info!("connect_database '{}': SSH tunnel via profile '{}'", id, ssh_profile_id);
+    info!(
+        "connect_database '{}': SSH tunnel via profile '{}'",
+        id, ssh_profile_id
+    );
 
-    let profile = state.config.get_ssh_profile(ssh_profile_id).map_err(map_err)?
+    let profile = state
+        .config
+        .get_ssh_profile(ssh_profile_id)
+        .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
 
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
@@ -266,7 +233,10 @@ async fn connect_ssh_tunnel(
     let target_port = parsed_url.port().unwrap_or(default_port);
 
     if let Some((_, old_tunnel)) = state.tunnels.remove(id) {
-        warn!("connect_database: closing stale tunnel for connection '{}'", id);
+        warn!(
+            "connect_database: closing stale tunnel for connection '{}'",
+            id
+        );
         SshTunnel::close(old_tunnel).await.ok();
     }
 
@@ -281,7 +251,9 @@ async fn connect_ssh_tunnel(
     .await
     .map_err(map_err)?;
 
-    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    SshTunnel::start_forwarding(&tunnel)
+        .await
+        .map_err(map_err)?;
     let local_port = tunnel.local_port;
     state.tunnels.insert(id.to_string(), tunnel);
 
@@ -292,25 +264,30 @@ async fn connect_ssh_tunnel(
 }
 
 async fn connect_local_docker(
-    state: &AppState,
-    id: &str,
+    _state: &AppState,
+    _id: &str,
     conn: &SavedConnection,
 ) -> CmdResult<String> {
-    let container_name = conn.container_name.as_ref()
+    let container_name = conn
+        .container_name
+        .as_ref()
         .ok_or_else(|| "LocalDockerContainer connection requires a container name".to_string())?;
 
     let local_docker = sqlator_core::docker::LocalDockerAccess::new()
         .map_err(|e| format!("Local Docker access failed: {}", e))?;
 
-    let container_info = local_docker.inspect(container_name).await
+    let container_info = local_docker
+        .inspect(container_name)
+        .await
         .map_err(|e| format!("Docker inspect failed: {}", e))?;
 
     if container_info.status != sqlator_core::ContainerStatus::Running {
         return Err(format!("Container '{}' is not running", container_name));
     }
 
-    let container_port = conn.container_port
-        .unwrap_or_else(|| default_port_for_db_type(&conn.db_type));
+    let container_port = conn
+        .container_port
+        .unwrap_or_else(|| sqlator_service::default_port_for_db_type(&conn.db_type));
 
     let parsed_url = url::Url::parse(&conn.url).map_err(map_err)?;
     let mut docker_url = parsed_url;
@@ -364,13 +341,23 @@ pub async fn execute_query(
 // --- Query persistence ---
 
 #[tauri::command]
-pub async fn get_query(state: State<'_, AppState>, connection_id: String) -> CmdResult<Option<String>> {
+pub async fn get_query(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> CmdResult<Option<String>> {
     state.config.get_query(&connection_id).map_err(map_err)
 }
 
 #[tauri::command]
-pub async fn save_query(state: State<'_, AppState>, connection_id: String, query: String) -> CmdResult<()> {
-    state.config.save_query(&connection_id, &query).map_err(map_err)
+pub async fn save_query(
+    state: State<'_, AppState>,
+    connection_id: String,
+    query: String,
+) -> CmdResult<()> {
+    state
+        .config
+        .save_query(&connection_id, &query)
+        .map_err(map_err)
 }
 
 // --- Tab state ---
@@ -381,7 +368,10 @@ pub async fn get_tab_state(state: State<'_, AppState>) -> CmdResult<Option<serde
 }
 
 #[tauri::command]
-pub async fn save_tab_state(state: State<'_, AppState>, tab_state: serde_json::Value) -> CmdResult<()> {
+pub async fn save_tab_state(
+    state: State<'_, AppState>,
+    tab_state: serde_json::Value,
+) -> CmdResult<()> {
     state.config.save_tab_state(tab_state).map_err(map_err)
 }
 
@@ -447,12 +437,7 @@ pub async fn create_ssh_tunnel(
             SshAuthConfig::with_password(&request.username, password)
         }
         "agent" => SshAuthConfig::with_agent(&request.username),
-        _ => {
-            return Err(format!(
-                "Unsupported auth method: {}",
-                request.auth_method
-            ))
-        }
+        _ => return Err(format!("Unsupported auth method: {}", request.auth_method)),
     };
 
     let ssh_config = SshHostConfig::new(&request.host, request.port, auth_config.clone());
@@ -544,7 +529,7 @@ pub async fn save_ssh_profile(
 ) -> CmdResult<SshProfile> {
     let id = uuid::Uuid::new_v4().to_string();
 
-    let auth_method = parse_auth_method(&config.auth_method)?;
+    let auth_method = sqlator_service::parse_auth_method(&config.auth_method).map_err(map_svc)?;
 
     let profile = SshProfile {
         id: id.clone(),
@@ -559,17 +544,26 @@ pub async fn save_ssh_profile(
         keepalive_interval: config.keepalive_interval,
     };
 
-    state.config.save_ssh_profile(profile.clone()).map_err(map_err)?;
+    state
+        .config
+        .save_ssh_profile(profile.clone())
+        .map_err(map_err)?;
 
     // Store secrets in credential store if provided
     if let Some(pw) = &config.password {
         if !pw.is_empty() {
-            state.credentials.store_credential(&id, "password", pw).map_err(map_err)?;
+            state
+                .credentials
+                .store_credential(&id, "password", pw)
+                .map_err(map_err)?;
         }
     }
     if let Some(pp) = &config.key_passphrase {
         if !pp.is_empty() {
-            state.credentials.store_credential(&id, "passphrase", pp).map_err(map_err)?;
+            state
+                .credentials
+                .store_credential(&id, "passphrase", pp)
+                .map_err(map_err)?;
         }
     }
 
@@ -589,7 +583,7 @@ pub async fn update_ssh_profile(
         .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{id}' not found"))?;
 
-    let auth_method = parse_auth_method(&config.auth_method)?;
+    let auth_method = sqlator_service::parse_auth_method(&config.auth_method).map_err(map_svc)?;
 
     let profile = SshProfile {
         id: id.clone(),
@@ -604,17 +598,26 @@ pub async fn update_ssh_profile(
         keepalive_interval: config.keepalive_interval,
     };
 
-    state.config.update_ssh_profile(profile.clone()).map_err(map_err)?;
+    state
+        .config
+        .update_ssh_profile(profile.clone())
+        .map_err(map_err)?;
 
     // Update secrets if provided (empty string = leave unchanged)
     if let Some(pw) = &config.password {
         if !pw.is_empty() {
-            state.credentials.store_credential(&id, "password", pw).map_err(map_err)?;
+            state
+                .credentials
+                .store_credential(&id, "password", pw)
+                .map_err(map_err)?;
         }
     }
     if let Some(pp) = &config.key_passphrase {
         if !pp.is_empty() {
-            state.credentials.store_credential(&id, "passphrase", pp).map_err(map_err)?;
+            state
+                .credentials
+                .store_credential(&id, "passphrase", pp)
+                .map_err(map_err)?;
         }
     }
 
@@ -622,14 +625,14 @@ pub async fn update_ssh_profile(
 }
 
 #[tauri::command]
-pub async fn delete_ssh_profile(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<()> {
+pub async fn delete_ssh_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     // This returns an error (PROFILE_IN_USE) if connections reference it
     state.config.delete_ssh_profile(&id).map_err(map_err)?;
     // Clean up credential entries
-    state.credentials.delete_all_credentials(&id).map_err(map_err)?;
+    state
+        .credentials
+        .delete_all_credentials(&id)
+        .map_err(map_err)?;
     Ok(())
 }
 
@@ -647,39 +650,9 @@ pub async fn connections_using_ssh_profile(
 
 // --- Connection URL parsing ---
 
-#[derive(Debug, serde::Serialize)]
-pub struct ParsedConnectionUrl {
-    pub db_type: String,
-    pub host: String,
-    pub port: u16,
-    pub database: String,
-    pub username: String,
-    pub password: Option<String>,
-}
-
 #[tauri::command]
-pub async fn parse_connection_url(url: String) -> CmdResult<ParsedConnectionUrl> {
-    let parsed = url::Url::parse(&url).map_err(map_err)?;
-
-    let (db_type, default_port) = match parsed.scheme() {
-        "postgres" | "postgresql" => ("postgres", 5432u16),
-        "mysql" => ("mysql", 3306),
-        "mariadb" => ("mariadb", 3306),
-        "sqlite" => ("sqlite", 0),
-        "mssql" | "sqlserver" | "tds" => ("mssql", 1433),
-        "oracle" => ("oracle", 1521),
-        "clickhouse" => ("clickhouse", 8123u16),
-        s => return Err(format!("Unsupported scheme: {s}")),
-    };
-
-    Ok(ParsedConnectionUrl {
-        db_type: db_type.to_string(),
-        host: parsed.host_str().unwrap_or("localhost").to_string(),
-        port: parsed.port().unwrap_or(default_port),
-        database: parsed.path().trim_start_matches('/').to_string(),
-        username: parsed.username().to_string(),
-        password: parsed.password().map(|p| p.to_string()),
-    })
+pub async fn parse_connection_url(url: String) -> CmdResult<sqlator_service::ParsedConnectionUrl> {
+    sqlator_service::parse_connection_url(&url).map_err(map_svc)
 }
 
 // --- SSH-tunneled connection test ---
@@ -724,7 +697,9 @@ pub async fn test_connection_with_ssh(
     .await
     .map_err(map_err)?;
 
-    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    SshTunnel::start_forwarding(&tunnel)
+        .await
+        .map_err(map_err)?;
     let local_port = tunnel.local_port;
 
     // Rewrite DB URL to point at the local tunnel endpoint
@@ -777,9 +752,15 @@ fn build_auth_config_for_profile(
     match profile.auth_method {
         SshAuthMethod::Key => {
             let key_path = profile.key_path.as_deref().unwrap_or_default();
-            let passphrase = credentials.get_credential(&profile.id, "passphrase").map_err(map_err)?;
+            let passphrase = credentials
+                .get_credential(&profile.id, "passphrase")
+                .map_err(map_err)?;
             if let Some(pp) = passphrase {
-                Ok(SshAuthConfig::with_key_and_passphrase(&profile.username, key_path, pp))
+                Ok(SshAuthConfig::with_key_and_passphrase(
+                    &profile.username,
+                    key_path,
+                    pp,
+                ))
             } else {
                 Ok(SshAuthConfig::with_key(&profile.username, key_path))
             }
@@ -818,7 +799,10 @@ pub async fn set_storage_mode(
     if migrate {
         let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
         let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
-        state.credentials.migrate_to(&new_mode, &ids).map_err(map_err)?;
+        state
+            .credentials
+            .migrate_to(&new_mode, &ids)
+            .map_err(map_err)?;
     }
 
     state.credentials.set_mode(new_mode);
@@ -870,7 +854,10 @@ pub async fn save_vault_settings(
     settings: VaultSettings,
 ) -> CmdResult<()> {
     state.credentials.vault.set_timeout(settings.timeout_secs);
-    state.config.save_vault_timeout_secs(settings.timeout_secs).map_err(map_err)?;
+    state
+        .config
+        .save_vault_timeout_secs(settings.timeout_secs)
+        .map_err(map_err)?;
     Ok(())
 }
 
@@ -1016,10 +1003,14 @@ fn build_export_json(state: &AppState) -> Result<String, String> {
     let profiles = state.config.get_ssh_profiles().map_err(map_err)?;
     let groups = state.config.get_groups().map_err(map_err)?;
 
-    let profile_names: std::collections::HashMap<String, String> =
-        profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
-    let group_names: std::collections::HashMap<String, String> =
-        groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
+    let profile_names: std::collections::HashMap<String, String> = profiles
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+    let group_names: std::collections::HashMap<String, String> = groups
+        .iter()
+        .map(|g| (g.id.clone(), g.name.clone()))
+        .collect();
 
     let exported_connections: Vec<ExportedConnection> = connections
         .iter()
@@ -1031,8 +1022,16 @@ fn build_export_json(state: &AppState) -> Result<String, String> {
             port: c.port,
             database: c.database.clone(),
             username: c.username.clone(),
-            ssh_profile_name: c.ssh_profile_id.as_ref().and_then(|id| profile_names.get(id)).cloned(),
-            group_name: c.group_id.as_ref().and_then(|id| group_names.get(id)).cloned(),
+            ssh_profile_name: c
+                .ssh_profile_id
+                .as_ref()
+                .and_then(|id| profile_names.get(id))
+                .cloned(),
+            group_name: c
+                .group_id
+                .as_ref()
+                .and_then(|id| group_names.get(id))
+                .cloned(),
         })
         .collect();
 
@@ -1045,13 +1044,17 @@ fn build_export_json(state: &AppState) -> Result<String, String> {
             username: p.username.clone(),
             auth_method: format!("{:?}", p.auth_method).to_lowercase(),
             key_path: p.key_path.clone(),
-            proxy_jump: p.proxy_jump.iter().map(|j| ExportedJumpHost {
-                host: j.host.clone(),
-                port: j.port,
-                username: j.username.clone(),
-                auth_method: format!("{:?}", j.auth_method).to_lowercase(),
-                key_path: j.key_path.clone(),
-            }).collect(),
+            proxy_jump: p
+                .proxy_jump
+                .iter()
+                .map(|j| ExportedJumpHost {
+                    host: j.host.clone(),
+                    port: j.port,
+                    username: j.username.clone(),
+                    auth_method: format!("{:?}", j.auth_method).to_lowercase(),
+                    key_path: j.key_path.clone(),
+                })
+                .collect(),
             local_port_binding: p.local_port_binding,
             keepalive_interval: p.keepalive_interval,
         })
@@ -1062,7 +1065,11 @@ fn build_export_json(state: &AppState) -> Result<String, String> {
         .map(|g| ExportedGroup {
             name: g.name.clone(),
             color: g.color.clone(),
-            parent_group_name: g.parent_group_id.as_ref().and_then(|id| group_names.get(id)).cloned(),
+            parent_group_name: g
+                .parent_group_id
+                .as_ref()
+                .and_then(|id| group_names.get(id))
+                .cloned(),
             order: g.order,
         })
         .collect();
@@ -1113,8 +1120,10 @@ pub async fn import_connections(
         existing_groups.iter().map(|g| g.name.clone()).collect();
 
     // name → new id
-    let mut group_id_map: std::collections::HashMap<String, String> =
-        existing_groups.iter().map(|g| (g.name.clone(), g.id.clone())).collect();
+    let mut group_id_map: std::collections::HashMap<String, String> = existing_groups
+        .iter()
+        .map(|g| (g.name.clone(), g.id.clone()))
+        .collect();
 
     let mut groups_added = 0usize;
 
@@ -1139,7 +1148,11 @@ pub async fn import_connections(
                 id: new_id.clone(),
                 name: eg.name.clone(),
                 color: eg.color.clone(),
-                parent_group_id: eg.parent_group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+                parent_group_id: eg
+                    .parent_group_name
+                    .as_ref()
+                    .and_then(|n| group_id_map.get(n))
+                    .cloned(),
                 order: eg.order,
                 collapsed: false,
             };
@@ -1148,7 +1161,9 @@ pub async fn import_connections(
             groups_added += 1;
         }
         remaining = next_remaining;
-        if remaining.is_empty() { break; }
+        if remaining.is_empty() {
+            break;
+        }
     }
 
     // ── 2. Import SSH profiles ────────────────────────────────────────────────
@@ -1157,21 +1172,25 @@ pub async fn import_connections(
         existing_profiles.iter().map(|p| p.name.clone()).collect();
 
     // name → new id
-    let mut profile_id_map: std::collections::HashMap<String, String> =
-        existing_profiles.iter().map(|p| (p.name.clone(), p.id.clone())).collect();
+    let mut profile_id_map: std::collections::HashMap<String, String> = existing_profiles
+        .iter()
+        .map(|p| (p.name.clone(), p.id.clone()))
+        .collect();
 
     let mut profiles_added = 0usize;
 
     for ep in &file.ssh_profiles {
         let final_name = if existing_profile_names.contains(&ep.name) {
-            if !rename { continue; }
-            unique_name(&ep.name, &profile_id_map.keys().cloned().collect())
+            if !rename {
+                continue;
+            }
+            sqlator_service::unique_name(&ep.name, &profile_id_map.keys().cloned().collect())
         } else {
             ep.name.clone()
         };
 
         let new_id = uuid::Uuid::new_v4().to_string();
-        let auth_method = parse_auth_method(&ep.auth_method)?;
+        let auth_method = sqlator_service::parse_auth_method(&ep.auth_method).map_err(map_svc)?;
         let profile = SshProfile {
             id: new_id.clone(),
             name: final_name.clone(),
@@ -1180,13 +1199,18 @@ pub async fn import_connections(
             username: ep.username.clone(),
             auth_method,
             key_path: ep.key_path.clone(),
-            proxy_jump: ep.proxy_jump.iter().map(|j| sqlator_core::models::SshJumpHost {
-                host: j.host.clone(),
-                port: j.port,
-                username: j.username.clone(),
-                auth_method: parse_auth_method(&j.auth_method).unwrap_or(sqlator_core::models::SshAuthMethod::Key),
-                key_path: j.key_path.clone(),
-            }).collect(),
+            proxy_jump: ep
+                .proxy_jump
+                .iter()
+                .map(|j| sqlator_core::models::SshJumpHost {
+                    host: j.host.clone(),
+                    port: j.port,
+                    username: j.username.clone(),
+                    auth_method: sqlator_service::parse_auth_method(&j.auth_method)
+                        .unwrap_or(sqlator_core::models::SshAuthMethod::Key),
+                    key_path: j.key_path.clone(),
+                })
+                .collect(),
             local_port_binding: ep.local_port_binding,
             keepalive_interval: ep.keepalive_interval,
         };
@@ -1197,8 +1221,10 @@ pub async fn import_connections(
 
     // ── 3. Import connections ─────────────────────────────────────────────────
     let existing_connections = state.config.get_connections().map_err(map_err)?;
-    let existing_conn_names: std::collections::HashSet<String> =
-        existing_connections.iter().map(|c| c.name.clone()).collect();
+    let existing_conn_names: std::collections::HashSet<String> = existing_connections
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
 
     let mut all_conn_names: std::collections::HashSet<String> = existing_conn_names.clone();
     let mut connections_added = 0usize;
@@ -1210,13 +1236,19 @@ pub async fn import_connections(
                 connections_skipped += 1;
                 continue;
             }
-            unique_name(&ec.name, &all_conn_names)
+            sqlator_service::unique_name(&ec.name, &all_conn_names)
         } else {
             ec.name.clone()
         };
 
         // Reconstruct a URL without a password
-        let url = build_url_no_password(&ec.db_type, &ec.host, ec.port, &ec.database, &ec.username);
+        let url = sqlator_service::build_url_no_password(
+            &ec.db_type,
+            &ec.host,
+            ec.port,
+            &ec.database,
+            &ec.username,
+        );
 
         let conn = sqlator_core::models::SavedConnection {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1228,8 +1260,16 @@ pub async fn import_connections(
             database: ec.database.clone(),
             username: ec.username.clone(),
             url,
-            ssh_profile_id: ec.ssh_profile_name.as_ref().and_then(|n| profile_id_map.get(n)).cloned(),
-            group_id: ec.group_name.as_ref().and_then(|n| group_id_map.get(n)).cloned(),
+            ssh_profile_id: ec
+                .ssh_profile_name
+                .as_ref()
+                .and_then(|n| profile_id_map.get(n))
+                .cloned(),
+            group_id: ec
+                .group_name
+                .as_ref()
+                .and_then(|n| group_id_map.get(n))
+                .cloned(),
             connection_type: ConnectionType::default(),
             container_name: None,
             container_port: None,
@@ -1239,63 +1279,12 @@ pub async fn import_connections(
         connections_added += 1;
     }
 
-    Ok(ImportResult { groups_added, profiles_added, connections_added, connections_skipped })
-}
-
-fn unique_name(base: &str, existing: &std::collections::HashSet<String>) -> String {
-    let mut i = 1u32;
-    loop {
-        let candidate = format!("{base} ({i})");
-        if !existing.contains(&candidate) {
-            return candidate;
-        }
-        i += 1;
-    }
-}
-
-fn build_url_no_password(db_type: &str, host: &str, port: u16, database: &str, username: &str) -> String {
-    match db_type {
-        "sqlite" => format!("sqlite://{database}"),
-        _ => {
-            let user = if !username.is_empty() { format!("{username}@") } else { String::new() };
-            format!("{db_type}://{user}{host}:{port}/{database}")
-        }
-    }
-}
-
-fn resolve_connection_type(config: &ConnectionConfig) -> ConnectionType {
-    match config.connection_type {
-        Some(ref ct) => ct.clone(),
-        None => {
-            if config.container_name.is_some() && config.ssh_profile_id.is_some() {
-                ConnectionType::DockerContainer
-            } else if config.ssh_profile_id.is_some() {
-                ConnectionType::SshTunnel
-            } else {
-                ConnectionType::Direct
-            }
-        }
-    }
-}
-
-fn default_port_for_db_type(db_type: &str) -> u16 {
-    match db_type {
-        "postgres" => 5432,
-        "mysql" | "mariadb" => 3306,
-        "mssql" => 1433,
-        "oracle" => 1521,
-        "clickhouse" => 8123,
-        _ => 0,
-    }
-}
-
-fn parse_auth_method(s: &str) -> CmdResult<sqlator_core::models::SshAuthMethod> {
-    match s {
-        "key" => Ok(sqlator_core::models::SshAuthMethod::Key),
-        "password" => Ok(sqlator_core::models::SshAuthMethod::Password),
-        "agent" => Ok(sqlator_core::models::SshAuthMethod::Agent),
-        other => Err(format!("Unknown auth method: {other}")),
-    }
+    Ok(ImportResult {
+        groups_added,
+        profiles_added,
+        connections_added,
+        connections_skipped,
+    })
 }
 
 // ── Docker Container Discovery ────────────────────────────────────────────────
@@ -1306,21 +1295,19 @@ pub async fn discover_container(
     ssh_profile_id: String,
     container_name: String,
 ) -> CmdResult<DockerContainerInfo> {
-    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+    let profile = state
+        .config
+        .get_ssh_profile(&ssh_profile_id)
+        .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
 
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
     let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
-    let info = ContainerInspector::inspect(
-        &ssh_config,
-        auth_config,
-        jump_hosts,
-        &container_name,
-    )
-    .await
-    .map_err(|e| format!("{}", e))?;
+    let info = ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, &container_name)
+        .await
+        .map_err(|e| format!("{}", e))?;
 
     Ok(DockerContainerInfo {
         ip_address: info.ip_address,
@@ -1329,10 +1316,14 @@ pub async fn discover_container(
             sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
             sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
         },
-        ports: info.ports.into_iter().map(|p| ContainerPortInfo {
-            container_port: p.container_port,
-            protocol: p.protocol,
-        }).collect(),
+        ports: info
+            .ports
+            .into_iter()
+            .map(|p| ContainerPortInfo {
+                container_port: p.container_port,
+                protocol: p.protocol,
+            })
+            .collect(),
         database_type_hint: info.database_type_hint,
     })
 }
@@ -1342,27 +1333,29 @@ pub async fn list_running_containers(
     state: State<'_, AppState>,
     ssh_profile_id: String,
 ) -> CmdResult<Vec<ContainerSummaryInfo>> {
-    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+    let profile = state
+        .config
+        .get_ssh_profile(&ssh_profile_id)
+        .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
 
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
     let jump_hosts = build_jump_hosts_for_profile(&profile)?;
 
-    let containers = ContainerInspector::list_running(
-        &ssh_config,
-        auth_config,
-        jump_hosts,
-    )
-    .await
-    .map_err(|e| format!("{}", e))?;
+    let containers = ContainerInspector::list_running(&ssh_config, auth_config, jump_hosts)
+        .await
+        .map_err(|e| format!("{}", e))?;
 
-    Ok(containers.into_iter().map(|c| ContainerSummaryInfo {
-        name: c.name,
-        image: c.image,
-        status: c.status,
-        database_type_hint: c.database_type_hint,
-    }).collect())
+    Ok(containers
+        .into_iter()
+        .map(|c| ContainerSummaryInfo {
+            name: c.name,
+            image: c.image,
+            status: c.status,
+            database_type_hint: c.database_type_hint,
+        })
+        .collect())
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1397,9 +1390,15 @@ pub async fn test_docker_connection(
     container_port: u16,
     url: String,
 ) -> CmdResult<String> {
-    info!("test_docker_connection: SSH profile='{}', container='{}'", ssh_profile_id, container_name);
+    info!(
+        "test_docker_connection: SSH profile='{}', container='{}'",
+        ssh_profile_id, container_name
+    );
 
-    let profile = state.config.get_ssh_profile(&ssh_profile_id).map_err(map_err)?
+    let profile = state
+        .config
+        .get_ssh_profile(&ssh_profile_id)
+        .map_err(map_err)?
         .ok_or_else(|| format!("SSH profile '{}' not found", ssh_profile_id))?;
 
     let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
@@ -1431,7 +1430,9 @@ pub async fn test_docker_connection(
     .await
     .map_err(map_err)?;
 
-    SshTunnel::start_forwarding(&tunnel).await.map_err(map_err)?;
+    SshTunnel::start_forwarding(&tunnel)
+        .await
+        .map_err(map_err)?;
     let local_port = tunnel.local_port;
 
     info!(
@@ -1444,7 +1445,7 @@ pub async fn test_docker_connection(
     let _ = test_url.set_host(Some("127.0.0.1"));
     let _ = test_url.set_port(Some(local_port));
 
-    let result = sqlator_core::db::DbManager::test_connection(&test_url.to_string()).await;
+    let result = sqlator_core::db::DbManager::test_connection(test_url.as_str()).await;
     SshTunnel::close(tunnel).await.ok();
     result.map_err(map_err)
 }
@@ -1459,7 +1460,9 @@ pub async fn discover_local_container(
     let local = sqlator_core::docker::LocalDockerAccess::new()
         .map_err(|e| format!("Local Docker unavailable: {}", e))?;
 
-    let info = local.inspect(&container_name).await
+    let info = local
+        .inspect(&container_name)
+        .await
         .map_err(|e| format!("{}", e))?;
 
     Ok(DockerContainerInfo {
@@ -1469,10 +1472,14 @@ pub async fn discover_local_container(
             sqlator_core::ContainerStatus::Stopped => "stopped".to_string(),
             sqlator_core::ContainerStatus::NotFound => "not_found".to_string(),
         },
-        ports: info.ports.into_iter().map(|p| ContainerPortInfo {
-            container_port: p.container_port,
-            protocol: p.protocol,
-        }).collect(),
+        ports: info
+            .ports
+            .into_iter()
+            .map(|p| ContainerPortInfo {
+                container_port: p.container_port,
+                protocol: p.protocol,
+            })
+            .collect(),
         database_type_hint: info.database_type_hint,
     })
 }
@@ -1484,15 +1491,17 @@ pub async fn list_local_containers(
     let local = sqlator_core::docker::LocalDockerAccess::new()
         .map_err(|e| format!("Local Docker unavailable: {}", e))?;
 
-    let containers = local.list_running().await
-        .map_err(|e| format!("{}", e))?;
+    let containers = local.list_running().await.map_err(|e| format!("{}", e))?;
 
-    Ok(containers.into_iter().map(|c| ContainerSummaryInfo {
-        name: c.name,
-        image: c.image,
-        status: c.status,
-        database_type_hint: c.database_type_hint,
-    }).collect())
+    Ok(containers
+        .into_iter()
+        .map(|c| ContainerSummaryInfo {
+            name: c.name,
+            image: c.image,
+            status: c.status,
+            database_type_hint: c.database_type_hint,
+        })
+        .collect())
 }
 
 /// Test a local Docker container connection — inspects via local socket, connects directly.
@@ -1506,7 +1515,9 @@ pub async fn test_local_docker_connection(
     let local = sqlator_core::docker::LocalDockerAccess::new()
         .map_err(|e| format!("Local Docker unavailable: {}", e))?;
 
-    let container_info = local.inspect(&container_name).await
+    let container_info = local
+        .inspect(&container_name)
+        .await
         .map_err(|e| format!("Docker inspect failed: {}", e))?;
 
     if container_info.status != sqlator_core::ContainerStatus::Running {
@@ -1518,7 +1529,7 @@ pub async fn test_local_docker_connection(
     let _ = test_url.set_host(Some(&container_info.ip_address));
     let _ = test_url.set_port(Some(container_port));
 
-    sqlator_core::db::DbManager::test_connection(&test_url.to_string())
+    sqlator_core::db::DbManager::test_connection(test_url.as_ref())
         .await
         .map_err(map_err)
 }
@@ -1632,8 +1643,19 @@ fn extract_table_regex(sql: &str) -> Option<(String, Option<String>)> {
 /// Slice of `after_from` up to the next clause keyword or `;`.
 fn delimit_from_region(after_from: &str) -> &str {
     const KEYWORDS: &[&str] = &[
-        "where", "group", "having", "order", "limit", "offset", "fetch", "window", "union",
-        "intersect", "except", "for", "into",
+        "where",
+        "group",
+        "having",
+        "order",
+        "limit",
+        "offset",
+        "fetch",
+        "window",
+        "union",
+        "intersect",
+        "except",
+        "for",
+        "into",
     ];
 
     let bytes = after_from.as_bytes();
@@ -1738,7 +1760,6 @@ pub async fn fetch_schema_metadata(
         }
     };
 
-
     // Check cache
     let cache_key = format!("{connection_id}:{schema_name:?}:{table_name}");
     if let Some(cached) = state.schema_cache.get(&cache_key) {
@@ -1750,14 +1771,17 @@ pub async fn fetch_schema_metadata(
         state.schema_cache.remove(&cache_key);
     }
 
-    let meta = state.db
+    let meta = state
+        .db
         .fetch_schema_metadata(&connection_id, &table_name, schema_name.as_deref())
         .await
         .map_err(map_err)?;
 
     // Cache for 5 minutes
     let expires = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    state.schema_cache.insert(cache_key, (meta.clone(), expires));
+    state
+        .schema_cache
+        .insert(cache_key, (meta.clone(), expires));
 
     Ok(Some(meta))
 }
@@ -1778,7 +1802,11 @@ pub async fn get_tables(
     connection_id: String,
     schema: Option<String>,
 ) -> CmdResult<Vec<TableInfo>> {
-    state.db.get_tables(&connection_id, schema.as_deref()).await.map_err(map_err)
+    state
+        .db
+        .get_tables(&connection_id, schema.as_deref())
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1788,7 +1816,11 @@ pub async fn get_columns(
     table_name: String,
     schema: Option<String>,
 ) -> CmdResult<Vec<SchemaColumnInfo>> {
-    state.db.get_columns(&connection_id, &table_name, schema.as_deref()).await.map_err(map_err)
+    state
+        .db
+        .get_columns(&connection_id, &table_name, schema.as_deref())
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1797,7 +1829,11 @@ pub async fn query_table(
     params: TableQueryParams,
 ) -> CmdResult<TableQueryResult> {
     let connection_id = params.connection_id.clone();
-    state.db.query_table(&connection_id, &params).await.map_err(map_err)
+    state
+        .db
+        .query_table(&connection_id, &params)
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1807,7 +1843,11 @@ pub async fn get_ddl(
     table_name: String,
     schema: Option<String>,
 ) -> CmdResult<String> {
-    state.db.get_ddl(&connection_id, &table_name, schema.as_deref()).await.map_err(map_err)
+    state
+        .db
+        .get_ddl(&connection_id, &table_name, schema.as_deref())
+        .await
+        .map_err(map_err)
 }
 
 // ── Batch Execute ─────────────────────────────────────────────────────────────
@@ -1818,7 +1858,11 @@ pub async fn execute_batch(
     connection_id: String,
     batch: SqlBatch,
 ) -> CmdResult<BatchResult> {
-    state.db.execute_batch(&connection_id, &batch).await.map_err(map_err)
+    state
+        .db
+        .execute_batch(&connection_id, &batch)
+        .await
+        .map_err(map_err)
 }
 
 #[cfg(test)]
@@ -1949,153 +1993,8 @@ mod group_a_tests {
     use std::sync::Arc;
     use tauri::Manager;
 
-    // ── unique_name ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn unique_name_never_returns_base_even_when_free() {
-        // Characterization: impl always starts at "{base} (1)", never returns base itself.
-        let existing = HashSet::new();
-        assert_eq!(unique_name("alpha", &existing), "alpha (1)");
-    }
-
-    #[test]
-    fn unique_name_skips_taken_suffixes() {
-        let existing: HashSet<String> = ["alpha (1)".into(), "alpha (2)".into()].into();
-        assert_eq!(unique_name("alpha", &existing), "alpha (3)");
-    }
-
-    #[test]
-    fn unique_name_ignores_whether_base_itself_is_taken() {
-        let existing: HashSet<String> = ["alpha".into()].into();
-        assert_eq!(unique_name("alpha", &existing), "alpha (1)");
-    }
-
-    // ── build_url_no_password ─────────────────────────────────────────────────
-
-    #[test]
-    fn build_url_no_password_all_engines() {
-        assert_eq!(
-            build_url_no_password("postgres", "h", 5432, "db", "u"),
-            "postgres://u@h:5432/db"
-        );
-        assert_eq!(
-            build_url_no_password("mysql", "h", 3306, "db", "u"),
-            "mysql://u@h:3306/db"
-        );
-        assert_eq!(
-            build_url_no_password("mariadb", "h", 3306, "db", "u"),
-            "mariadb://u@h:3306/db"
-        );
-        assert_eq!(
-            build_url_no_password("mssql", "h", 1433, "db", "u"),
-            "mssql://u@h:1433/db"
-        );
-        assert_eq!(
-            build_url_no_password("oracle", "h", 1521, "db", "u"),
-            "oracle://u@h:1521/db"
-        );
-        assert_eq!(
-            build_url_no_password("clickhouse", "h", 8123, "db", "u"),
-            "clickhouse://u@h:8123/db"
-        );
-        assert_eq!(
-            build_url_no_password("sqlite", "ignored", 0, "/tmp/x.db", "u"),
-            "sqlite:///tmp/x.db"
-        );
-    }
-
-    #[test]
-    fn build_url_no_password_empty_username_omits_at() {
-        assert_eq!(
-            build_url_no_password("postgres", "h", 5432, "db", ""),
-            "postgres://h:5432/db"
-        );
-    }
-
-    // ── resolve_connection_type ───────────────────────────────────────────────
-
-    fn conn_cfg(
-        connection_type: Option<ConnectionType>,
-        ssh_profile_id: Option<&str>,
-        container_name: Option<&str>,
-    ) -> ConnectionConfig {
-        ConnectionConfig {
-            name: "n".into(),
-            color_id: "c".into(),
-            url: "postgres://h/db".into(),
-            ssh_profile_id: ssh_profile_id.map(str::to_string),
-            group_id: None,
-            connection_type,
-            container_name: container_name.map(str::to_string),
-            container_port: None,
-        }
-    }
-
-    #[test]
-    fn resolve_connection_type_explicit_wins() {
-        let cfg = conn_cfg(Some(ConnectionType::Direct), Some("ssh"), Some("ctr"));
-        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
-
-        let cfg = conn_cfg(Some(ConnectionType::LocalDockerContainer), None, None);
-        assert_eq!(
-            resolve_connection_type(&cfg),
-            ConnectionType::LocalDockerContainer
-        );
-    }
-
-    #[test]
-    fn resolve_connection_type_inference_paths() {
-        // container + ssh → DockerContainer
-        let cfg = conn_cfg(None, Some("ssh"), Some("ctr"));
-        assert_eq!(resolve_connection_type(&cfg), ConnectionType::DockerContainer);
-
-        // ssh only → SshTunnel
-        let cfg = conn_cfg(None, Some("ssh"), None);
-        assert_eq!(resolve_connection_type(&cfg), ConnectionType::SshTunnel);
-
-        // plain → Direct
-        let cfg = conn_cfg(None, None, None);
-        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
-
-        // container alone does NOT infer LocalDockerContainer — falls through to Direct
-        let cfg = conn_cfg(None, None, Some("ctr"));
-        assert_eq!(resolve_connection_type(&cfg), ConnectionType::Direct);
-    }
-
-    // ── default_port_for_db_type (Tauri-only) ─────────────────────────────────
-
-    #[test]
-    fn default_port_for_db_type_known_and_unknown() {
-        assert_eq!(default_port_for_db_type("postgres"), 5432);
-        assert_eq!(default_port_for_db_type("mysql"), 3306);
-        assert_eq!(default_port_for_db_type("mariadb"), 3306);
-        assert_eq!(default_port_for_db_type("mssql"), 1433);
-        assert_eq!(default_port_for_db_type("oracle"), 1521);
-        assert_eq!(default_port_for_db_type("clickhouse"), 8123);
-        assert_eq!(default_port_for_db_type("sqlite"), 0);
-        assert_eq!(default_port_for_db_type("nope"), 0);
-    }
-
-    // ── parse_auth_method ─────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_auth_method_key_password_agent() {
-        assert!(matches!(parse_auth_method("key"), Ok(SshAuthMethod::Key)));
-        assert!(matches!(
-            parse_auth_method("password"),
-            Ok(SshAuthMethod::Password)
-        ));
-        assert!(matches!(parse_auth_method("agent"), Ok(SshAuthMethod::Agent)));
-    }
-
-    #[test]
-    fn parse_auth_method_unknown_error_string() {
-        // Ledger row 8: Tauri uses "Unknown auth method: {other}"
-        assert_eq!(
-            parse_auth_method("token").unwrap_err(),
-            "Unknown auth method: token"
-        );
-    }
+    // Pure helpers (unique_name, build_url_no_password, resolve_connection_type,
+    // default_port_for_db_type, parse_auth_method) live in sqlator-service now.
 
     // ── extract_single_table (sqlparser path) ─────────────────────────────────
 
@@ -2106,7 +2005,10 @@ mod group_a_tests {
                 assert_eq!(t, "t");
                 assert_eq!(s, None);
             }
-            other => panic!("expected Found, got discriminant {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Found, got discriminant {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -2117,7 +2019,10 @@ mod group_a_tests {
                 assert_eq!(t, "users");
                 assert_eq!(s.as_deref(), Some("public"));
             }
-            other => panic!("expected Found, got discriminant {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Found, got discriminant {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -2174,9 +2079,7 @@ mod group_a_tests {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-a-{id}");
         let config = ConfigManager::new(&app_name).expect("ConfigManager");
-        let cleanup_dir = dirs::config_dir()
-            .expect("config dir")
-            .join(&app_name);
+        let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
         let vault_path = cleanup_dir.join("vault.enc");
         let state = AppState {
             config,
@@ -2229,7 +2132,10 @@ mod group_a_tests {
         let grandchild = groups.iter().find(|g| g.name == "grandchild").unwrap();
         assert!(parent.parent_group_id.is_none());
         assert_eq!(child.parent_group_id.as_deref(), Some(parent.id.as_str()));
-        assert_eq!(grandchild.parent_group_id.as_deref(), Some(child.id.as_str()));
+        assert_eq!(
+            grandchild.parent_group_id.as_deref(),
+            Some(child.id.as_str())
+        );
         // IDs are freshly generated UUIDs, not export-time names
         assert_ne!(parent.id, "parent");
     }
@@ -2272,7 +2178,13 @@ mod group_a_tests {
             .expect("import");
         // After 3 passes neither side of the cycle can resolve — both dropped.
         assert_eq!(result.groups_added, 0);
-        assert!(fx.app.state::<AppState>().config.get_groups().unwrap().is_empty());
+        assert!(fx
+            .app
+            .state::<AppState>()
+            .config
+            .get_groups()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2361,7 +2273,12 @@ mod group_a_tests {
         assert_eq!(skip.connections_added, 0);
         assert_eq!(skip.connections_skipped, 1);
         assert_eq!(
-            fx.app.state::<AppState>().config.get_connections().unwrap().len(),
+            fx.app
+                .state::<AppState>()
+                .config
+                .get_connections()
+                .unwrap()
+                .len(),
             1
         );
 
@@ -2459,13 +2376,23 @@ mod group_a_tests {
         assert_eq!(result.profiles_added, 1);
         assert_eq!(result.connections_added, 1);
 
-        let profiles = fx2.app.state::<AppState>().config.get_ssh_profiles().unwrap();
+        let profiles = fx2
+            .app
+            .state::<AppState>()
+            .config
+            .get_ssh_profiles()
+            .unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].local_port_binding, Some(15432));
         assert_eq!(profiles[0].keepalive_interval, Some(30));
         assert_eq!(profiles[0].name, "bastion");
 
-        let conns = fx2.app.state::<AppState>().config.get_connections().unwrap();
+        let conns = fx2
+            .app
+            .state::<AppState>()
+            .config
+            .get_connections()
+            .unwrap();
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].name, "App DB");
         assert!(conns[0].ssh_profile_id.is_some());
@@ -2518,10 +2445,7 @@ mod group_b_tests {
             schema_cache_key("c1", &Some("public".into()), "users"),
             r#"c1:Some("public"):users"#
         );
-        assert_eq!(
-            schema_cache_key("c1", &None, "users"),
-            "c1:None:users"
-        );
+        assert_eq!(schema_cache_key("c1", &None, "users"), "c1:None:users");
         assert_eq!(
             schema_cache_key("c1", &Some("".into()), "users"),
             r#"c1:Some(""):users"#
@@ -2640,9 +2564,7 @@ mod group_b_tests {
         let id = uuid::Uuid::new_v4();
         let app_name = format!("sqlator-char-b-{id}");
         let config = ConfigManager::new(&app_name).expect("ConfigManager");
-        let cleanup_dir = dirs::config_dir()
-            .expect("config dir")
-            .join(&app_name);
+        let cleanup_dir = dirs::config_dir().expect("config dir").join(&app_name);
         let vault_path = cleanup_dir.join("vault.enc");
         let state = AppState {
             config,

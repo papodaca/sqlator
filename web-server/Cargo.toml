@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 sqlator-core = { path = "../core" }
+sqlator-service = { path = "../service" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"

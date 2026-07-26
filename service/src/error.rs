@@ -38,8 +38,14 @@ impl ServiceError {
         }
     }
 
+    /// User-facing message without a mandatory code prefix (adapters add status separately).
     pub fn message(&self) -> String {
-        self.to_string()
+        match self {
+            ServiceError::Core(e) => e.message.clone(),
+            ServiceError::Ssh(e) => e.to_string(),
+            ServiceError::Docker(e) => e.to_string(),
+            ServiceError::App { message, .. } => message.clone(),
+        }
     }
 
     pub fn app(code: impl Into<String>, message: impl Into<String>) -> Self {
