@@ -38,7 +38,11 @@ mod imp {
         pub settings: OnceCell<gio::Settings>,
         pub connections: RefCell<Option<ConnectionList>>,
         pub schema_tree: RefCell<Option<SchemaTree>>,
+        /// Sidebar list highlight / rebuild anchor (may track focus/selection).
         pub selected_connection_id: RefCell<Option<String>>,
+        /// Connection the schema pane browses. Only changes on activate/connect,
+        /// never on transient list selection (e.g. focus-follows-mouse hover).
+        pub schema_connection_id: RefCell<Option<String>>,
         /// In-flight / error status overlays on top of `db.is_connected`.
         pub connection_status: RefCell<HashMap<String, ConnectionStatus>>,
     }
@@ -412,8 +416,17 @@ impl SqlatorWindow {
     }
 
     pub fn set_selected_connection_id(&self, id: Option<String>) {
-        let changed = self.imp().selected_connection_id.borrow().as_deref() != id.as_deref();
         *self.imp().selected_connection_id.borrow_mut() = id;
+    }
+
+    pub fn schema_connection_id(&self) -> Option<String> {
+        self.imp().schema_connection_id.borrow().clone()
+    }
+
+    /// Point the schema pane at `id` (None clears). No-op when unchanged.
+    pub fn set_schema_connection_id(&self, id: Option<String>) {
+        let changed = self.imp().schema_connection_id.borrow().as_deref() != id.as_deref();
+        *self.imp().schema_connection_id.borrow_mut() = id;
         if changed {
             self.update_schema_browser();
         }
@@ -441,9 +454,9 @@ impl SqlatorWindow {
         self.imp().schema_refresh.set_sensitive(false);
     }
 
-    /// Sync schema pane to the selected connection's live pool state.
+    /// Sync schema pane to the active schema connection's live pool state.
     pub fn update_schema_browser(&self) {
-        let Some(id) = self.selected_connection_id() else {
+        let Some(id) = self.schema_connection_id() else {
             self.clear_schema_browser("Connect to browse schema");
             return;
         };
@@ -469,9 +482,9 @@ impl SqlatorWindow {
         self.reload_schema_browser();
     }
 
-    /// Force-refresh schemas for the selected connected connection.
+    /// Force-refresh schemas for the active schema connection.
     pub fn reload_schema_browser(&self) {
-        let Some(id) = self.selected_connection_id() else {
+        let Some(id) = self.schema_connection_id() else {
             self.clear_schema_browser("Connect to browse schema");
             return;
         };
@@ -502,7 +515,7 @@ impl SqlatorWindow {
                     .await
                     .expect("join get_schemas");
 
-                let current = window.selected_connection_id();
+                let current = window.schema_connection_id();
                 if current.as_deref() != Some(id.as_str()) {
                     return;
                 }
@@ -659,6 +672,7 @@ impl SqlatorWindow {
         let id = connection_id.to_string();
 
         self.set_selected_connection_id(Some(id.clone()));
+        self.set_schema_connection_id(Some(id.clone()));
         self.imp()
             .connection_status
             .borrow_mut()
@@ -736,7 +750,9 @@ impl SqlatorWindow {
                         if let Some(list) = window.imp().connections.borrow().as_ref() {
                             list.set_status_for(&id, ConnectionStatus::Disconnected);
                         }
-                        window.update_schema_browser();
+                        if window.schema_connection_id().as_deref() == Some(id.as_str()) {
+                            window.update_schema_browser();
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("disconnect_database({id}) failed: {e}");

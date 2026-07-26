@@ -85,6 +85,8 @@ impl ConnectionList {
         list_view.set_model(Some(&selection));
         list_view.set_single_click_activate(true);
 
+        // Highlight only — ListView selection can change on focus/hover without
+        // activate; schema must not follow that (see set_schema_connection_id).
         selection.connect_selection_changed(glib::clone!(
             #[weak]
             window,
@@ -112,7 +114,9 @@ impl ConnectionList {
                         window.toggle_group_collapsed(&id, !collapsed);
                     }
                     SidebarKind::Connection { id, status, .. } => {
+                        // Selection may follow focus/hover; schema only follows activate.
                         window.set_selected_connection_id(Some(id.clone()));
+                        window.set_schema_connection_id(Some(id.clone()));
                         if !matches!(
                             status,
                             ConnectionStatus::Connected | ConnectionStatus::Connecting
