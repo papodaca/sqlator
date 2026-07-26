@@ -1,8 +1,10 @@
 use crate::application::SqlatorApplication;
+use crate::connection::{status_map_from_service, ConnectionList, ConnectionStatus};
 use crate::query_tab::QueryTab;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
+use std::collections::HashMap;
 
 mod imp {
     use super::*;
@@ -25,8 +27,10 @@ mod imp {
         pub connection_list: TemplateChild<gtk::ListView>,
 
         pub settings: OnceCell<gio::Settings>,
-        pub connection_store: RefCell<Option<gio::ListStore>>,
+        pub connections: RefCell<Option<ConnectionList>>,
         pub selected_connection_id: RefCell<Option<String>>,
+        /// In-flight / error status overlays on top of `db.is_connected`.
+        pub connection_status: RefCell<HashMap<String, ConnectionStatus>>,
     }
 
     use std::cell::OnceCell;
@@ -314,48 +318,8 @@ impl SqlatorWindow {
     }
 
     fn setup_connection_list(&self) {
-        let store = gio::ListStore::new::<gtk::StringObject>();
-        *self.imp().connection_store.borrow_mut() = Some(store.clone());
-
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let label = gtk::Label::builder().xalign(0.0).build();
-            item.set_child(Some(&label));
-        });
-        factory.connect_bind(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(obj) = item.item().and_downcast::<gtk::StringObject>() else {
-                return;
-            };
-            if let Some(label) = item.child().and_downcast::<gtk::Label>() {
-                label.set_text(&obj.string());
-            }
-        });
-
-        let selection = gtk::SingleSelection::new(Some(store.clone()));
-        selection.connect_selection_changed(glib::clone!(
-            #[weak(rename_to = window)]
-            self,
-            move |selection, _, _| {
-                if let Some(obj) = selection
-                    .selected_item()
-                    .and_downcast::<gtk::StringObject>()
-                {
-                    // Store displays "name" but we keep id in a parallel refresh.
-                    // For skeleton: treat string as "name [id]" encoded below.
-                    let text = obj.string();
-                    if let Some((name, id)) = text.rsplit_once(" · ") {
-                        let _ = name;
-                        *window.imp().selected_connection_id.borrow_mut() = Some(id.to_string());
-                    }
-                }
-            }
-        ));
-
-        self.imp().connection_list.set_factory(Some(&factory));
-        self.imp().connection_list.set_model(Some(&selection));
-
+        let list = ConnectionList::attach(self, &self.imp().connection_list);
+        *self.imp().connections.borrow_mut() = Some(list);
         self.refresh_connections();
     }
 
@@ -365,33 +329,345 @@ impl SqlatorWindow {
             .and_downcast::<SqlatorApplication>()
             .expect("SqlatorApplication");
         let service = app.service();
-        let store = self
-            .imp()
-            .connection_store
-            .borrow()
-            .clone()
-            .expect("connection store");
+        let selected = self.selected_connection_id();
+        let overlay = self.imp().connection_status.borrow().clone();
 
-        glib::spawn_future_local(async move {
-            let list = crate::spawn_tokio!(async move { service.list_connections().await })
-                .await
-                .expect("join list_connections");
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let service_groups = service.clone();
+                let service_conns = service.clone();
+                let groups_res =
+                    crate::spawn_tokio!(async move { service_groups.get_groups().await })
+                        .await
+                        .expect("join get_groups");
+                let conns_res =
+                    crate::spawn_tokio!(async move { service_conns.list_connections().await })
+                        .await
+                        .expect("join list_connections");
 
-            store.remove_all();
-            match list {
-                Ok(conns) => {
-                    for c in conns {
-                        let label = format!("{} · {}", c.name, c.id);
-                        store.append(&gtk::StringObject::new(&label));
+                let groups = match groups_res {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!("get_groups failed: {e}");
+                        Vec::new()
+                    }
+                };
+                let conns = match conns_res {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("list_connections failed: {e}");
+                        return;
+                    }
+                };
+
+                let ids: Vec<String> = conns.iter().map(|c| c.id.clone()).collect();
+                let mut status = status_map_from_service(&service, &ids);
+                for (id, st) in overlay {
+                    // Preserve in-flight / error until pool state supersedes.
+                    match st {
+                        ConnectionStatus::Connecting | ConnectionStatus::Error => {
+                            if !matches!(status.get(&id), Some(ConnectionStatus::Connected)) {
+                                status.insert(id, st);
+                            }
+                        }
+                        ConnectionStatus::Connected | ConnectionStatus::Disconnected => {}
                     }
                 }
-                Err(e) => tracing::warn!("list_connections failed: {e}"),
+
+                if let Some(list) = window.imp().connections.borrow().as_ref() {
+                    list.rebuild(groups, conns, &status, selected.as_deref());
+                }
             }
-        });
+        ));
     }
 
     pub fn selected_connection_id(&self) -> Option<String> {
         self.imp().selected_connection_id.borrow().clone()
+    }
+
+    pub fn set_selected_connection_id(&self, id: Option<String>) {
+        *self.imp().selected_connection_id.borrow_mut() = id;
+    }
+
+    pub fn connect_sidebar_connection(&self, connection_id: &str) {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let id = connection_id.to_string();
+
+        self.set_selected_connection_id(Some(id.clone()));
+        self.imp()
+            .connection_status
+            .borrow_mut()
+            .insert(id.clone(), ConnectionStatus::Connecting);
+        if let Some(list) = self.imp().connections.borrow().as_ref() {
+            list.set_status_for(&id, ConnectionStatus::Connecting);
+        }
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let svc = service.clone();
+                let id_task = id.clone();
+                let result =
+                    crate::spawn_tokio!(async move { svc.connect_database(&id_task).await })
+                        .await
+                        .expect("join connect_database");
+
+                match result {
+                    Ok(()) => {
+                        window
+                            .imp()
+                            .connection_status
+                            .borrow_mut()
+                            .insert(id.clone(), ConnectionStatus::Connected);
+                        if let Some(list) = window.imp().connections.borrow().as_ref() {
+                            list.set_status_for(&id, ConnectionStatus::Connected);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("connect_database({id}) failed: {e}");
+                        window
+                            .imp()
+                            .connection_status
+                            .borrow_mut()
+                            .insert(id.clone(), ConnectionStatus::Error);
+                        if let Some(list) = window.imp().connections.borrow().as_ref() {
+                            list.set_status_for(&id, ConnectionStatus::Error);
+                        }
+                        let dialog =
+                            adw::AlertDialog::new(Some("Connection failed"), Some(&e.to_string()));
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&window));
+                    }
+                }
+            }
+        ));
+    }
+
+    pub fn disconnect_sidebar_connection(&self, connection_id: &str) {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let id = connection_id.to_string();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let svc = service.clone();
+                let id_task = id.clone();
+                let result =
+                    crate::spawn_tokio!(async move { svc.disconnect_database(&id_task).await })
+                        .await
+                        .expect("join disconnect_database");
+
+                match result {
+                    Ok(()) => {
+                        window.imp().connection_status.borrow_mut().remove(&id);
+                        if let Some(list) = window.imp().connections.borrow().as_ref() {
+                            list.set_status_for(&id, ConnectionStatus::Disconnected);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("disconnect_database({id}) failed: {e}");
+                        let dialog =
+                            adw::AlertDialog::new(Some("Disconnect failed"), Some(&e.to_string()));
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&window));
+                    }
+                }
+            }
+        ));
+    }
+
+    pub fn clone_sidebar_connection(&self, connection_id: &str) {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let id = connection_id.to_string();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let svc = service.clone();
+                let result = crate::spawn_tokio!(async move { svc.clone_connection(id).await })
+                    .await
+                    .expect("join clone_connection");
+                match result {
+                    Ok(info) => {
+                        window.set_selected_connection_id(Some(info.id));
+                        window.refresh_connections();
+                    }
+                    Err(e) => {
+                        let dialog =
+                            adw::AlertDialog::new(Some("Clone failed"), Some(&e.to_string()));
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&window));
+                    }
+                }
+            }
+        ));
+    }
+
+    pub fn delete_sidebar_connection(&self, connection_id: &str) {
+        let id = connection_id.to_string();
+        let dialog = adw::AlertDialog::new(
+            Some("Delete connection?"),
+            Some("This removes the saved connection profile. It cannot be undone."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[strong]
+                id,
+                move |_, response| {
+                    if response != "delete" {
+                        return;
+                    }
+                    let app = window
+                        .application()
+                        .and_downcast::<SqlatorApplication>()
+                        .expect("SqlatorApplication");
+                    let service = app.service();
+                    let id = id.clone();
+                    glib::spawn_future_local(async move {
+                        let svc = service.clone();
+                        let id_task = id.clone();
+                        let result =
+                            crate::spawn_tokio!(
+                                async move { svc.delete_connection(id_task).await }
+                            )
+                            .await
+                            .expect("join delete_connection");
+                        match result {
+                            Ok(()) => {
+                                if window.selected_connection_id().as_deref() == Some(id.as_str()) {
+                                    window.set_selected_connection_id(None);
+                                }
+                                window.imp().connection_status.borrow_mut().remove(&id);
+                                window.refresh_connections();
+                            }
+                            Err(e) => {
+                                let dialog = adw::AlertDialog::new(
+                                    Some("Delete failed"),
+                                    Some(&e.to_string()),
+                                );
+                                dialog.add_response("ok", "OK");
+                                dialog.present(Some(&window));
+                            }
+                        }
+                    });
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
+    pub fn toggle_group_collapsed(&self, group_id: &str, collapsed: bool) {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let service = app.service();
+        let id = group_id.to_string();
+
+        // Optimistic local update via refresh after persist.
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let svc = service.clone();
+                let groups = crate::spawn_tokio!(async move { svc.get_groups().await })
+                    .await
+                    .expect("join get_groups");
+                let Ok(groups) = groups else {
+                    return;
+                };
+                let Some(mut group) = groups.into_iter().find(|g| g.id == id) else {
+                    return;
+                };
+                group.collapsed = collapsed;
+                let svc = service.clone();
+                let result = crate::spawn_tokio!(async move { svc.update_group(group).await })
+                    .await
+                    .expect("join update_group");
+                if let Err(e) = result {
+                    tracing::warn!("update_group failed: {e}");
+                }
+                window.refresh_connections();
+            }
+        ));
+    }
+
+    pub fn delete_sidebar_group(&self, group_id: &str) {
+        let id = group_id.to_string();
+        let dialog = adw::AlertDialog::new(
+            Some("Delete group?"),
+            Some("Connections in this group become ungrouped. Sub-groups are re-parented."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[strong]
+                id,
+                move |_, response| {
+                    if response != "delete" {
+                        return;
+                    }
+                    let app = window
+                        .application()
+                        .and_downcast::<SqlatorApplication>()
+                        .expect("SqlatorApplication");
+                    let service = app.service();
+                    let id = id.clone();
+                    glib::spawn_future_local(async move {
+                        let svc = service.clone();
+                        let result = crate::spawn_tokio!(async move { svc.delete_group(id).await })
+                            .await
+                            .expect("join delete_group");
+                        match result {
+                            Ok(()) => window.refresh_connections(),
+                            Err(e) => {
+                                let dialog = adw::AlertDialog::new(
+                                    Some("Delete group failed"),
+                                    Some(&e.to_string()),
+                                );
+                                dialog.add_response("ok", "OK");
+                                dialog.present(Some(&window));
+                            }
+                        }
+                    });
+                }
+            ),
+        );
+        dialog.present(Some(self));
     }
 
     pub fn add_query_tab(&self, title: Option<&str>) -> adw::TabPage {

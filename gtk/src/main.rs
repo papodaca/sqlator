@@ -1,4 +1,5 @@
 mod application;
+mod connection;
 mod query_tab;
 mod results;
 mod runtime;

@@ -16,3 +16,44 @@
     text-decoration: underline;
   }
 }
+
+/* Connection sidebar */
+.connection-color-dot {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 9999px;
+  background-color: #64748b;
+}
+
+.connection-color-red { background-color: #ef4444; }
+.connection-color-orange { background-color: #f97316; }
+.connection-color-yellow { background-color: #eab308; }
+.connection-color-green { background-color: #22c55e; }
+.connection-color-teal { background-color: #14b8a6; }
+.connection-color-blue { background-color: #3b82f6; }
+.connection-color-violet { background-color: #8b5cf6; }
+.connection-color-pink { background-color: #ec4899; }
+.connection-color-slate { background-color: #64748b; }
+.connection-color-white {
+  background-color: #f8fafc;
+  border: 1px solid alpha(@borders, 0.6);
+}
+
+.connection-status.status-connected {
+  color: #22c55e;
+  font-size: 0.7em;
+}
+
+.connection-status.status-connecting {
+  color: #eab308;
+  font-size: 0.7em;
+}
+
+.connection-status.status-error {
+  color: #ef4444;
+  font-weight: bold;
+}
+
+.connection-menu-item {
+  padding: 6px 12px;
+}
