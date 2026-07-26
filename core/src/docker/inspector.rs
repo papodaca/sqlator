@@ -249,7 +249,7 @@ impl ContainerInspector {
 
         let labels = parse_labels(labels_str);
         let ports = parse_ports(ports_str);
-        let database_type_hint = detect_db_type(&image, &labels);
+        let database_type_hint = detect_db_type(image, &labels);
 
         if ip_address.is_empty() {
             warn!(
@@ -370,9 +370,7 @@ pub fn detect_db_type_from_image(image: &str) -> Option<String> {
     let lower = image.to_lowercase();
     if lower.contains("postgres") || lower.contains("postgresql") {
         Some("postgres".to_string())
-    } else if lower.contains("mysql") {
-        Some("mysql".to_string())
-    } else if lower.contains("mariadb") {
+    } else if lower.contains("mysql") || lower.contains("mariadb") {
         Some("mysql".to_string())
     } else if lower.contains("mssql") || lower.contains("sqlserver") {
         Some("mssql".to_string())

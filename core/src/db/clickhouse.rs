@@ -6,8 +6,10 @@
 ///
 /// Connection URL format: clickhouse://user:pass@host:8123/database
 use crate::error::CoreError;
-use crate::models::{FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo,
-    TableQueryParams, TableQueryResult};
+use crate::models::{
+    FilterSpec, QueryEvent, SchemaColumnInfo, SchemaInfo, SortSpec, TableInfo, TableQueryParams,
+    TableQueryResult,
+};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,11 +34,16 @@ pub async fn create_pool(url: &str) -> Result<ClickHousePool, CoreError> {
     let user = parsed.username();
     let password = parsed.password().unwrap_or("");
     let database_raw = parsed.path().trim_start_matches('/');
-    let database = if database_raw.is_empty() { "default" } else { database_raw };
+    let database = if database_raw.is_empty() {
+        "default"
+    } else {
+        database_raw
+    };
 
-    let http = reqwest::Client::builder()
-        .build()
-        .map_err(|e| CoreError { message: e.to_string(), code: "CONNECTION_FAILED".into() })?;
+    let http = reqwest::Client::builder().build().map_err(|e| CoreError {
+        message: e.to_string(),
+        code: "CONNECTION_FAILED".into(),
+    })?;
 
     let client = Arc::new(ClickHouseClient {
         http,
@@ -47,19 +54,18 @@ pub async fn create_pool(url: &str) -> Result<ClickHousePool, CoreError> {
     });
 
     // Test connectivity
-    send_query(&client, "SELECT 1 FORMAT JSONCompact").await.map_err(|e| CoreError {
-        message: format!("ClickHouse connection test failed: {}", e.message),
-        code: "CONNECTION_FAILED".into(),
-    })?;
+    send_query(&client, "SELECT 1 FORMAT JSONCompact")
+        .await
+        .map_err(|e| CoreError {
+            message: format!("ClickHouse connection test failed: {}", e.message),
+            code: "CONNECTION_FAILED".into(),
+        })?;
 
     Ok(client)
 }
 
 /// POST a SQL string to ClickHouse and return the parsed JSON response body.
-async fn send_query(
-    client: &ClickHouseClient,
-    sql: &str,
-) -> Result<serde_json::Value, CoreError> {
+async fn send_query(client: &ClickHouseClient, sql: &str) -> Result<serde_json::Value, CoreError> {
     let response = client
         .http
         .post(&client.base_url)
@@ -71,24 +77,33 @@ async fn send_query(
         .body(sql.to_string())
         .send()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "CONNECTION_FAILED".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
 
     if !response.status().is_success() {
-        let msg = response.text().await.unwrap_or_else(|_| "Unknown ClickHouse error".into());
-        return Err(CoreError { message: msg.trim().to_string(), code: "DATABASE_ERROR".into() });
+        let msg = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown ClickHouse error".into());
+        return Err(CoreError {
+            message: msg.trim().to_string(),
+            code: "DATABASE_ERROR".into(),
+        });
     }
 
     response
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "PARSE_ERROR".into() })
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "PARSE_ERROR".into(),
+        })
 }
 
 /// POST a DML/DDL statement and return (written_rows, error_body).
-async fn send_statement(
-    client: &ClickHouseClient,
-    sql: &str,
-) -> Result<u64, CoreError> {
+async fn send_statement(client: &ClickHouseClient, sql: &str) -> Result<u64, CoreError> {
     let response = client
         .http
         .post(&client.base_url)
@@ -101,11 +116,20 @@ async fn send_statement(
         .body(sql.to_string())
         .send()
         .await
-        .map_err(|e| CoreError { message: e.to_string(), code: "CONNECTION_FAILED".into() })?;
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "CONNECTION_FAILED".into(),
+        })?;
 
     if !response.status().is_success() {
-        let msg = response.text().await.unwrap_or_else(|_| "Unknown ClickHouse error".into());
-        return Err(CoreError { message: msg.trim().to_string(), code: "DATABASE_ERROR".into() });
+        let msg = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown ClickHouse error".into());
+        return Err(CoreError {
+            message: msg.trim().to_string(),
+            code: "DATABASE_ERROR".into(),
+        });
     }
 
     // X-ClickHouse-Summary header carries written_rows for DML
@@ -149,8 +173,10 @@ pub async fn execute_select(
 
     // JSONCompact: {"meta":[{"name":"col","type":"UInt32"}],"data":[[v,…],…],"rows":N}
     let meta = result["meta"].as_array().cloned().unwrap_or_default();
-    let names: Vec<String> =
-        meta.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect();
+    let names: Vec<String> = meta
+        .iter()
+        .filter_map(|m| m["name"].as_str().map(String::from))
+        .collect();
 
     if !names.is_empty() {
         let _ = sender.send(QueryEvent::Columns { names }).await;
@@ -172,7 +198,12 @@ pub async fn execute_select(
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let _ = sender.send(QueryEvent::Done { row_count: total_rows, duration_ms }).await;
+    let _ = sender
+        .send(QueryEvent::Done {
+            row_count: total_rows,
+            duration_ms,
+        })
+        .await;
     Ok(())
 }
 
@@ -186,7 +217,10 @@ pub async fn execute_statement(
         Ok(written_rows) => {
             let duration_ms = start.elapsed().as_millis() as u64;
             let _ = sender
-                .send(QueryEvent::RowsAffected { count: written_rows, duration_ms })
+                .send(QueryEvent::RowsAffected {
+                    count: written_rows,
+                    duration_ms,
+                })
                 .await;
         }
         Err(e) => {
@@ -199,13 +233,12 @@ pub async fn execute_statement(
 pub async fn get_schemas(pool: &ClickHousePool) -> Result<Vec<SchemaInfo>, CoreError> {
     // In ClickHouse, databases are the top-level namespaces (analogous to schemas).
     // Filter out built-in system databases.
-    let sql = format!(
-        "SELECT name, name = currentDatabase() AS is_default \
+    let sql = "SELECT name, name = currentDatabase() AS is_default \
          FROM system.databases \
          WHERE name NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA') \
          ORDER BY name \
          FORMAT JSONCompact"
-    );
+        .to_string();
 
     let result = send_query(pool, &sql).await?;
     let data = result["data"].as_array().cloned().unwrap_or_default();
@@ -312,7 +345,10 @@ pub async fn get_columns(
 
 fn map_clickhouse_type(raw: &str) -> String {
     // Strip Nullable(...) wrapper for type mapping
-    let inner = if let Some(stripped) = raw.strip_prefix("Nullable(").and_then(|s| s.strip_suffix(')')) {
+    let inner = if let Some(stripped) = raw
+        .strip_prefix("Nullable(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         stripped
     } else {
         raw
@@ -321,8 +357,8 @@ fn map_clickhouse_type(raw: &str) -> String {
     let base = inner.split('(').next().unwrap_or(inner).trim();
 
     match base {
-        "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" | "UInt256"
-        | "Int8" | "Int16" | "Int32" | "Int64" | "Int128" | "Int256" => "integer",
+        "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" | "UInt256" | "Int8" | "Int16"
+        | "Int32" | "Int64" | "Int128" | "Int256" => "integer",
         "Float32" | "Float64" => "float",
         "Decimal" | "Decimal32" | "Decimal64" | "Decimal128" | "Decimal256" => "decimal",
         "String" | "FixedString" => "text",
@@ -363,13 +399,18 @@ pub async fn query_table(
         table_quoted, where_clause, order_clause, limit, params.offset
     );
 
-    let result = send_query(pool, &sql)
-        .await
-        .map_err(|e| CoreError { message: e.message, code: "QUERY_TABLE".into() })?;
+    let result = send_query(pool, &sql).await.map_err(|e| CoreError {
+        message: e.message,
+        code: "QUERY_TABLE".into(),
+    })?;
 
     let data = result["data"].as_array().cloned().unwrap_or_default();
     let has_more = data.len() as i64 > params.limit.min(1000);
-    let rows_data = if has_more { &data[..data.len() - 1] } else { &data[..] };
+    let rows_data = if has_more {
+        &data[..data.len() - 1]
+    } else {
+        &data[..]
+    };
 
     let result_rows: Vec<serde_json::Value> = rows_data
         .iter()
@@ -377,7 +418,10 @@ pub async fn query_table(
             let mut obj = serde_json::Map::new();
             if let serde_json::Value::Array(arr) = row {
                 for (i, col) in col_names.iter().enumerate() {
-                    obj.insert(col.clone(), arr.get(i).cloned().unwrap_or(serde_json::Value::Null));
+                    obj.insert(
+                        col.clone(),
+                        arr.get(i).cloned().unwrap_or(serde_json::Value::Null),
+                    );
                 }
             }
             serde_json::Value::Object(obj)
@@ -417,21 +461,30 @@ fn build_where_clickhouse(filters: &[FilterSpec], valid: &[&str]) -> String {
                     let lit = format_sql_literal(val);
                     match f.operator.as_str() {
                         "contains" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '%{}%'", col, s))
                         }
                         "startsWith" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '{}%'", col, s))
                         }
                         "endsWith" => {
-                            let s = match val { serde_json::Value::String(s) => s.replace('\'', "''"), _ => val.to_string() };
+                            let s = match val {
+                                serde_json::Value::String(s) => s.replace('\'', "''"),
+                                _ => val.to_string(),
+                            };
                             Some(format!("{} LIKE '%{}'", col, s))
                         }
                         "equals" => Some(format!("{} = {}", col, lit)),
-                        "gt"  => Some(format!("{} > {}", col, lit)),
+                        "gt" => Some(format!("{} > {}", col, lit)),
                         "gte" => Some(format!("{} >= {}", col, lit)),
-                        "lt"  => Some(format!("{} < {}", col, lit)),
+                        "lt" => Some(format!("{} < {}", col, lit)),
                         "lte" => Some(format!("{} <= {}", col, lit)),
                         _ => None,
                     }
@@ -440,7 +493,11 @@ fn build_where_clickhouse(filters: &[FilterSpec], valid: &[&str]) -> String {
         })
         .collect();
 
-    if parts.is_empty() { String::new() } else { format!(" WHERE {}", parts.join(" AND ")) }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", parts.join(" AND "))
+    }
 }
 
 fn build_order_by_clickhouse(sort: &[SortSpec], valid: &[&str]) -> String {
@@ -453,10 +510,18 @@ fn build_order_by_clickhouse(sort: &[SortSpec], valid: &[&str]) -> String {
         })
         .collect();
 
-    if parts.is_empty() { String::new() } else { format!(" ORDER BY {}", parts.join(", ")) }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", parts.join(", "))
+    }
 }
 
-pub async fn get_ddl(pool: &ClickHousePool, table_name: &str, schema: Option<&str>) -> Result<String, CoreError> {
+pub async fn get_ddl(
+    pool: &ClickHousePool,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, CoreError> {
     let db = schema.unwrap_or(&pool.database);
 
     let sql = format!(
@@ -470,7 +535,7 @@ pub async fn get_ddl(pool: &ClickHousePool, table_name: &str, schema: Option<&st
 
     data.first()
         .and_then(|row| row.as_array())
-        .and_then(|arr| arr.get(0))
+        .and_then(|arr| arr.first())
         .and_then(|v| v.as_str().map(String::from))
         .ok_or_else(|| CoreError {
             message: format!("No DDL returned for {}.{}", db, table_name),

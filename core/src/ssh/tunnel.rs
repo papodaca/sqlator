@@ -18,7 +18,7 @@ pub struct TunnelHandle {
     pub local_port: u16,
     pub target_host: String,
     pub target_port: u16,
-    pub session: SessionHandle,
+    pub(crate) session: SessionHandle,
     pub cancel_token: CancellationToken,
 }
 
@@ -189,14 +189,9 @@ impl SshTunnel {
 
         // Write data arriving from SSH channel to local TCP stream.
         tokio::spawn(async move {
-            loop {
-                match from_ssh_rx.recv().await {
-                    Some(data) => {
-                        if stream_writer.write_all(&data).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
+            while let Some(data) = from_ssh_rx.recv().await {
+                if stream_writer.write_all(&data).await.is_err() {
+                    break;
                 }
             }
         });
@@ -425,7 +420,7 @@ impl SshTunnel {
 }
 
 #[derive(Debug)]
-struct Client;
+pub(crate) struct Client;
 
 impl client::Handler for Client {
     type Error = russh::Error;

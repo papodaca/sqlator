@@ -59,19 +59,14 @@ pub struct SshProfile {
     pub keepalive_interval: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionType {
+    #[default]
     Direct,
     SshTunnel,
     DockerContainer,
     LocalDockerContainer,
-}
-
-impl Default for ConnectionType {
-    fn default() -> Self {
-        ConnectionType::Direct
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

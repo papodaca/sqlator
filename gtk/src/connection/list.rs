@@ -433,6 +433,25 @@ fn build_context_popover(window: &SqlatorWindow, item: &SidebarItem) -> gtk::Pop
                 box_.append(&disconnect_btn);
             }
 
+            let edit_btn = menu_button("Edit");
+            edit_btn.connect_clicked(glib::clone!(
+                #[weak]
+                window,
+                #[strong]
+                id,
+                move |btn| {
+                    close_popover(btn);
+                    let Some(app) = window
+                        .application()
+                        .and_downcast::<crate::application::SqlatorApplication>()
+                    else {
+                        return;
+                    };
+                    crate::connection::present_edit(&window, &app, &id);
+                }
+            ));
+            box_.append(&edit_btn);
+
             let clone_btn = menu_button("Clone");
             clone_btn.connect_clicked(glib::clone!(
                 #[weak]

@@ -101,14 +101,13 @@ mod imp {
                 #[weak]
                 application,
                 move |_, _| {
-                    if let Some(window) = application.active_window() {
-                        let dialog = adw::AlertDialog::new(
-                            Some("New Connection"),
-                            Some("Connection management lands in phase 3. Use an existing profile from the sidebar, or run with a connected id after save."),
-                        );
-                        dialog.add_response("ok", "OK");
-                        dialog.present(Some(&window));
-                    }
+                    let Some(window) = application.active_window() else {
+                        return;
+                    };
+                    let Ok(window) = window.downcast::<SqlatorWindow>() else {
+                        return;
+                    };
+                    crate::connection::present_connection_form(&window, &application, None);
                 }
             ));
             application.add_action(&new_connection);
