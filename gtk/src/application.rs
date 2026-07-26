@@ -64,6 +64,11 @@ mod imp {
                 panic!("service set once at startup");
             }
 
+            // Theme before any window constructs SourceView buffers.
+            let settings = gio::Settings::new("im.apodaca.SqlatorGtk");
+            crate::theme::bind_settings(&settings);
+            application.setup_color_scheme_action(&settings);
+
             let quit = gio::SimpleAction::new("quit", None);
             quit.connect_activate(glib::clone!(
                 #[weak]
@@ -135,6 +140,11 @@ impl SqlatorApplication {
             .get()
             .expect("AppService available after startup")
             .clone()
+    }
+
+    fn setup_color_scheme_action(&self, settings: &gio::Settings) {
+        let action = settings.create_action(crate::theme::COLOR_SCHEME_KEY);
+        self.add_action(&action);
     }
 }
 

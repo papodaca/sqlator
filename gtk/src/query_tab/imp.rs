@@ -29,6 +29,8 @@ pub struct QueryTab {
 
     pub service: OnceCell<Arc<AppService>>,
     pub window: OnceCell<glib::WeakRef<SqlatorWindow>>,
+    /// Connection this editor runs against (Svelte per-connection query tab).
+    pub connection_id: RefCell<Option<String>>,
     pub generation: AtomicU64,
     pub cancel_token: RefCell<Option<CancellationToken>>,
     pub cancel_action: OnceCell<gio::SimpleAction>,

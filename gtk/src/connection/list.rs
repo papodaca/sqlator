@@ -114,13 +114,17 @@ impl ConnectionList {
                         window.toggle_group_collapsed(&id, !collapsed);
                     }
                     SidebarKind::Connection { id, status, .. } => {
-                        // Selection may follow focus/hover; schema only follows activate.
+                        // Selection may follow focus/hover; schema / workspace follow activate.
                         window.set_selected_connection_id(Some(id.clone()));
                         window.set_schema_connection_id(Some(id.clone()));
-                        if !matches!(
-                            status,
-                            ConnectionStatus::Connected | ConnectionStatus::Connecting
-                        ) {
+                        let newly_opened = window.open_connection_workspace(&id);
+                        // Match Svelte ConnectionItem: connect only when first opening.
+                        if newly_opened
+                            && !matches!(
+                                status,
+                                ConnectionStatus::Connected | ConnectionStatus::Connecting
+                            )
+                        {
                             window.connect_sidebar_connection(&id);
                         }
                     }
@@ -403,6 +407,9 @@ fn build_context_popover(window: &SqlatorWindow, item: &SidebarItem) -> gtk::Pop
                     id,
                     move |btn| {
                         close_popover(btn);
+                        window.set_selected_connection_id(Some(id.clone()));
+                        window.set_schema_connection_id(Some(id.clone()));
+                        window.open_connection_workspace(&id);
                         window.connect_sidebar_connection(&id);
                     }
                 ));

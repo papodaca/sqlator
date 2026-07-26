@@ -11,13 +11,29 @@ use std::collections::HashMap;
 
 mod imp {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+
+    /// One query tab detached from `tab_view` while its connection is inactive.
+    #[derive(Debug, Clone)]
+    pub struct StashedQueryTab {
+        pub title: String,
+        pub tab: QueryTab,
+    }
+
+    /// Full query-tab set for a connection that is not the active workspace.
+    #[derive(Debug, Clone)]
+    pub struct StashedWorkspace {
+        pub tabs: Vec<StashedQueryTab>,
+        pub selected_index: u32,
+    }
 
     #[derive(Debug, Default, CompositeTemplate)]
     #[template(resource = "/im/apodaca/SqlatorGtk/ui/window.ui")]
     pub struct SqlatorWindow {
         #[template_child]
         pub split_view: TemplateChild<adw::OverlaySplitView>,
+        #[template_child]
+        pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub tab_view: TemplateChild<adw::TabView>,
         #[template_child]
@@ -26,6 +42,10 @@ mod imp {
         pub tab_overview: TemplateChild<adw::TabOverview>,
         #[template_child]
         pub overview_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub connection_tabs_scroll: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub connection_tabs_box: TemplateChild<gtk::Box>,
         #[template_child]
         pub connection_list: TemplateChild<gtk::ListView>,
         #[template_child]
@@ -45,6 +65,16 @@ mod imp {
         pub schema_connection_id: RefCell<Option<String>>,
         /// In-flight / error status overlays on top of `db.is_connected`.
         pub connection_status: RefCell<HashMap<String, ConnectionStatus>>,
+        /// Display names for connection tab labels (id → name).
+        pub connection_names: RefCell<HashMap<String, String>>,
+        /// Open connection workspaces not currently mounted in `tab_view`.
+        pub stashed_workspaces: RefCell<HashMap<String, StashedWorkspace>>,
+        /// Connection whose query tabs are currently in `tab_view`.
+        pub active_workspace_id: RefCell<Option<String>>,
+        /// Open order for the connection tab bar.
+        pub open_connection_ids: RefCell<Vec<String>>,
+        /// Skip busy/last-tab guards while draining pages for workspace switch/close.
+        pub force_close_pages: Cell<bool>,
     }
 
     use std::cell::OnceCell;
@@ -69,6 +99,7 @@ mod imp {
     impl SqlatorWindow {
         #[template_callback]
         fn on_tab_overview_create_tab(&self, _overview: &adw::TabOverview) -> adw::TabPage {
+            // AdwTabOverview requires a page; only reachable when a workspace is active.
             self.obj().add_query_tab(None)
         }
     }
@@ -152,7 +183,7 @@ impl SqlatorWindow {
         // Must run after build(): application() is None during constructed().
         window.setup_connection_list();
         window.setup_schema_tree();
-        window.add_query_tab(None);
+        window.show_empty_workspace();
 
         window
     }
@@ -178,7 +209,9 @@ impl SqlatorWindow {
             #[weak(rename_to = window)]
             self,
             move |_, _| {
-                window.add_query_tab(None);
+                if window.imp().active_workspace_id.borrow().is_some() {
+                    window.add_query_tab(None);
+                }
             }
         ));
         self.add_action(&new_tab);
@@ -293,6 +326,16 @@ impl SqlatorWindow {
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |tab_view, page| {
+                if window.imp().force_close_pages.get() {
+                    return glib::Propagation::Proceed;
+                }
+
+                // Match Svelte: keep at least one query tab per connection workspace.
+                if tab_view.n_pages() <= 1 {
+                    tab_view.close_page_finish(page, false);
+                    return glib::Propagation::Stop;
+                }
+
                 let Some(tab) = page.child().downcast::<QueryTab>().ok() else {
                     return glib::Propagation::Proceed;
                 };
@@ -391,6 +434,12 @@ impl SqlatorWindow {
                 };
 
                 let ids: Vec<String> = conns.iter().map(|c| c.id.clone()).collect();
+                {
+                    let mut names = window.imp().connection_names.borrow_mut();
+                    for c in &conns {
+                        names.insert(c.id.clone(), c.name.clone());
+                    }
+                }
                 let mut status = status_map_from_service(&service, &ids);
                 for (id, st) in overlay {
                     // Preserve in-flight / error until pool state supersedes.
@@ -407,6 +456,7 @@ impl SqlatorWindow {
                 if let Some(list) = window.imp().connections.borrow().as_ref() {
                     list.rebuild(groups, conns, &status, selected.as_deref());
                 }
+                window.rebuild_connection_tab_bar();
             }
         ));
     }
@@ -842,6 +892,8 @@ impl SqlatorWindow {
                                     window.set_selected_connection_id(None);
                                 }
                                 window.imp().connection_status.borrow_mut().remove(&id);
+                                // Profile is gone — drop workspace UI without a second disconnect.
+                                window.discard_connection_workspace(&id);
                                 window.refresh_connections();
                             }
                             Err(e) => {
@@ -954,11 +1006,317 @@ impl SqlatorWindow {
             .and_downcast::<SqlatorApplication>()
             .expect("SqlatorApplication");
         let tab = QueryTab::new(&app, self);
+        if let Some(id) = self.imp().active_workspace_id.borrow().clone() {
+            tab.set_connection_id(Some(id));
+        }
         let page = self.imp().tab_view.append(&tab);
         page.set_title(title.unwrap_or("Query"));
         page.set_live_thumbnail(true);
         self.imp().tab_view.set_selected_page(&page);
         page
+    }
+
+    /// Show the empty-state page (no connection workspace open).
+    fn show_empty_workspace(&self) {
+        self.drain_tab_view(true);
+        *self.imp().active_workspace_id.borrow_mut() = None;
+        self.imp().content_stack.set_visible_child_name("empty");
+        self.imp().tab_bar.set_visible(false);
+        self.imp().connection_tabs_scroll.set_visible(false);
+    }
+
+    /// Open a connection workspace, or focus it if already open.
+    /// Returns `true` when a new workspace was created (Svelte `tabs.openConnection`).
+    pub fn open_connection_workspace(&self, connection_id: &str) -> bool {
+        if self.imp().active_workspace_id.borrow().as_deref() == Some(connection_id) {
+            self.rebuild_connection_tab_bar();
+            return false;
+        }
+
+        let already_open = self
+            .imp()
+            .open_connection_ids
+            .borrow()
+            .iter()
+            .any(|id| id == connection_id);
+        if already_open {
+            self.switch_connection_workspace(connection_id);
+            return false;
+        }
+
+        self.stash_active_workspace();
+        self.imp()
+            .open_connection_ids
+            .borrow_mut()
+            .push(connection_id.to_string());
+        *self.imp().active_workspace_id.borrow_mut() = Some(connection_id.to_string());
+        self.imp().content_stack.set_visible_child_name("tabs");
+        self.imp().tab_bar.set_visible(true);
+        self.add_query_tab(None);
+        self.rebuild_connection_tab_bar();
+        true
+    }
+
+    /// Switch the query-tab strip to an already-open connection workspace.
+    pub fn switch_connection_workspace(&self, connection_id: &str) {
+        if self.imp().active_workspace_id.borrow().as_deref() == Some(connection_id) {
+            return;
+        }
+        let is_open = self
+            .imp()
+            .open_connection_ids
+            .borrow()
+            .iter()
+            .any(|id| id == connection_id);
+        if !is_open {
+            return;
+        }
+
+        self.stash_active_workspace();
+        let workspace = self
+            .imp()
+            .stashed_workspaces
+            .borrow_mut()
+            .remove(connection_id)
+            .unwrap_or_else(|| self.fresh_workspace(connection_id));
+        self.mount_workspace(connection_id, workspace);
+        self.set_selected_connection_id(Some(connection_id.to_string()));
+        self.set_schema_connection_id(Some(connection_id.to_string()));
+        self.rebuild_connection_tab_bar();
+    }
+
+    /// Close a connection workspace and disconnect (Svelte connection tab close).
+    pub fn close_connection_workspace(&self, connection_id: &str) {
+        self.remove_connection_workspace(connection_id);
+        self.disconnect_sidebar_connection(connection_id);
+    }
+
+    /// Drop workspace UI state without disconnecting (e.g. connection deleted).
+    pub fn discard_connection_workspace(&self, connection_id: &str) {
+        self.remove_connection_workspace(connection_id);
+    }
+
+    fn remove_connection_workspace(&self, connection_id: &str) {
+        let was_active = self.imp().active_workspace_id.borrow().as_deref() == Some(connection_id);
+
+        self.imp()
+            .open_connection_ids
+            .borrow_mut()
+            .retain(|id| id != connection_id);
+        self.imp()
+            .stashed_workspaces
+            .borrow_mut()
+            .remove(connection_id);
+
+        if was_active {
+            self.drain_tab_view(true);
+            *self.imp().active_workspace_id.borrow_mut() = None;
+
+            let next_id = self.imp().open_connection_ids.borrow().last().cloned();
+            if let Some(next_id) = next_id {
+                let workspace = self
+                    .imp()
+                    .stashed_workspaces
+                    .borrow_mut()
+                    .remove(&next_id)
+                    .unwrap_or_else(|| self.fresh_workspace(&next_id));
+                self.mount_workspace(&next_id, workspace);
+                self.set_selected_connection_id(Some(next_id.clone()));
+                self.set_schema_connection_id(Some(next_id));
+            } else {
+                self.show_empty_workspace();
+                if self.schema_connection_id().as_deref() == Some(connection_id) {
+                    self.set_schema_connection_id(None);
+                }
+            }
+        } else if self.schema_connection_id().as_deref() == Some(connection_id)
+            && self.imp().active_workspace_id.borrow().is_none()
+        {
+            self.set_schema_connection_id(None);
+        }
+
+        self.rebuild_connection_tab_bar();
+    }
+
+    fn stash_active_workspace(&self) {
+        let Some(id) = self.imp().active_workspace_id.borrow().clone() else {
+            return;
+        };
+        let workspace = self.take_mounted_workspace();
+        self.imp()
+            .stashed_workspaces
+            .borrow_mut()
+            .insert(id, workspace);
+        *self.imp().active_workspace_id.borrow_mut() = None;
+    }
+
+    fn take_mounted_workspace(&self) -> imp::StashedWorkspace {
+        let tab_view = &self.imp().tab_view;
+        let selected_index = tab_view
+            .selected_page()
+            .map(|p| tab_view.page_position(&p) as u32)
+            .unwrap_or(0);
+        let mut tabs = Vec::new();
+        for i in 0..tab_view.n_pages() {
+            let page = tab_view.nth_page(i);
+            let title = page.title().to_string();
+            let tab = page
+                .child()
+                .downcast::<QueryTab>()
+                .expect("tab_view pages are QueryTab");
+            tabs.push(imp::StashedQueryTab { title, tab });
+        }
+        // Detach without cancelling in-flight queries — inactive workspaces keep running.
+        self.drain_tab_view(false);
+        imp::StashedWorkspace {
+            tabs,
+            selected_index,
+        }
+    }
+
+    fn mount_workspace(&self, connection_id: &str, workspace: imp::StashedWorkspace) {
+        let tab_view = &self.imp().tab_view;
+        debug_assert_eq!(tab_view.n_pages(), 0);
+
+        let mut selected_page = None;
+        for (i, stashed) in workspace.tabs.into_iter().enumerate() {
+            // Keep connection_id in sync if the tab was created before wiring existed.
+            if stashed.tab.connection_id().as_deref() != Some(connection_id) {
+                stashed
+                    .tab
+                    .set_connection_id(Some(connection_id.to_string()));
+            }
+            let page = tab_view.append(&stashed.tab);
+            page.set_title(&stashed.title);
+            page.set_live_thumbnail(true);
+            if i as u32 == workspace.selected_index {
+                selected_page = Some(page);
+            }
+        }
+
+        if let Some(page) = selected_page {
+            tab_view.set_selected_page(&page);
+        } else if tab_view.n_pages() > 0 {
+            let last = tab_view.nth_page(tab_view.n_pages() - 1);
+            tab_view.set_selected_page(&last);
+        } else {
+            *self.imp().active_workspace_id.borrow_mut() = Some(connection_id.to_string());
+            self.add_query_tab(None);
+            self.imp().content_stack.set_visible_child_name("tabs");
+            self.imp().tab_bar.set_visible(true);
+            return;
+        }
+
+        *self.imp().active_workspace_id.borrow_mut() = Some(connection_id.to_string());
+        self.imp().content_stack.set_visible_child_name("tabs");
+        self.imp().tab_bar.set_visible(true);
+    }
+
+    fn fresh_workspace(&self, connection_id: &str) -> imp::StashedWorkspace {
+        let app = self
+            .application()
+            .and_downcast::<SqlatorApplication>()
+            .expect("SqlatorApplication");
+        let tab = QueryTab::new(&app, self);
+        tab.set_connection_id(Some(connection_id.to_string()));
+        imp::StashedWorkspace {
+            tabs: vec![imp::StashedQueryTab {
+                title: "Query".to_string(),
+                tab,
+            }],
+            selected_index: 0,
+        }
+    }
+
+    /// Remove all pages from `tab_view`. When `cancel_busy`, abort in-flight queries.
+    fn drain_tab_view(&self, cancel_busy: bool) {
+        let tab_view = &self.imp().tab_view;
+        if cancel_busy {
+            for i in 0..tab_view.n_pages() {
+                if let Ok(tab) = tab_view.nth_page(i).child().downcast::<QueryTab>() {
+                    if tab.is_busy() {
+                        tab.cancel_query();
+                    }
+                }
+            }
+        }
+        self.imp().force_close_pages.set(true);
+        while tab_view.n_pages() > 0 {
+            let page = tab_view.nth_page(0);
+            tab_view.close_page(&page);
+        }
+        self.imp().force_close_pages.set(false);
+    }
+
+    fn rebuild_connection_tab_bar(&self) {
+        let tabs_box = &self.imp().connection_tabs_box;
+        while let Some(child) = tabs_box.first_child() {
+            tabs_box.remove(&child);
+        }
+
+        let ids = self.imp().open_connection_ids.borrow().clone();
+        let active = self.imp().active_workspace_id.borrow().clone();
+        self.imp()
+            .connection_tabs_scroll
+            .set_visible(!ids.is_empty());
+
+        for id in ids {
+            let name = self
+                .imp()
+                .connection_names
+                .borrow()
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| id.clone());
+            let is_active = active.as_deref() == Some(id.as_str());
+
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            row.add_css_class("connection-tab");
+            if is_active {
+                row.add_css_class("active");
+            }
+
+            let select = gtk::Button::with_label(&name);
+            select.add_css_class("flat");
+            select.add_css_class("connection-tab-select");
+            select.set_hexpand(true);
+            select.set_tooltip_text(Some(&name));
+            if let Some(child) = select.child() {
+                if let Ok(label) = child.downcast::<gtk::Label>() {
+                    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    label.set_max_width_chars(18);
+                    label.set_xalign(0.0);
+                }
+            }
+            select.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[strong]
+                id,
+                move |_| {
+                    window.switch_connection_workspace(&id);
+                }
+            ));
+            row.append(&select);
+
+            let close = gtk::Button::from_icon_name("window-close-symbolic");
+            close.add_css_class("flat");
+            close.add_css_class("circular");
+            close.add_css_class("connection-tab-close");
+            close.set_tooltip_text(Some("Disconnect & close"));
+            close.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[strong]
+                id,
+                move |_| {
+                    window.close_connection_workspace(&id);
+                }
+            ));
+            row.append(&close);
+
+            tabs_box.append(&row);
+        }
     }
 
     pub fn editor_results_position(&self) -> i32 {

@@ -79,3 +79,33 @@
 .schema-placeholder {
   opacity: 0.7;
 }
+
+/* Connection workspace tab strip (Svelte ConnectionTabBar) */
+.connection-tab-bar {
+  min-height: 36px;
+}
+
+.connection-tab {
+  min-width: 120px;
+  max-width: 220px;
+  border-radius: 6px;
+}
+
+.connection-tab.active {
+  background-color: alpha(@accent_bg_color, 0.18);
+}
+
+.connection-tab-select {
+  padding-left: 10px;
+  padding-right: 4px;
+}
+
+.connection-tab-close {
+  margin-right: 4px;
+  opacity: 0.55;
+}
+
+.connection-tab:hover .connection-tab-close,
+.connection-tab.active .connection-tab-close {
+  opacity: 1;
+}

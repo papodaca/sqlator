@@ -44,6 +44,14 @@ impl QueryTab {
         tab
     }
 
+    pub fn connection_id(&self) -> Option<String> {
+        self.imp().connection_id.borrow().clone()
+    }
+
+    pub fn set_connection_id(&self, id: Option<String>) {
+        *self.imp().connection_id.borrow_mut() = id;
+    }
+
     fn setup_editor(&self) {
         use sourceview::prelude::*;
 
@@ -216,11 +224,7 @@ impl QueryTab {
             return;
         }
 
-        let window = match self.imp().window.get().and_then(|w| w.upgrade()) {
-            Some(w) => w,
-            None => return,
-        };
-        let Some(connection_id) = window.selected_connection_id() else {
+        let Some(connection_id) = self.connection_id() else {
             self.append_message("Select a connection in the sidebar first.");
             self.imp().results_stack.set_visible_child_name("messages");
             return;

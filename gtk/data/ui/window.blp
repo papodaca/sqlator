@@ -68,6 +68,27 @@ template $SqlatorWindow: Adw.ApplicationWindow {
       }
 
       [top]
+      ScrolledWindow connection_tabs_scroll {
+        visible: false;
+        hexpand: true;
+        vscrollbar-policy: never;
+        hscrollbar-policy: automatic;
+        overlay-scrolling: true;
+
+        child: Box connection_tabs_box {
+          orientation: horizontal;
+          spacing: 4;
+          margin-start: 8;
+          margin-end: 8;
+          margin-top: 4;
+          margin-bottom: 4;
+          styles [
+            "connection-tab-bar",
+          ]
+        };
+      }
+
+      [top]
       Adw.TabBar tab_bar {
         view: tab_view;
         autohide: false;
@@ -173,9 +194,24 @@ template $SqlatorWindow: Adw.ApplicationWindow {
           };
         };
 
-        content: Adw.TabView tab_view {
+        content: Stack content_stack {
           hexpand: true;
           vexpand: true;
+          vhomogeneous: true;
+          hhomogeneous: true;
+
+          Adw.StatusPage {
+            name: "empty";
+            icon-name: "network-server-symbolic";
+            title: _("No connection open");
+            description: _("Select a connection in the sidebar to open a query workspace.");
+          }
+
+          Adw.TabView tab_view {
+            name: "tabs";
+            hexpand: true;
+            vexpand: true;
+          }
         };
       };
     };
@@ -192,6 +228,30 @@ menu primary_menu {
     item {
       label: _("Close Tab");
       action: "win.close-tab";
+    }
+  }
+
+  section {
+    submenu {
+      label: _("Appearance");
+
+      item {
+        label: _("System");
+        action: "app.color-scheme";
+        target: "default";
+      }
+
+      item {
+        label: _("Light");
+        action: "app.color-scheme";
+        target: "force-light";
+      }
+
+      item {
+        label: _("Dark");
+        action: "app.color-scheme";
+        target: "force-dark";
+      }
     }
   }
 
