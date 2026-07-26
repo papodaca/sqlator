@@ -39,7 +39,10 @@ impl AppState {
 
     /// Create state pre-wired to a single database.
     /// The database pool is connected eagerly so the first page load is instant.
-    pub async fn new_with_single_db(url: String, name: String) -> Result<Self, sqlator_core::error::CoreError> {
+    pub async fn new_with_single_db(
+        url: String,
+        name: String,
+    ) -> Result<Self, sqlator_core::error::CoreError> {
         let cfg = SingleDbConfig {
             connection_id: SINGLE_DB_CONN_ID.to_string(),
             connection_name: name,
@@ -51,7 +54,9 @@ impl AppState {
         Ok(state)
     }
 
-    fn new_inner(single_db: Option<SingleDbConfig>) -> Result<Self, sqlator_core::error::CoreError> {
+    fn new_inner(
+        single_db: Option<SingleDbConfig>,
+    ) -> Result<Self, sqlator_core::error::CoreError> {
         let config = ConfigManager::new("sqlator")?;
 
         let vault_path = dirs::config_dir()

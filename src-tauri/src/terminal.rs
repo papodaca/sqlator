@@ -1,7 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use sqlator_core::credentials::CredentialStore;
 use sqlator_core::models::{ConnectionType, SavedConnection, SshAuthMethod, SshProfile};
 use sqlator_core::ssh::{AuthMethod, SshAuthConfig};
 use std::io::{Read, Write};
@@ -112,10 +111,7 @@ fn direct_cli_spec(conn: &SavedConnection, host: &str, port: u16) -> CmdResult<C
             ],
             env: vec![],
         }),
-        other => Err(format!(
-            "Unsupported database type for terminal: {}",
-            other
-        )),
+        other => Err(format!("Unsupported database type for terminal: {}", other)),
     }
 }
 
@@ -134,7 +130,11 @@ fn docker_exec_cli_spec(conn: &SavedConnection) -> CmdResult<CliSpec> {
         match conn.db_type.as_str() {
             "postgres" => (
                 "psql",
-                vec!["-U".to_string(), conn.username.clone(), conn.database.clone()],
+                vec![
+                    "-U".to_string(),
+                    conn.username.clone(),
+                    conn.database.clone(),
+                ],
                 Some(("PGPASSWORD".to_string(), password)),
             ),
             "mysql" | "mariadb" => (
@@ -172,12 +172,7 @@ fn docker_exec_cli_spec(conn: &SavedConnection) -> CmdResult<CliSpec> {
                 ],
                 None,
             ),
-            other => {
-                return Err(format!(
-                    "Unsupported database type for terminal: {}",
-                    other
-                ))
-            }
+            other => return Err(format!("Unsupported database type for terminal: {}", other)),
         };
 
     // Assemble: docker exec [-e KEY=VALUE] -it <container> <cli> <args...>
@@ -257,12 +252,7 @@ fn remote_docker_exec_cmd(conn: &SavedConnection, container: &str) -> CmdResult<
                 ],
                 None,
             ),
-            other => {
-                return Err(format!(
-                    "Unsupported database type for terminal: {}",
-                    other
-                ))
-            }
+            other => return Err(format!("Unsupported database type for terminal: {}", other)),
         };
 
     // docker exec [-e KEY=VALUE] -it <container> <cli> <args>
@@ -339,8 +329,7 @@ fn ssh_docker_exec_spec(
     if matches!(auth.method, AuthMethod::Password) {
         if let Some(password) = &auth.password {
             if let Ok(sshpass_path) = which::which("sshpass") {
-                let mut sshpass_args =
-                    vec!["-p".to_string(), password.clone(), "ssh".to_string()];
+                let mut sshpass_args = vec!["-p".to_string(), password.clone(), "ssh".to_string()];
                 sshpass_args.extend(ssh_args);
                 return Ok(CliSpec {
                     binary: sshpass_path.to_string_lossy().to_string(),
@@ -357,32 +346,6 @@ fn ssh_docker_exec_spec(
         args: ssh_args,
         env: vec![],
     })
-}
-
-// ── Auth helpers ──────────────────────────────────────────────────────────────
-
-fn resolve_ssh_auth(profile: &SshProfile, credentials: &CredentialStore) -> CmdResult<SshAuthConfig> {
-    match profile.auth_method {
-        SshAuthMethod::Key => {
-            let key_path = profile.key_path.as_deref().unwrap_or_default();
-            let passphrase = credentials
-                .get_credential(&profile.id, "passphrase")
-                .map_err(map_err)?;
-            Ok(if let Some(pp) = passphrase {
-                SshAuthConfig::with_key_and_passphrase(&profile.username, key_path, pp)
-            } else {
-                SshAuthConfig::with_key(&profile.username, key_path)
-            })
-        }
-        SshAuthMethod::Password => {
-            let password = credentials
-                .get_credential(&profile.id, "password")
-                .map_err(map_err)?
-                .unwrap_or_default();
-            Ok(SshAuthConfig::with_password(&profile.username, password))
-        }
-        SshAuthMethod::Agent => Ok(SshAuthConfig::with_agent(&profile.username)),
-    }
 }
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
@@ -429,7 +392,8 @@ pub async fn spawn_db_terminal(
                 .container_name
                 .as_deref()
                 .ok_or("DockerContainer connection requires a container name")?;
-            let auth = resolve_ssh_auth(&profile, &state.credentials)?;
+            let auth = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
+                .map_err(|e| e.message())?;
             ssh_docker_exec_spec(&conn, &profile, &auth, container)?
         }
         // Local Docker: docker exec -it <container> <cli>
@@ -547,10 +511,7 @@ pub async fn resize_terminal(
 }
 
 #[tauri::command]
-pub async fn close_terminal(
-    state: State<'_, AppState>,
-    terminal_id: String,
-) -> CmdResult<()> {
+pub async fn close_terminal(state: State<'_, AppState>, terminal_id: String) -> CmdResult<()> {
     if let Some((_, handle)) = state.terminals.remove(&terminal_id) {
         let mut child = handle.child.lock().map_err(map_err)?;
         child.kill().map_err(map_err)?;

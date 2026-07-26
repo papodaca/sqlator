@@ -21,5 +21,13 @@ pub use connections::{
     parse_connection_url, resolve_connection_type, unique_name, ParsedConnectionUrl,
 };
 pub use error::ServiceError;
+pub use portability::{
+    build_export_json, parse_export_json, ExportFile, ExportedConnection, ExportedGroup,
+    ExportedJumpHost, ExportedSshProfile, ImportResult,
+};
+pub use schema::{
+    extract_single_table, extract_table_regex, non_editable_meta, schema_cache_key, TableExtract,
+    SCHEMA_CACHE_TTL_SECS,
+};
 pub use service::AppService;
-pub use ssh::parse_auth_method;
+pub use ssh::{build_auth_config_for_profile, build_jump_hosts_for_profile, parse_auth_method};

@@ -12,7 +12,7 @@ use sqlator_core::{
     docker::inspector::ContainerInspector,
     models::{
         BatchResult, ConnectionConfig, ConnectionGroup, ConnectionInfo, SavedConnection,
-        SchemaColumnInfo, SchemaInfo, SqlBatch, SshProfile, TableInfo, TableMeta, TableQueryParams,
+        SchemaColumnInfo, SchemaInfo, SqlBatch, SshProfile, TableInfo, TableQueryParams,
         TableQueryResult,
     },
     ssh::{config_parser, SshAuthConfig, SshHostConfig, SshTunnel},
@@ -774,153 +774,13 @@ async fn move_connection_to_group(state: &Arc<AppState>, args: &Value) -> Handle
 
 // ── Import / Export ───────────────────────────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportedConnection {
-    name: String,
-    color_id: String,
-    db_type: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssh_profile_name: Option<String>,
-    group_name: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportedSshProfile {
-    name: String,
-    host: String,
-    port: u16,
-    username: String,
-    auth_method: String,
-    key_path: Option<String>,
-    proxy_jump: Vec<ExportedJumpHost>,
-    local_port_binding: Option<u16>,
-    keepalive_interval: Option<u32>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportedJumpHost {
-    host: String,
-    port: u16,
-    username: String,
-    auth_method: String,
-    key_path: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportedGroup {
-    name: String,
-    color: Option<String>,
-    parent_group_name: Option<String>,
-    order: u32,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportFile {
-    version: String,
-    exported_at: String,
-    connections: Vec<ExportedConnection>,
-    ssh_profiles: Vec<ExportedSshProfile>,
-    groups: Vec<ExportedGroup>,
-}
-
-#[derive(serde::Serialize)]
-struct ImportResult {
-    groups_added: usize,
-    profiles_added: usize,
-    connections_added: usize,
-    connections_skipped: usize,
-}
-
 fn build_export(
     state_config: &sqlator_core::config::ConfigManager,
 ) -> Result<String, (StatusCode, String)> {
     let connections = state_config.get_connections().map_err(err)?;
     let profiles = state_config.get_ssh_profiles().map_err(err)?;
     let groups = state_config.get_groups().map_err(err)?;
-
-    let profile_names: std::collections::HashMap<String, String> = profiles
-        .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
-    let group_names: std::collections::HashMap<String, String> = groups
-        .iter()
-        .map(|g| (g.id.clone(), g.name.clone()))
-        .collect();
-
-    let exported_connections: Vec<ExportedConnection> = connections
-        .iter()
-        .map(|c| ExportedConnection {
-            name: c.name.clone(),
-            color_id: c.color_id.clone(),
-            db_type: c.db_type.clone(),
-            host: c.host.clone(),
-            port: c.port,
-            database: c.database.clone(),
-            username: c.username.clone(),
-            ssh_profile_name: c
-                .ssh_profile_id
-                .as_ref()
-                .and_then(|id| profile_names.get(id))
-                .cloned(),
-            group_name: c
-                .group_id
-                .as_ref()
-                .and_then(|id| group_names.get(id))
-                .cloned(),
-        })
-        .collect();
-
-    let exported_profiles: Vec<ExportedSshProfile> = profiles
-        .iter()
-        .map(|p| ExportedSshProfile {
-            name: p.name.clone(),
-            host: p.host.clone(),
-            port: p.port,
-            username: p.username.clone(),
-            auth_method: format!("{:?}", p.auth_method).to_lowercase(),
-            key_path: p.key_path.clone(),
-            proxy_jump: p
-                .proxy_jump
-                .iter()
-                .map(|j| ExportedJumpHost {
-                    host: j.host.clone(),
-                    port: j.port,
-                    username: j.username.clone(),
-                    auth_method: format!("{:?}", j.auth_method).to_lowercase(),
-                    key_path: j.key_path.clone(),
-                })
-                .collect(),
-            local_port_binding: p.local_port_binding,
-            keepalive_interval: p.keepalive_interval,
-        })
-        .collect();
-
-    let exported_groups: Vec<ExportedGroup> = groups
-        .iter()
-        .map(|g| ExportedGroup {
-            name: g.name.clone(),
-            color: g.color.clone(),
-            parent_group_name: g
-                .parent_group_id
-                .as_ref()
-                .and_then(|id| group_names.get(id))
-                .cloned(),
-            order: g.order,
-        })
-        .collect();
-
-    let export_file = ExportFile {
-        version: "1.0".to_string(),
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        connections: exported_connections,
-        ssh_profiles: exported_profiles,
-        groups: exported_groups,
-    };
-
-    serde_json::to_string_pretty(&export_file).map_err(server_err)
+    sqlator_service::build_export_json(&connections, &profiles, &groups).map_err(map_svc)
 }
 
 async fn export_connections(state: &Arc<AppState>) -> HandlerResult {
@@ -944,7 +804,7 @@ async fn import_connections(state: &Arc<AppState>, args: &Value) -> HandlerResul
     let json_str: String = get(args, "json")?;
     let duplicate_mode: String = get(args, "duplicateMode")?;
     let rename = duplicate_mode == "rename";
-    let file: ExportFile = serde_json::from_str(&json_str).map_err(err)?;
+    let file = sqlator_service::parse_export_json(&json_str).map_err(map_svc)?;
 
     let config = state.config.lock().await;
     let existing_groups = config.get_groups().map_err(err)?;
@@ -956,7 +816,7 @@ async fn import_connections(state: &Arc<AppState>, args: &Value) -> HandlerResul
         .collect();
     let mut groups_added = 0usize;
 
-    let mut remaining: Vec<&ExportedGroup> = file.groups.iter().collect();
+    let mut remaining: Vec<&sqlator_service::ExportedGroup> = file.groups.iter().collect();
     for _ in 0..3 {
         let mut next = Vec::new();
         for eg in remaining {
@@ -1093,7 +953,7 @@ async fn import_connections(state: &Arc<AppState>, args: &Value) -> HandlerResul
         connections_added += 1;
     }
 
-    Ok(json!(ImportResult {
+    Ok(json!(sqlator_service::ImportResult {
         groups_added,
         profiles_added,
         connections_added,
@@ -1128,7 +988,8 @@ async fn test_connection_with_ssh(state: &Arc<AppState>, args: &Value) -> Handle
         .port()
         .unwrap_or_else(|| sqlator_service::default_port_for_db_type(db_type));
 
-    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
+        .map_err(map_svc)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
 
     let tunnel_id = format!("test-{}", uuid::Uuid::new_v4());
@@ -1156,230 +1017,7 @@ async fn test_connection_with_ssh(state: &Arc<AppState>, args: &Value) -> Handle
     Ok(json!(msg))
 }
 
-fn build_auth_config_for_profile(
-    profile: &SshProfile,
-    credentials: &CredentialStore,
-) -> Result<SshAuthConfig, (StatusCode, String)> {
-    use sqlator_core::models::SshAuthMethod;
-    match profile.auth_method {
-        SshAuthMethod::Key => {
-            let key_path = profile.key_path.as_deref().unwrap_or_default();
-            let passphrase = credentials
-                .get_credential(&profile.id, "passphrase")
-                .map_err(err)?;
-            if let Some(pp) = passphrase {
-                Ok(SshAuthConfig::with_key_and_passphrase(
-                    &profile.username,
-                    key_path,
-                    pp,
-                ))
-            } else {
-                Ok(SshAuthConfig::with_key(&profile.username, key_path))
-            }
-        }
-        SshAuthMethod::Password => {
-            let pw = credentials
-                .get_credential(&profile.id, "password")
-                .map_err(err)?
-                .unwrap_or_default();
-            Ok(SshAuthConfig::with_password(&profile.username, pw))
-        }
-        SshAuthMethod::Agent => Ok(SshAuthConfig::with_agent(&profile.username)),
-    }
-}
-
 // ── Schema metadata ───────────────────────────────────────────────────────────
-
-/// Outcome of trying to identify a single editable source table.
-enum TableExtract {
-    /// One table reference found.
-    Found(String, Option<String>),
-    /// Parser succeeded but the query is a join, CTE, subquery, etc.
-    NotSingleTable,
-    /// Parser failed and the regex fallback could not determine a table.
-    Undetermined,
-}
-
-fn extract_single_table(sql: &str) -> TableExtract {
-    use sqlparser::ast::{SetExpr, Statement, TableFactor};
-    use sqlparser::dialect::GenericDialect;
-    use sqlparser::parser::Parser;
-
-    let stmts = match Parser::parse_sql(&GenericDialect {}, sql) {
-        Ok(s) => s,
-        Err(_) => {
-            return match extract_table_regex(sql) {
-                Some((t, s)) => TableExtract::Found(t, s),
-                None => TableExtract::Undetermined,
-            };
-        }
-    };
-
-    let Some(stmt) = stmts.into_iter().next() else {
-        return TableExtract::NotSingleTable;
-    };
-    let query = match stmt {
-        Statement::Query(q) => q,
-        _ => return TableExtract::NotSingleTable,
-    };
-
-    if query.with.is_some() {
-        return TableExtract::NotSingleTable;
-    }
-
-    let body = match *query.body {
-        SetExpr::Select(sel) => sel,
-        _ => return TableExtract::NotSingleTable,
-    };
-
-    if body.from.len() != 1 {
-        return TableExtract::NotSingleTable;
-    }
-    let twj = &body.from[0];
-    if !twj.joins.is_empty() {
-        return TableExtract::NotSingleTable;
-    }
-
-    match &twj.relation {
-        TableFactor::Table { name, .. } => {
-            let idents: Vec<String> = name.0.iter().map(|i| i.value.clone()).collect();
-            match idents.len() {
-                1 => TableExtract::Found(idents[0].clone(), None),
-                2 => TableExtract::Found(idents[1].clone(), Some(idents[0].clone())),
-                _ => TableExtract::NotSingleTable,
-            }
-        }
-        _ => TableExtract::NotSingleTable,
-    }
-}
-
-/// Regex/heuristic fallback when sqlparser cannot parse the statement.
-///
-/// Delimits the FROM region first, then rejects commas/`JOIN` only inside that
-/// region — so commas in the SELECT list are fine, but `FROM t1 , t2` is not.
-/// Indexes against the original string (not an uppercased copy) so non-ASCII
-/// before `FROM` cannot shift offsets.
-fn extract_table_regex(sql: &str) -> Option<(String, Option<String>)> {
-    let from_idx = sql
-        .as_bytes()
-        .windows(6)
-        .position(|w| w.eq_ignore_ascii_case(b" from "))?;
-    let after_from = sql[from_idx + 6..].trim_start();
-    let from_region = delimit_from_region(after_from);
-
-    // Multi-table FROM: comma or JOIN inside the region only
-    if from_region.contains(',') {
-        return None;
-    }
-    if from_region
-        .as_bytes()
-        .windows(6)
-        .any(|w| w.eq_ignore_ascii_case(b" join "))
-    {
-        return None;
-    }
-
-    let table_token: String = from_region
-        .chars()
-        .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '\\')
-        .collect();
-    if table_token.is_empty() {
-        return None;
-    }
-
-    split_schema_table(&table_token)
-}
-
-/// Slice of `after_from` up to the next clause keyword or `;`.
-fn delimit_from_region(after_from: &str) -> &str {
-    const KEYWORDS: &[&str] = &[
-        "where",
-        "group",
-        "having",
-        "order",
-        "limit",
-        "offset",
-        "fetch",
-        "window",
-        "union",
-        "intersect",
-        "except",
-        "for",
-        "into",
-    ];
-
-    let bytes = after_from.as_bytes();
-    let mut end = after_from.len();
-    if let Some(semi) = after_from.find(';') {
-        end = semi;
-    }
-
-    let mut i = 0;
-    while i < end {
-        while i < end && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= end {
-            break;
-        }
-        let token_start = i;
-        while i < end && !bytes[i].is_ascii_whitespace() && bytes[i] != b';' {
-            i += 1;
-        }
-        let token = &after_from[token_start..i];
-        if KEYWORDS.iter().any(|kw| token.eq_ignore_ascii_case(kw)) {
-            end = token_start;
-            break;
-        }
-    }
-
-    after_from[..end].trim()
-}
-
-fn unquote_ident(s: &str) -> String {
-    s.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
-        .to_string()
-}
-
-/// Split `schema.table` on the first dot not inside quotes/brackets.
-fn split_schema_table(token: &str) -> Option<(String, Option<String>)> {
-    let mut in_quotes: Option<char> = None;
-    let mut dot_pos = None;
-    for (i, c) in token.char_indices() {
-        match (in_quotes, c) {
-            (None, '"' | '`') => in_quotes = Some(c),
-            (None, '[') => in_quotes = Some(']'),
-            (Some(q), c) if c == q => in_quotes = None,
-            (None, '.') => {
-                dot_pos = Some(i);
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    match dot_pos {
-        Some(i) => Some((
-            unquote_ident(&token[i + 1..]),
-            Some(unquote_ident(&token[..i])),
-        )),
-        None => Some((unquote_ident(token), None)),
-    }
-}
-
-fn non_editable_meta(reason: &str) -> TableMeta {
-    TableMeta {
-        table_name: String::new(),
-        schema: None,
-        columns: vec![],
-        primary_key: sqlator_core::PrimaryKeyMeta {
-            columns: vec![],
-            exists: false,
-        },
-        is_editable: false,
-        editability_reason: Some(reason.into()),
-    }
-}
 
 async fn fetch_schema_metadata(state: &Arc<AppState>, args: &Value) -> HandlerResult {
     let connection_id: String = get(args, "connectionId")?;
@@ -1393,21 +1031,21 @@ async fn fetch_schema_metadata(state: &Arc<AppState>, args: &Value) -> HandlerRe
         return Ok(json!(null));
     }
 
-    let (table_name, schema_name) = match extract_single_table(&sql) {
-        TableExtract::Found(t, s) => (t, s),
-        TableExtract::NotSingleTable => {
-            return Ok(json!(non_editable_meta(
+    let (table_name, schema_name) = match sqlator_service::extract_single_table(&sql) {
+        sqlator_service::TableExtract::Found(t, s) => (t, s),
+        sqlator_service::TableExtract::NotSingleTable => {
+            return Ok(json!(sqlator_service::non_editable_meta(
                 "Cannot edit: query joins multiple tables or uses a subquery",
             )));
         }
-        TableExtract::Undetermined => {
-            return Ok(json!(non_editable_meta(
+        sqlator_service::TableExtract::Undetermined => {
+            return Ok(json!(sqlator_service::non_editable_meta(
                 "Cannot determine a single source table for this query",
             )));
         }
     };
 
-    let cache_key = format!("{connection_id}:{schema_name:?}:{table_name}");
+    let cache_key = sqlator_service::schema_cache_key(&connection_id, &schema_name, &table_name);
     if let Some(cached) = state.schema_cache.get(&cache_key) {
         let (meta, expires_at) = cached.clone();
         if std::time::Instant::now() < expires_at {
@@ -1423,7 +1061,8 @@ async fn fetch_schema_metadata(state: &Arc<AppState>, args: &Value) -> HandlerRe
         .await
         .map_err(err)?;
 
-    let expires = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let expires = std::time::Instant::now()
+        + std::time::Duration::from_secs(sqlator_service::SCHEMA_CACHE_TTL_SECS);
     state
         .schema_cache
         .insert(cache_key, (meta.clone(), expires));
@@ -1495,9 +1134,10 @@ async fn discover_container(state: &Arc<AppState>, args: &Value) -> HandlerResul
         .map_err(err)?
         .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
 
-    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
+        .map_err(map_svc)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
 
     let info = ContainerInspector::inspect(&ssh_config, auth_config, jump_hosts, &container_name)
         .await
@@ -1526,9 +1166,10 @@ async fn list_running_containers(state: &Arc<AppState>, args: &Value) -> Handler
         .map_err(err)?
         .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
 
-    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
+        .map_err(map_svc)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
 
     let containers = ContainerInspector::list_running(&ssh_config, auth_config, jump_hosts)
         .await
@@ -1551,9 +1192,10 @@ async fn test_docker_connection(state: &Arc<AppState>, args: &Value) -> HandlerR
         .map_err(err)?
         .ok_or_else(|| err(format!("SSH profile '{}' not found", ssh_profile_id)))?;
 
-    let auth_config = build_auth_config_for_profile(&profile, &state.credentials)?;
+    let auth_config = sqlator_service::build_auth_config_for_profile(&profile, &state.credentials)
+        .map_err(map_svc)?;
     let ssh_config = SshHostConfig::new(&profile.host, profile.port, auth_config.clone());
-    let jump_hosts = build_jump_hosts_for_profile(&profile)?;
+    let jump_hosts = sqlator_service::build_jump_hosts_for_profile(&profile).map_err(map_svc)?;
 
     let container_info = ContainerInspector::inspect(
         &ssh_config,
@@ -1599,149 +1241,6 @@ async fn test_docker_connection(state: &Arc<AppState>, args: &Value) -> HandlerR
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn build_jump_hosts_for_profile(
-    profile: &SshProfile,
-) -> Result<Vec<(SshHostConfig, SshAuthConfig)>, (StatusCode, String)> {
-    use sqlator_core::models::SshAuthMethod;
-    profile
-        .proxy_jump
-        .iter()
-        .map(|jump| {
-            let auth = match jump.auth_method {
-                SshAuthMethod::Key => {
-                    let key_path = jump.key_path.as_deref().unwrap_or_default();
-                    SshAuthConfig::with_key(&jump.username, key_path)
-                }
-                SshAuthMethod::Agent => SshAuthConfig::with_agent(&jump.username),
-                SshAuthMethod::Password => {
-                    return Err(err(format!(
-                        "Jump host '{}' uses password auth, which is not supported for stored jump hosts",
-                        jump.host
-                    )))
-                }
-            };
-            let config = SshHostConfig::new(&jump.host, jump.port, auth.clone());
-            Ok((config, auth))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod table_extract_tests {
-    use super::*;
-
-    #[test]
-    fn regex_simple_table() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM t"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_comma_in_select_list() {
-        assert_eq!(
-            extract_table_regex("SELECT a, b FROM t"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_comma_in_function_call() {
-        assert_eq!(
-            extract_table_regex("SELECT f(a, b) FROM t"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_comma_in_in_list() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM t WHERE x IN (1,2)"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_implicit_comma_join_rejected() {
-        assert_eq!(extract_table_regex("SELECT a, b FROM t1, t2"), None);
-        assert_eq!(extract_table_regex("SELECT a, b FROM t1 , t2"), None);
-    }
-
-    #[test]
-    fn regex_join_rejected() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM t1 JOIN t2 ON t1.id = t2.id"),
-            None
-        );
-    }
-
-    #[test]
-    fn regex_mixed_quoting() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM `\"t\"`"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_schema_qualified() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM s.t"),
-            Some(("t".into(), Some("s".into())))
-        );
-    }
-
-    #[test]
-    fn regex_mssql_brackets() {
-        assert_eq!(
-            extract_table_regex("SELECT a FROM [dbo].[t]"),
-            Some(("t".into(), Some("dbo".into())))
-        );
-    }
-
-    #[test]
-    fn regex_non_ascii_before_from_does_not_shift_offset() {
-        // Dotless-i uppercases to a different byte length; must still find `t`.
-        assert_eq!(
-            extract_table_regex("SELECT 'ııı' FROM t"),
-            Some(("t".into(), None))
-        );
-    }
-
-    #[test]
-    fn regex_quoted_ident_containing_dot() {
-        assert_eq!(
-            extract_table_regex(r#"SELECT a FROM "my.schema".t"#),
-            Some(("t".into(), Some("my.schema".into())))
-        );
-    }
-
-    #[test]
-    fn regex_mysql_g_terminator() {
-        // Confirmed sqlparser failure; fallback must still extract the table.
-        assert_eq!(
-            extract_table_regex("SELECT a FROM t\\G"),
-            Some(("t".into(), None))
-        );
-        match extract_single_table("SELECT a FROM t\\G") {
-            TableExtract::Found(t, s) => {
-                assert_eq!(t, "t");
-                assert_eq!(s, None);
-            }
-            other => panic!("expected Found, got {:?}", std::mem::discriminant(&other)),
-        }
-    }
-
-    #[test]
-    fn undetermined_reason_for_fallback_failure() {
-        match extract_single_table("SELECT a FROM t1 , t2\\G") {
-            TableExtract::Undetermined | TableExtract::NotSingleTable => {}
-            TableExtract::Found(t, _) => panic!("expected non-editable, got {t}"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod group_a_tests {
     use super::*;
@@ -1756,71 +1255,8 @@ mod group_a_tests {
 
     // Pure helpers moved to sqlator-service; characterization tests live there.
 
-    // ── extract_single_table (sqlparser path) ─────────────────────────────────
-
-    #[test]
-    fn extract_single_table_simple_select() {
-        match extract_single_table("SELECT a FROM t") {
-            TableExtract::Found(t, s) => {
-                assert_eq!(t, "t");
-                assert_eq!(s, None);
-            }
-            other => panic!(
-                "expected Found, got discriminant {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
-    }
-
-    #[test]
-    fn extract_single_table_schema_qualified() {
-        match extract_single_table("SELECT a FROM public.users") {
-            TableExtract::Found(t, s) => {
-                assert_eq!(t, "users");
-                assert_eq!(s.as_deref(), Some("public"));
-            }
-            other => panic!(
-                "expected Found, got discriminant {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
-    }
-
-    #[test]
-    fn extract_single_table_join_is_not_single() {
-        assert!(matches!(
-            extract_single_table("SELECT a FROM t1 JOIN t2 ON t1.id = t2.id"),
-            TableExtract::NotSingleTable
-        ));
-    }
-
-    #[test]
-    fn extract_single_table_subquery_is_not_single() {
-        assert!(matches!(
-            extract_single_table("SELECT a FROM (SELECT 1 AS a) AS sub"),
-            TableExtract::NotSingleTable
-        ));
-    }
-
-    #[test]
-    fn extract_single_table_cte_is_not_single() {
-        assert!(matches!(
-            extract_single_table("WITH c AS (SELECT 1 AS a) SELECT a FROM c"),
-            TableExtract::NotSingleTable
-        ));
-    }
-
-    #[test]
-    fn extract_single_table_non_select_is_not_single() {
-        assert!(matches!(
-            extract_single_table("INSERT INTO t (a) VALUES (1)"),
-            TableExtract::NotSingleTable
-        ));
-        assert!(matches!(
-            extract_single_table("UPDATE t SET a = 1"),
-            TableExtract::NotSingleTable
-        ));
-    }
+    // Pure helpers live in sqlator-service now.
+    // extract_single_table tests live in sqlator-service::schema.
 
     // ── import / export fixtures ──────────────────────────────────────────────
 
@@ -2160,13 +1596,7 @@ mod group_b_tests {
 
     // ── Schema cache key format (same Debug-on-Option formula as Tauri) ───────
 
-    fn schema_cache_key(
-        connection_id: &str,
-        schema_name: &Option<String>,
-        table_name: &str,
-    ) -> String {
-        format!("{connection_id}:{schema_name:?}:{table_name}")
-    }
+    use sqlator_service::schema_cache_key;
 
     fn sample_meta(name: &str) -> TableMeta {
         TableMeta {
@@ -2201,7 +1631,8 @@ mod group_b_tests {
 
     #[test]
     fn schema_cache_ttl_constant_is_300_seconds() {
-        const SCHEMA_CACHE_TTL_SECS: u64 = 300;
+        // Production insert: Instant::now() + Duration::from_secs(sqlator_service::SCHEMA_CACHE_TTL_SECS)
+        const SCHEMA_CACHE_TTL_SECS: u64 = sqlator_service::SCHEMA_CACHE_TTL_SECS;
         let expires = Instant::now() + Duration::from_secs(SCHEMA_CACHE_TTL_SECS);
         let remaining = expires.saturating_duration_since(Instant::now());
         assert!(remaining.as_secs() >= 299 && remaining.as_secs() <= 300);

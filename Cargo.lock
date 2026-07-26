@@ -6127,10 +6127,13 @@ dependencies = [
 name = "sqlator-service"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dashmap",
  "dirs",
  "serde",
+ "serde_json",
  "sqlator-core",
+ "sqlparser",
  "thiserror 2.0.18",
  "tokio",
  "url",
