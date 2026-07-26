@@ -149,9 +149,9 @@ pub fn present_new_connection_chooser(window: &SqlatorWindow, app: &SqlatorAppli
 pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let service = app.service();
     let dialog = adw::Dialog::new();
-    // Match direct-connection form width so color swatches don't wrap the title.
-    dialog.set_content_width(560);
     // Track natural height so step changes (esp. container list) resize the dialog.
+    // NOTE: follows-content-size ignores content-width/height; width must come from
+    // the child's size request (same ~520px content column as the direct form).
     dialog.set_follows_content_size(true);
     dialog.set_title("New Docker Container Connection");
 
@@ -173,6 +173,9 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let clamp = adw::Clamp::new();
     clamp.set_maximum_size(520);
     clamp.set_tightening_threshold(400);
+    // Floor the natural width so ActionRow titles (e.g. Color) don't wrap to a
+    // single-character column when follows-content-size is enabled.
+    clamp.set_size_request(520, -1);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(12);
@@ -371,6 +374,7 @@ pub fn present(window: &SqlatorWindow, app: &SqlatorApplication) {
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_width(true)
         .propagate_natural_height(true)
         .child(&clamp)
         .build();
