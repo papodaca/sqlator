@@ -1294,6 +1294,91 @@ impl SqlatorWindow {
         page
     }
 
+    /// Open `.sql` files from the desktop (MIME / `HANDLES_OPEN`) into new query tabs.
+    ///
+    /// Requires an active connection workspace — otherwise the window is presented
+    /// with a toast. Full open/save UX lives in a separate plan; this is the
+    /// desktop-integration half so `MimeType=application/sql` is not a no-op.
+    pub fn open_sql_files(&self, files: &[gio::File]) {
+        if files.is_empty() {
+            return;
+        }
+        if self.imp().active_workspace_id.borrow().is_none() {
+            self.show_toast("Connect to a database first, then open the .sql file again");
+            return;
+        }
+
+        const WARN_BYTES: u64 = 1_000_000;
+        const MAX_BYTES: u64 = 10_000_000;
+
+        for file in files {
+            let path = file.path();
+            let display = path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("query.sql")
+                .to_string();
+
+            let info = match file.query_info(
+                "standard::size",
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            ) {
+                Ok(info) => info,
+                Err(e) => {
+                    self.show_toast(&format!("Could not open {display}: {e}"));
+                    continue;
+                }
+            };
+            let size = info.size() as u64;
+            if size > MAX_BYTES {
+                self.show_toast(&format!(
+                    "{display} is too large ({} MiB; max 10 MiB)",
+                    size / (1024 * 1024)
+                ));
+                continue;
+            }
+
+            let contents = if let Some(path) = path.as_ref() {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.show_toast(&format!("Could not read {display}: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                match file.load_contents(gio::Cancellable::NONE) {
+                    Ok((bytes, _)) => match String::from_utf8(bytes.to_vec()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.show_toast(&format!("{display} is not valid UTF-8: {e}"));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        self.show_toast(&format!("Could not read {display}: {e}"));
+                        continue;
+                    }
+                }
+            };
+
+            // Strip UTF-8 BOM if present.
+            let sql = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+            let page = self.add_query_tab(Some(&display));
+            if let Ok(tab) = page.child().downcast::<QueryTab>() {
+                tab.set_sql(sql);
+            }
+            if size > WARN_BYTES {
+                self.show_toast(&format!(
+                    "{display} is large ({:.1} MiB) — editing may be slow",
+                    size as f64 / (1024.0 * 1024.0)
+                ));
+            }
+        }
+    }
+
     /// Show the empty-state page (no connection workspace open).
     fn show_empty_workspace(&self) {
         self.drain_tab_view(true);

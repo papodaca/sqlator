@@ -54,6 +54,19 @@ mod imp {
             window.present();
         }
 
+        fn open(&self, files: &[gio::File], _hint: &str) {
+            let application = self.obj();
+            // Ensure a window exists (activate path), then load SQL files into it.
+            application.activate();
+            let Some(window) = application.active_window() else {
+                return;
+            };
+            let Ok(window) = window.downcast::<SqlatorWindow>() else {
+                return;
+            };
+            window.open_sql_files(files);
+        }
+
         fn startup(&self) {
             self.parent_startup();
             let application = self.obj();
@@ -126,7 +139,10 @@ impl SqlatorApplication {
     pub fn new() -> Self {
         glib::Object::builder()
             .property("application-id", "im.apodaca.SqlatorGtk")
-            .property("flags", gio::ApplicationFlags::default())
+            .property(
+                "flags",
+                gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::default(),
+            )
             .property("resource-base-path", "/im/apodaca/SqlatorGtk")
             .build()
     }

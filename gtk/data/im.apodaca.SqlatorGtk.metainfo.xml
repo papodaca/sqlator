@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for sqlator-gtk.
+  Validate with: appstreamcli validate gtk/data/im.apodaca.SqlatorGtk.metainfo.xml
+  Screenshots are deferred until packaging/marketing assets exist (meson/Flatpak: sqlator-9g1.11).
+-->
+<component type="desktop-application">
+  <id>im.apodaca.SqlatorGtk</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>SQLator</name>
+  <summary>Multi-database SQL client with SSH tunnels</summary>
+  <developer id="im.apodaca">
+    <name>Ethan Apodaca</name>
+  </developer>
+  <launchable type="desktop-id">im.apodaca.SqlatorGtk.desktop</launchable>
+  <url type="homepage">https://github.com/papodaca/sqlator</url>
+  <url type="bugtracker">https://github.com/papodaca/sqlator/issues</url>
+  <url type="vcs-browser">https://github.com/papodaca/sqlator</url>
+  <description>
+    <p>
+      SQLator is a multi-database SQL client for GNOME. Connect to PostgreSQL,
+      MySQL, MariaDB, SQLite, Microsoft SQL Server, Oracle, and ClickHouse —
+      including connections through SSH tunnels.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>SQL editor with syntax highlighting, snippets, and schema-aware completion</li>
+      <li>Results grid with editing, preview, and transactional apply</li>
+      <li>Lazy schema browser with table browse and DDL viewer</li>
+      <li>SSH profiles, Docker discovery, credential vault, and connection import/export</li>
+      <li>Optional embedded terminal for database CLIs</li>
+    </ul>
+  </description>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <keywords>
+    <keyword>SQL</keyword>
+    <keyword>database</keyword>
+    <keyword>postgres</keyword>
+    <keyword>mysql</keyword>
+    <keyword>sqlite</keyword>
+  </keywords>
+  <provides>
+    <binary>sqlator-gtk</binary>
+    <mediatype>application/sql</mediatype>
+    <mediatype>text/x-sql</mediatype>
+  </provides>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <supports>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-26" type="development">
+      <description>
+        <p>Initial GTK desktop integration: AppStream metadata, desktop entry, and icons.</p>
+      </description>
+    </release>
+  </releases>
+</component>

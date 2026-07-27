@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="20" y1="8" x2="108" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1a5fb4"/>
+    </linearGradient>
+    <linearGradient id="cyl" x1="40" y1="28" x2="88" y2="96" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.98"/>
+      <stop offset="1" stop-color="#dbe9f8" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
+  <!-- App tile -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+  <!-- Database cylinder -->
+  <ellipse cx="64" cy="40" rx="28" ry="10" fill="url(#cyl)"/>
+  <path d="M36 40 v36 c0 5.5 12.5 10 28 10 s28-4.5 28-10 V40"
+        fill="url(#cyl)"/>
+  <ellipse cx="64" cy="40" rx="28" ry="10" fill="none" stroke="#1a5fb4" stroke-opacity="0.25" stroke-width="2"/>
+  <path d="M36 58 c0 5.5 12.5 10 28 10 s28-4.5 28-10"
+        fill="none" stroke="#1a5fb4" stroke-opacity="0.22" stroke-width="2"/>
+  <path d="M36 70 c0 5.5 12.5 10 28 10 s28-4.5 28-10"
+        fill="none" stroke="#1a5fb4" stroke-opacity="0.22" stroke-width="2"/>
+  <!-- Query spark -->
+  <circle cx="92" cy="86" r="14" fill="#99c1f1"/>
+  <path d="M86 86 h7 l2-6 2 12 2-6 h5"
+        fill="none" stroke="#1a5fb4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
