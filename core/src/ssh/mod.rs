@@ -8,4 +8,4 @@ pub use auth::{AuthMethod, JumpHost, SshAuthConfig, SshAuthConfigData, SshHostCo
 pub use command::{SshCommand, SshCommandResult};
 pub use config_parser::HostEntry;
 pub use error::{SshError, SshResult};
-pub use tunnel::{SshTunnel, TunnelHandle};
+pub use tunnel::{LocalForward, SshSession, SshTunnel, TunnelHandle};

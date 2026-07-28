@@ -1,11 +1,13 @@
-//! Profile+target tunnel registry with connection-id refcounting.
+//! Shared SSH session registry with per-target local forwards.
 //!
-//! See `docs/plans/gtk/2026-07-26-001-design-ssh-tunnel-registry-keying.md`.
+//! Sessions are keyed by SSH profile id. Forwards are keyed by
+//! [`TunnelKey`] `(profile_id, target_host, target_port)` with connection-id
+//! refcounting. See `docs/plans/gtk/2026-07-26-001-design-ssh-tunnel-registry-keying.md`.
 
-use sqlator_core::ssh::TunnelHandle;
+use sqlator_core::ssh::{LocalForward, SshSession};
 use std::collections::HashSet;
 
-/// Registry key: share only when profile **and** remote target match.
+/// Registry key for a local forward: share only when profile **and** remote target match.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TunnelKey {
     pub profile_id: String,
@@ -27,7 +29,7 @@ impl TunnelKey {
     }
 }
 
-/// Who holds a claim on a managed tunnel.
+/// Who holds a claim on a managed forward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TunnelClaim {
     /// A saved DB connection is using this forward.
@@ -36,17 +38,50 @@ pub enum TunnelClaim {
     Standalone,
 }
 
-/// A live tunnel plus its refcount / standalone claim.
-pub struct ManagedTunnel {
-    pub handle: TunnelHandle,
+/// Live authenticated session plus the forward keys currently attached to it.
+pub struct ManagedSession {
+    pub session: SshSession,
+    forwards: HashSet<TunnelKey>,
+}
+
+impl ManagedSession {
+    pub fn new(session: SshSession) -> Self {
+        Self {
+            session,
+            forwards: HashSet::new(),
+        }
+    }
+
+    pub fn add_forward(&mut self, key: TunnelKey) {
+        self.forwards.insert(key);
+    }
+
+    /// Remove a forward key. Returns `true` when no forwards remain (session idle).
+    pub fn remove_forward(&mut self, key: &TunnelKey) -> bool {
+        self.forwards.remove(key);
+        self.is_idle()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.forwards.is_empty()
+    }
+
+    pub fn forward_count(&self) -> usize {
+        self.forwards.len()
+    }
+}
+
+/// A live local forward plus its refcount / standalone claim.
+pub struct ManagedForward {
+    pub forward: LocalForward,
     users: HashSet<String>,
     standalone: bool,
 }
 
-impl ManagedTunnel {
-    pub fn new(handle: TunnelHandle) -> Self {
+impl ManagedForward {
+    pub fn new(forward: LocalForward) -> Self {
         Self {
-            handle,
+            forward,
             users: HashSet::new(),
             standalone: false,
         }
@@ -63,7 +98,7 @@ impl ManagedTunnel {
         }
     }
 
-    /// Remove a claim. Returns `true` when the tunnel has no remaining users
+    /// Remove a claim. Returns `true` when the forward has no remaining users
     /// and should be closed and removed from the registry.
     pub fn remove_claim(&mut self, claim: &TunnelClaim) -> bool {
         match claim {
@@ -103,13 +138,13 @@ pub struct SshTunnelInfo {
     pub target_port: u16,
 }
 
-impl From<&TunnelHandle> for SshTunnelInfo {
-    fn from(t: &TunnelHandle) -> Self {
+impl SshTunnelInfo {
+    pub fn from_forward(profile_id: impl Into<String>, forward: &LocalForward) -> Self {
         Self {
-            profile_id: t.profile_id.clone(),
-            local_port: t.local_port,
-            target_host: t.target_host.clone(),
-            target_port: t.target_port,
+            profile_id: profile_id.into(),
+            local_port: forward.local_port,
+            target_host: forward.target_host.clone(),
+            target_port: forward.target_port,
         }
     }
 }
@@ -147,7 +182,7 @@ pub fn rewrite_url_via_localhost(
 mod tests {
     use super::*;
 
-    /// Claim/refcount logic without a live SSH session (mirrors [`ManagedTunnel`]).
+    /// Claim/refcount logic without a live SSH session (mirrors [`ManagedForward`]).
     struct ClaimProbe {
         users: HashSet<String>,
         standalone: bool,
@@ -181,6 +216,28 @@ mod tests {
         }
     }
 
+    /// Session forward-set teardown without a live SSH handle.
+    struct SessionProbe {
+        forwards: HashSet<TunnelKey>,
+    }
+
+    impl SessionProbe {
+        fn new() -> Self {
+            Self {
+                forwards: HashSet::new(),
+            }
+        }
+
+        fn add_forward(&mut self, key: TunnelKey) {
+            self.forwards.insert(key);
+        }
+
+        fn remove_forward(&mut self, key: &TunnelKey) -> bool {
+            self.forwards.remove(key);
+            self.forwards.is_empty()
+        }
+    }
+
     #[test]
     fn tunnel_key_distinguishes_targets_on_same_profile() {
         let a = TunnelKey::new("bastion", "pg.internal", 5432);
@@ -206,6 +263,17 @@ mod tests {
         t.add_claim(TunnelClaim::Connection("c1".into()));
         assert!(!t.remove_claim(&TunnelClaim::Connection("c1".into())));
         assert!(t.remove_claim(&TunnelClaim::Standalone));
+    }
+
+    #[test]
+    fn session_stays_up_until_last_forward_removed() {
+        let mut s = SessionProbe::new();
+        let pg = TunnelKey::new("bastion", "pg.internal", 5432);
+        let mysql = TunnelKey::new("bastion", "mysql.internal", 3306);
+        s.add_forward(pg.clone());
+        s.add_forward(mysql.clone());
+        assert!(!s.remove_forward(&pg));
+        assert!(s.remove_forward(&mysql));
     }
 
     #[test]

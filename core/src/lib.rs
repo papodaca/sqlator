@@ -16,6 +16,6 @@ pub use models::{
 pub use db::{detect_database_type, DatabaseType, DbManager};
 pub use docker::{ContainerInfo, ContainerPort, ContainerStatus, ContainerSummary, DockerError};
 pub use ssh::{
-    AuthMethod, HostEntry, JumpHost, SshAuthConfig, SshAuthConfigData, SshCommand,
-    SshCommandResult, SshError, SshHostConfig, SshResult, SshTunnel, TunnelHandle,
+    AuthMethod, HostEntry, JumpHost, LocalForward, SshAuthConfig, SshAuthConfigData, SshCommand,
+    SshCommandResult, SshError, SshHostConfig, SshResult, SshSession, SshTunnel, TunnelHandle,
 };

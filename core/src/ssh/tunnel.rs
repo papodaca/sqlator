@@ -5,7 +5,7 @@ use russh::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -13,6 +13,32 @@ use tracing::{debug, error, info, warn};
 
 pub type SessionHandle = Arc<Mutex<client::Handle<Client>>>;
 
+/// Authenticated SSH session. One session can own many [`LocalForward`]s.
+#[derive(Clone)]
+pub struct SshSession {
+    pub profile_id: String,
+    pub(crate) handle: SessionHandle,
+}
+
+impl SshSession {
+    pub(crate) fn handle(&self) -> SessionHandle {
+        Arc::clone(&self.handle)
+    }
+}
+
+/// A localhost TCP listener that forwards through an [`SshSession`] to one remote target.
+pub struct LocalForward {
+    pub local_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    /// Cancels only this listener; does not disconnect the SSH session.
+    pub cancel_token: CancellationToken,
+}
+
+/// Compatibility façade: one session + one forward (historical 1:1 shape).
+///
+/// Prefer [`SshTunnel::connect_session`] + [`SshTunnel::open_forward`] when sharing
+/// a session across multiple targets.
 pub struct TunnelHandle {
     pub profile_id: String,
     pub local_port: u16,
@@ -25,6 +51,145 @@ pub struct TunnelHandle {
 pub struct SshTunnel;
 
 impl SshTunnel {
+    /// Authenticate an SSH session (direct or via jump hosts). No local forward yet.
+    pub async fn connect_session(
+        profile_id: String,
+        ssh_config: &SshHostConfig,
+        auth_config: &SshAuthConfig,
+        jump_hosts: &[(SshHostConfig, SshAuthConfig)],
+    ) -> SshResult<SshSession> {
+        info!(
+            "SSH session: connecting to {}:{} (jump_hosts={})",
+            ssh_config.host,
+            ssh_config.port,
+            jump_hosts.len()
+        );
+
+        let session = if jump_hosts.is_empty() {
+            debug!(
+                "SSH session: direct connection to {}:{}",
+                ssh_config.host, ssh_config.port
+            );
+            Self::connect_direct(ssh_config, auth_config).await?
+        } else {
+            debug!(
+                "SSH session: connecting via {} jump host(s)",
+                jump_hosts.len()
+            );
+            Self::connect_via_jump(ssh_config, auth_config, jump_hosts).await?
+        };
+
+        info!("SSH session established for profile '{}'", profile_id);
+
+        Ok(SshSession {
+            profile_id,
+            handle: Arc::new(Mutex::new(session)),
+        })
+    }
+
+    /// Allocate a local port for a new forward (listener not started yet).
+    pub fn open_forward(target_host: String, target_port: u16) -> SshResult<LocalForward> {
+        let local_port = Self::find_available_port()?;
+        Ok(LocalForward {
+            local_port,
+            target_host,
+            target_port,
+            cancel_token: CancellationToken::new(),
+        })
+    }
+
+    /// Start accepting connections on `forward` and open `direct-tcpip` channels
+    /// through `session`.
+    pub async fn start_local_forward(
+        session: &SshSession,
+        forward: &LocalForward,
+    ) -> SshResult<()> {
+        let listener =
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, forward.local_port))
+                .await
+                .map_err(|e| SshError::PortBindFailed(e.to_string()))?;
+
+        let session = session.handle();
+        let target_host = forward.target_host.clone();
+        let target_port = forward.target_port;
+        let cancel_token = forward.cancel_token.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        debug!("SSH forward: cancelled for {}:{}", target_host, target_port);
+                        break;
+                    }
+                    result = listener.accept() => {
+                        match result {
+                            Ok((stream, addr)) => {
+                                debug!(
+                                    "SSH forward: accepted connection from {} -> {}:{}",
+                                    addr, target_host, target_port
+                                );
+                                let session = session.lock().await;
+                                match session
+                                    .channel_open_direct_tcpip(
+                                        &target_host,
+                                        target_port.into(),
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    Ok(channel) => {
+                                        debug!("SSH forward: direct-tcpip channel opened");
+                                        drop(session);
+                                        tokio::spawn(Self::forward_stream(stream, channel));
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "SSH forward: failed to open direct-tcpip to {}:{}: {}",
+                                            target_host, target_port, e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("SSH forward: failed to accept connection: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        info!(
+            "SSH forward listening on localhost:{} -> {}:{}",
+            forward.local_port, forward.target_host, forward.target_port
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a single forward's listener without disconnecting the session.
+    pub fn close_forward(forward: LocalForward) {
+        forward.cancel_token.cancel();
+        info!(
+            "SSH forward closed localhost:{} -> {}:{}",
+            forward.local_port, forward.target_host, forward.target_port
+        );
+    }
+
+    /// Disconnect an SSH session (call only after all forwards are closed).
+    pub async fn close_session(session: SshSession) -> SshResult<()> {
+        let handle = session.handle.lock().await;
+        handle
+            .disconnect(Disconnect::ByApplication, "Connection closed", "en")
+            .await
+            .map_err(|e| SshError::Other(e.to_string()))?;
+
+        info!("SSH session closed for profile: {}", session.profile_id);
+        Ok(())
+    }
+
+    /// Create a dedicated session + single forward (compatibility façade).
     pub async fn create(
         profile_id: String,
         ssh_config: &SshHostConfig,
@@ -33,8 +198,6 @@ impl SshTunnel {
         target_port: u16,
         jump_hosts: &[(SshHostConfig, SshAuthConfig)],
     ) -> SshResult<TunnelHandle> {
-        let cancel_token = CancellationToken::new();
-
         info!(
             "SSH tunnel: connecting to {}:{} (jump_hosts={}), target={}:{}",
             ssh_config.host,
@@ -44,154 +207,62 @@ impl SshTunnel {
             target_port
         );
 
-        let session = if jump_hosts.is_empty() {
-            debug!(
-                "SSH tunnel: direct connection to {}:{}",
-                ssh_config.host, ssh_config.port
-            );
-            Self::connect_direct(ssh_config, auth_config).await?
-        } else {
-            debug!(
-                "SSH tunnel: connecting via {} jump host(s)",
-                jump_hosts.len()
-            );
-            Self::connect_via_jump(ssh_config, auth_config, jump_hosts).await?
-        };
+        let session =
+            Self::connect_session(profile_id.clone(), ssh_config, auth_config, jump_hosts).await?;
+        let forward = Self::open_forward(target_host, target_port)?;
 
-        info!("SSH tunnel: SSH session established");
-
-        let local_port = Self::find_available_port()?;
-
-        let tunnel_handle = TunnelHandle {
+        Ok(TunnelHandle {
             profile_id,
-            local_port,
-            target_host: target_host.clone(),
-            target_port,
-            session: Arc::new(Mutex::new(session)),
-            cancel_token,
-        };
-
-        Ok(tunnel_handle)
+            local_port: forward.local_port,
+            target_host: forward.target_host,
+            target_port: forward.target_port,
+            session: session.handle,
+            cancel_token: forward.cancel_token,
+        })
     }
 
     pub async fn start_forwarding(tunnel: &TunnelHandle) -> SshResult<()> {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, tunnel.local_port))
+        let session = SshSession {
+            profile_id: tunnel.profile_id.clone(),
+            handle: Arc::clone(&tunnel.session),
+        };
+        let forward = LocalForward {
+            local_port: tunnel.local_port,
+            target_host: tunnel.target_host.clone(),
+            target_port: tunnel.target_port,
+            cancel_token: tunnel.cancel_token.clone(),
+        };
+        Self::start_local_forward(&session, &forward).await
+    }
+
+    pub async fn close(tunnel: TunnelHandle) -> SshResult<()> {
+        tunnel.cancel_token.cancel();
+
+        let session = tunnel.session.lock().await;
+        session
+            .disconnect(Disconnect::ByApplication, "Connection closed", "en")
             .await
-            .map_err(|e| SshError::PortBindFailed(e.to_string()))?;
+            .map_err(|e| SshError::Other(e.to_string()))?;
 
-        let session = tunnel.session.clone();
-        let target_host = tunnel.target_host.clone();
-        let target_port = tunnel.target_port;
-        let cancel_token = tunnel.cancel_token.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!("SSH tunnel: forwarding cancelled");
-                        break;
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, addr)) => {
-                                debug!(
-                                    "SSH tunnel: accepted connection from {} -> opening channel to {}:{}",
-                                    addr, target_host, target_port
-                                );
-                                let session = session.lock().await;
-                                match session
-                                    .channel_open_direct_tcpip(&target_host, target_port.into(), "127.0.0.1", 0)
-                                    .await
-                                {
-                                    Ok(channel) => {
-                                        debug!("SSH tunnel: direct-tcpip channel opened, forwarding stream");
-                                        drop(session);
-                                        tokio::spawn(Self::forward_stream(stream, channel));
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "SSH tunnel: failed to open direct-tcpip channel to {}:{}: {}",
-                                            target_host, target_port, e
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!("SSH tunnel: failed to accept connection: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        info!(
-            "SSH tunnel listening on localhost:{} -> {}:{}",
-            tunnel.local_port, tunnel.target_host, tunnel.target_port
-        );
-
+        info!("SSH tunnel closed for profile: {}", tunnel.profile_id);
         Ok(())
     }
 
-    async fn forward_stream<S>(stream: S, channel: Channel<client::Msg>)
+    async fn forward_stream<S>(mut stream: S, channel: Channel<client::Msg>)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (mut stream_reader, mut stream_writer) = tokio::io::split(stream);
-        let (to_ssh_tx, mut to_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-        let (from_ssh_tx, mut from_ssh_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-
-        // Single task owns the SSH channel and handles both directions with select!,
-        // avoiding the deadlock that occurs when holding a mutex across ch.wait().
+        // `into_stream` + `copy_bidirectional` keeps channel read/write polled together.
+        // The previous mpsc/`channel.data()`/`wait()` split could stall the russh session
+        // loop when `wait()` was not drained while `data()` awaited a window adjust.
         tokio::spawn(async move {
-            let mut channel = channel;
-            loop {
-                tokio::select! {
-                    msg = to_ssh_rx.recv() => {
-                        match msg {
-                            Some(data) => {
-                                if channel.data(data.as_ref()).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    msg = channel.wait() => {
-                        match msg {
-                            Some(ChannelMsg::Data { ref data }) => {
-                                if from_ssh_tx.send(data.to_vec()).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Some(ChannelMsg::Eof) | None => break,
-                            _ => {}
-                        }
-                    }
+            let mut ssh_stream = channel.into_stream();
+            match copy_bidirectional(&mut stream, &mut ssh_stream).await {
+                Ok((to_ssh, from_ssh)) => {
+                    debug!("SSH forward: stream closed (to_ssh={to_ssh}B, from_ssh={from_ssh}B)");
                 }
-            }
-        });
-
-        // Read from local TCP stream, forward to SSH channel task.
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                match stream_reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if to_ssh_tx.send(buf[..n].to_vec()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        // Write data arriving from SSH channel to local TCP stream.
-        tokio::spawn(async move {
-            while let Some(data) = from_ssh_rx.recv().await {
-                if stream_writer.write_all(&data).await.is_err() {
-                    break;
+                Err(e) => {
+                    debug!("SSH forward: stream error: {e}");
                 }
             }
         });
@@ -403,19 +474,6 @@ impl SshTunnel {
 
         drop(listener);
         Ok(port)
-    }
-
-    pub async fn close(tunnel: TunnelHandle) -> SshResult<()> {
-        tunnel.cancel_token.cancel();
-
-        let session = tunnel.session.lock().await;
-        session
-            .disconnect(Disconnect::ByApplication, "Connection closed", "en")
-            .await
-            .map_err(|e| SshError::Other(e.to_string()))?;
-
-        info!("SSH tunnel closed for profile: {}", tunnel.profile_id);
-        Ok(())
     }
 }
 

@@ -540,3 +540,81 @@ async fn ssh_tunnel_two_simultaneous_streams_complete() {
 
     let _ = SshTunnel::close(tunnel).await;
 }
+
+// ── 6. Shared SSH session with multiple local forwards (sqlator-qa2) ──────────
+
+/// One `connect_session` + two `open_forward`s to different compose targets.
+/// Dropping the first forward leaves the second working; then session teardown.
+#[tokio::test]
+async fn ssh_shared_session_two_forwards_independent_teardown() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+    if !ssh_port_open().await {
+        skip("OpenSSH not reachable at localhost:2222 — start compose service `openssh`");
+        return;
+    }
+    if !postgres_reachable().await {
+        skip("Postgres not reachable at localhost:5454");
+        return;
+    }
+    if !mysql_reachable().await {
+        skip("MySQL not reachable at localhost:3336");
+        return;
+    }
+
+    let auth = SshAuthConfig::with_password(SSH_USER, SSH_PASSWORD);
+    let host = SshHostConfig::new(SSH_HOST, SSH_PORT, &auth);
+
+    // Single handshake for the profile.
+    let session = SshTunnel::connect_session("group-c-shared-session".into(), &host, &auth, &[])
+        .await
+        .expect("connect_session");
+
+    let fwd_pg = SshTunnel::open_forward(TUNNEL_TARGET_HOST.into(), TUNNEL_TARGET_PORT)
+        .expect("open_forward postgres");
+    let fwd_mysql = SshTunnel::open_forward("mysql".into(), 3306).expect("open_forward mysql");
+
+    SshTunnel::start_local_forward(&session, &fwd_pg)
+        .await
+        .expect("start postgres forward");
+    SshTunnel::start_local_forward(&session, &fwd_mysql)
+        .await
+        .expect("start mysql forward");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pg_url = format!(
+        "postgresql://sqlator:sqlator@127.0.0.1:{}/sqlator",
+        fwd_pg.local_port
+    );
+    let mysql_url = format!(
+        "mysql://sqlator:sqlator@127.0.0.1:{}/sqlator",
+        fwd_mysql.local_port
+    );
+
+    DbManager::test_connection(&pg_url)
+        .await
+        .expect("postgres via shared session forward");
+    DbManager::test_connection(&mysql_url)
+        .await
+        .expect("mysql via shared session forward");
+
+    // Drop postgres forward only — mysql must keep working; session stays up.
+    let mysql_port = fwd_mysql.local_port;
+    SshTunnel::close_forward(fwd_pg);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    DbManager::test_connection(&format!(
+        "mysql://sqlator:sqlator@127.0.0.1:{mysql_port}/sqlator"
+    ))
+    .await
+    .expect("mysql forward still alive after peer forward closed");
+
+    SshTunnel::close_forward(fwd_mysql);
+    SshTunnel::close_session(session)
+        .await
+        .expect("close_session after last forward");
+}

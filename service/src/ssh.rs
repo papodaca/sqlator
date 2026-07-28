@@ -1,11 +1,12 @@
 //! SSH profile helpers, profile CRUD, and standalone tunnel registry ops.
 //!
 //! Auth/jump builders live here; connect-path tunnel acquire/release is in
-//! [`crate::connect`]. Registry keying: [`crate::tunnels::TunnelKey`].
+//! [`crate::connect`]. Sessions are shared per profile; forwards use
+//! [`crate::tunnels::TunnelKey`].
 
 use crate::error::ServiceError;
 use crate::service::AppService;
-use crate::tunnels::{ManagedTunnel, SshTunnelInfo, TunnelClaim, TunnelKey};
+use crate::tunnels::{SshTunnelInfo, TunnelClaim, TunnelKey};
 use serde::{Deserialize, Serialize};
 use sqlator_core::credentials::CredentialStore;
 use sqlator_core::models::{SshAuthMethod, SshJumpHost, SshProfile};
@@ -220,6 +221,8 @@ impl AppService {
     }
 
     /// Create (or claim) a standalone tunnel for `profile_id` + target.
+    ///
+    /// Reuses the shared SSH session for the profile when one is already live.
     pub async fn create_ssh_tunnel(
         &self,
         request: SshTunnelRequest,
@@ -232,7 +235,37 @@ impl AppService {
 
         if let Some(mut entry) = self.tunnels.get_mut(&key) {
             entry.add_claim(TunnelClaim::Standalone);
-            return Ok(SshTunnelInfo::from(&entry.handle));
+            return Ok(SshTunnelInfo::from_forward(
+                &request.profile_id,
+                &entry.forward,
+            ));
+        }
+
+        // Prefer the saved profile path (jumps + stored secrets) when present;
+        // otherwise fall back to the request's inline host/auth (UI standalone).
+        let local_port = if self.config.get_ssh_profile(&request.profile_id)?.is_some() {
+            self.ensure_forward(&key, TunnelClaim::Standalone).await?
+        } else {
+            self.ensure_forward_from_request(&request, &key).await?
+        };
+
+        Ok(SshTunnelInfo {
+            profile_id: request.profile_id,
+            local_port,
+            target_host: request.target_host,
+            target_port: request.target_port,
+        })
+    }
+
+    /// Standalone create when the profile is not in config (inline request auth).
+    async fn ensure_forward_from_request(
+        &self,
+        request: &SshTunnelRequest,
+        key: &TunnelKey,
+    ) -> Result<u16, ServiceError> {
+        if let Some(mut entry) = self.tunnels.get_mut(key) {
+            entry.add_claim(TunnelClaim::Standalone);
+            return Ok(entry.forward.local_port);
         }
 
         let auth_config = match request.auth_method.as_str() {
@@ -258,40 +291,63 @@ impl AppService {
         };
 
         let ssh_config = SshHostConfig::new(&request.host, request.port, &auth_config);
-        // Standalone create historically passed no jump hosts (UI path).
-        let tunnel = SshTunnel::create(
-            request.profile_id.clone(),
-            &ssh_config,
-            &auth_config,
-            request.target_host.clone(),
-            request.target_port,
-            &[],
-        )
-        .await?;
-        SshTunnel::start_forwarding(&tunnel).await?;
 
-        // Same race as connect-path acquire: prefer an existing entry if one appeared.
-        match self.tunnels.entry(key) {
+        // Session: reuse if present, else create without jump hosts (legacy UI path).
+        let session_view = if let Some(existing) = self.sessions.get(&request.profile_id) {
+            existing.session.clone()
+        } else {
+            let new_session = SshTunnel::connect_session(
+                request.profile_id.clone(),
+                &ssh_config,
+                &auth_config,
+                &[],
+            )
+            .await?;
+            match self.sessions.entry(request.profile_id.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(occ) => {
+                    let view = occ.get().session.clone();
+                    drop(occ);
+                    SshTunnel::close_session(new_session).await.ok();
+                    view
+                }
+                dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                    let view = new_session.clone();
+                    vacant.insert(crate::tunnels::ManagedSession::new(new_session));
+                    view
+                }
+            }
+        };
+
+        let forward = SshTunnel::open_forward(request.target_host.clone(), request.target_port)?;
+        SshTunnel::start_local_forward(&session_view, &forward).await?;
+
+        let local_port = match self.tunnels.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occ) => {
                 occ.get_mut().add_claim(TunnelClaim::Standalone);
-                let info = SshTunnelInfo::from(&occ.get().handle);
+                let port = occ.get().forward.local_port;
                 drop(occ);
-                SshTunnel::close(tunnel).await.ok();
-                Ok(info)
+                SshTunnel::close_forward(forward);
+                port
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let info = SshTunnelInfo::from(&tunnel);
-                let mut managed = ManagedTunnel::new(tunnel);
+                let port = forward.local_port;
+                let mut managed = crate::tunnels::ManagedForward::new(forward);
                 managed.add_claim(TunnelClaim::Standalone);
                 vacant.insert(managed);
-                Ok(info)
+                if let Some(mut session) = self.sessions.get_mut(&key.profile_id) {
+                    session.add_forward(key.clone());
+                }
+                port
             }
-        }
+        };
+
+        Ok(local_port)
     }
 
     /// Drop the standalone claim for every tunnel under `profile_id`.
     ///
-    /// Entries that still have connection users stay open. Idle entries close.
+    /// Entries that still have connection users stay open. Idle entries close;
+    /// the shared session tears down when its last forward closes.
     /// For a precise single-target close, prefer [`Self::close_ssh_tunnel_for_target`].
     pub async fn close_ssh_tunnel(&self, profile_id: &str) -> Result<(), ServiceError> {
         let keys: Vec<TunnelKey> = self
@@ -309,7 +365,7 @@ impl AppService {
         }
 
         for key in keys {
-            self.close_tunnel_claim(&key, TunnelClaim::Standalone)
+            self.release_forward_claim(&key, TunnelClaim::Standalone)
                 .await?;
         }
         Ok(())
@@ -328,33 +384,14 @@ impl AppService {
                 format!("Tunnel '{profile_id}' -> {target_host}:{target_port} not found"),
             ));
         }
-        self.close_tunnel_claim(&key, TunnelClaim::Standalone).await
-    }
-
-    async fn close_tunnel_claim(
-        &self,
-        key: &TunnelKey,
-        claim: TunnelClaim,
-    ) -> Result<(), ServiceError> {
-        let should_close = {
-            let mut entry = match self.tunnels.get_mut(key) {
-                Some(e) => e,
-                None => return Ok(()),
-            };
-            entry.remove_claim(&claim)
-        };
-        if should_close {
-            if let Some((_, managed)) = self.tunnels.remove(key) {
-                SshTunnel::close(managed.handle).await.ok();
-            }
-        }
-        Ok(())
+        self.release_forward_claim(&key, TunnelClaim::Standalone)
+            .await
     }
 
     pub fn get_active_tunnels(&self) -> Vec<SshTunnelInfo> {
         self.tunnels
             .iter()
-            .map(|entry| SshTunnelInfo::from(&entry.handle))
+            .map(|entry| SshTunnelInfo::from_forward(&entry.key().profile_id, &entry.forward))
             .collect()
     }
 }

@@ -1,13 +1,13 @@
 //! Shared application service owned by every frontend adapter.
 //!
-//! Owns config, pools, profile+target tunnels, credentials, and the schema TTL
-//! cache.
+//! Owns config, pools, shared SSH sessions / per-target forwards, credentials,
+//! and the schema TTL cache.
 
 use crate::connection_source::{
     ConfigConnectionSource, ConnectionSource, SingleDbConnectionSource, SingleDbInfo,
 };
 use crate::error::ServiceError;
-use crate::tunnels::{ManagedTunnel, TunnelKey};
+use crate::tunnels::{ManagedForward, ManagedSession, TunnelKey};
 use dashmap::DashMap;
 use sqlator_core::config::ConfigManager;
 use sqlator_core::credentials::{CredentialStore, StorageMode};
@@ -20,8 +20,10 @@ use std::time::Instant;
 pub struct AppService {
     pub(crate) config: Arc<ConfigManager>,
     pub(crate) db: Arc<DbManager>,
-    /// Tunnel registry keyed by [`TunnelKey`] `(profile_id, target_host, target_port)`.
-    pub(crate) tunnels: DashMap<TunnelKey, ManagedTunnel>,
+    /// Authenticated SSH sessions keyed by profile id (shared across targets).
+    pub(crate) sessions: DashMap<String, ManagedSession>,
+    /// Local forwards keyed by [`TunnelKey`] `(profile_id, target_host, target_port)`.
+    pub(crate) tunnels: DashMap<TunnelKey, ManagedForward>,
     /// Reverse index: connection id → registry key (for disconnect / VTE lookup).
     pub(crate) connection_tunnels: DashMap<String, TunnelKey>,
     pub(crate) credentials: Arc<CredentialStore>,
@@ -88,6 +90,7 @@ impl AppService {
         Ok(Self {
             config,
             db: Arc::new(DbManager::new()),
+            sessions: DashMap::new(),
             tunnels: DashMap::new(),
             connection_tunnels: DashMap::new(),
             credentials,
@@ -109,7 +112,11 @@ impl AppService {
         Arc::clone(&self.db)
     }
 
-    pub fn tunnels(&self) -> &DashMap<TunnelKey, ManagedTunnel> {
+    pub fn sessions(&self) -> &DashMap<String, ManagedSession> {
+        &self.sessions
+    }
+
+    pub fn tunnels(&self) -> &DashMap<TunnelKey, ManagedForward> {
         &self.tunnels
     }
 
