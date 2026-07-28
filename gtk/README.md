@@ -30,6 +30,10 @@ GDK_BACKEND=x11 GTK_A11Y=none \
   cargo test -p sqlator-gtk --locked -- --test-threads=1
 ```
 
+CI runs the GTK job in an **Arch Linux** container. The crate enables gtk4
+`gnome_50` / libadwaita `v1_9` (GLib ≥ 2.88, GTK ≥ 4.22), which is newer than
+Ubuntu 24.04's packages.
+
 `GSETTINGS_SCHEMA_DIR` is exported by `build.rs` into the test binary and also
 set by `test_support::init_gtk` when unset — constructing `gio::Settings`
 without it **aborts the process**.
