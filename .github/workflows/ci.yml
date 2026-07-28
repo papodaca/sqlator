@@ -1,0 +1,71 @@
+# CI for SQLator (plan 006 — GTK testing tiers + headless runner)
+name: ci
+
+on:
+  push:
+    branches: [main, gtk]
+  pull_request:
+    branches: [main, gtk]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Fast path: no display server. core + service hold most of the pure logic.
+  fast:
+    name: fast (core + service)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format (scoped)
+        run: cargo fmt -p sqlator-core -p sqlator-service -- --check
+
+      - name: Clippy
+        run: cargo clippy -p sqlator-core -p sqlator-service --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p sqlator-core -p sqlator-service --locked
+
+  # GTK tier-1 / tier-2 tests need a display + session bus.
+  gtk:
+    name: gtk (xvfb)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install GTK / Blueprint stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb dbus-x11 \
+            blueprint-compiler \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtksourceview-5-dev \
+            libgirepository-2.0-dev \
+            pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format (scoped)
+        run: cargo fmt -p sqlator-gtk -- --check
+
+      - name: Clippy
+        run: cargo clippy -p sqlator-gtk --all-targets -- -D warnings
+
+      - name: Test headlessly
+        run: ./gtk/scripts/run-tests-headless.sh

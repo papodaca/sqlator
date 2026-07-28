@@ -167,14 +167,14 @@ simplicity.)
 
 ## Acceptance Criteria
 
-- [ ] `clippy::await_holding_lock`, `clippy::rc_buffer`, and denied `unused_must_use` enforced in CI
-- [ ] A fast CI job runs `core` + `service` tests with no display server
-- [ ] A second CI job runs GTK tests under `xvfb-run` + `dbus-run-session` with `--test-threads=1`
-- [ ] `GSETTINGS_SCHEMA_DIR` is set in the test environment; no test aborts the process
-- [ ] Tier-1 model tests cover row count, item retrieval, cache staleness, typed sorting, `NULL` formatting, and `items_changed` batching
-- [ ] One tier-2 smoke test exists per composite template, added alongside each new `.blp`
-- [ ] A documented `GOBJECT_DEBUG=instance-count` procedure for checking `RowObject` leaks, run before each release
-- [ ] Sysprof used to validate grid performance before any grid optimization is merged
+- [x] `clippy::await_holding_lock`, `clippy::rc_buffer`, and denied `unused_must_use` enforced in CI
+- [x] A fast CI job runs `core` + `service` tests with no display server
+- [x] A second CI job runs GTK tests under `xvfb-run` + `dbus-run-session` with `--test-threads=1`
+- [x] `GSETTINGS_SCHEMA_DIR` is set in the test environment; no test aborts the process
+- [x] Tier-1 model tests cover row count, item retrieval, cache staleness, typed sorting, `NULL` formatting, and `items_changed` batching
+- [x] One tier-2 smoke test exists per composite template, added alongside each new `.blp`
+- [x] A documented `GOBJECT_DEBUG=instance-count` procedure for checking `RowObject` leaks, run before each release
+- [x] Sysprof used to validate grid performance before any grid optimization is merged (procedure documented in `gtk/README.md`; run before merging grid optimizations)
 
 ---
 

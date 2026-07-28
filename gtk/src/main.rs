@@ -12,8 +12,12 @@ mod session;
 mod ssh;
 #[cfg(feature = "terminal")]
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod vault;
+#[cfg(test)]
+mod widget_smoke;
 mod window;
 
 use application::SqlatorApplication;

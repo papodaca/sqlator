@@ -1,4 +1,4 @@
-mod imp;
+pub(crate) mod imp;
 
 use crate::application::SqlatorApplication;
 use crate::results::{

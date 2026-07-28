@@ -149,3 +149,89 @@ impl Default for ResultModel {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::results::cell::{CellValue, ColumnMeta};
+    use gio::prelude::ListModelExt;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn fixture_rows(n: usize) -> Vec<Arc<[CellValue]>> {
+        (0..n)
+            .map(|i| Arc::from(vec![CellValue::Int(i as i64)].into_boxed_slice()))
+            .collect()
+    }
+
+    #[test]
+    fn result_model_reports_row_count_and_items() {
+        let model = ResultModel::new();
+        model.set_columns(vec![ColumnMeta::from_name("id")]);
+        model.append_rows(fixture_rows(1_000));
+        assert_eq!(model.n_items(), 1_000);
+        let row = model
+            .item(999)
+            .and_downcast::<RowObject>()
+            .expect("row 999");
+        assert_eq!(row.value(0), CellValue::Int(999));
+        assert_eq!(row.index(), 999);
+    }
+
+    #[test]
+    fn weak_ref_cache_does_not_return_stale_objects_after_set_row() {
+        let model = ResultModel::new();
+        model.set_columns(vec![ColumnMeta::from_name("v")]);
+        model.append_row(Arc::from(
+            vec![CellValue::Text("old".into())].into_boxed_slice(),
+        ));
+
+        let first = model
+            .item(0)
+            .and_downcast::<RowObject>()
+            .expect("cached row");
+        assert_eq!(first.value(0), CellValue::Text("old".into()));
+
+        model.set_row_values(
+            0,
+            Arc::from(vec![CellValue::Text("new".into())].into_boxed_slice()),
+        );
+
+        let second = model
+            .item(0)
+            .and_downcast::<RowObject>()
+            .expect("fresh row");
+        assert_eq!(second.value(0), CellValue::Text("new".into()));
+        // Cache entry was dropped on set_row_values; a new GObject is minted.
+        assert_ne!(first.as_ptr(), second.as_ptr());
+    }
+
+    #[test]
+    fn append_rows_emits_single_items_changed_for_batch() {
+        let model = ResultModel::new();
+        model.set_columns(vec![ColumnMeta::from_name("id")]);
+
+        let emissions = Rc::new(Cell::new(0u32));
+        let removed = Rc::new(Cell::new(0u32));
+        let added = Rc::new(Cell::new(0u32));
+        model.connect_items_changed(glib::clone!(
+            #[strong]
+            emissions,
+            #[strong]
+            removed,
+            #[strong]
+            added,
+            move |_, _pos, r, a| {
+                emissions.set(emissions.get() + 1);
+                removed.set(r);
+                added.set(a);
+            }
+        ));
+
+        model.append_rows(fixture_rows(50));
+        assert_eq!(emissions.get(), 1);
+        assert_eq!(removed.get(), 0);
+        assert_eq!(added.get(), 50);
+        assert_eq!(model.n_items(), 50);
+    }
+}

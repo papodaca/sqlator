@@ -158,4 +158,14 @@ mod tests {
         assert_eq!(CellValue::Null.display(), "");
         assert!(CellValue::Null.is_null());
     }
+
+    #[test]
+    fn ints_sort_numerically_not_lexicographically() {
+        let mut vals = [CellValue::Int(10), CellValue::Int(2), CellValue::Int(1)];
+        vals.sort_by(|a, b| a.cmp_typed(b));
+        assert_eq!(
+            vals,
+            [CellValue::Int(1), CellValue::Int(2), CellValue::Int(10),]
+        );
+    }
 }

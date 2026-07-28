@@ -6,3 +6,9 @@ resolver = "2"
 # Static check for the SSH-tunnel deadlock class (AGENTS.md / phase 0a).
 # Holding a std/parking_lot mutex across .await is deny; tokio::sync::Mutex is a different type.
 await_holding_lock = "deny"
+# Prefer Rc<str>/Rc<[T]> over Rc<String>/Rc<Vec<T>> (results grid uses Arc<[CellValue]>).
+rc_buffer = "deny"
+
+[workspace.lints.rust]
+# gtk-rs APIs often return Result; do not silently drop them.
+unused_must_use = "deny"
