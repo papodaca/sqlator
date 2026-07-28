@@ -36,28 +36,32 @@ jobs:
         run: cargo test -p sqlator-core -p sqlator-service --locked
 
   # GTK tier-1 / tier-2 tests need a display + session bus.
+  # sqlator-gtk enables gtk4 `gnome_50` / libadwaita `v1_9` / `gtk_v4_22`, which
+  # need GLib >= 2.88 and GTK >= 4.22 — newer than Ubuntu 24.04. Arch matches
+  # the local GNOME 50 stack used for development.
   gtk:
     name: gtk (xvfb)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
+      - name: Install GTK / Blueprint stack
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            base-devel git curl \
+            gtk4 libadwaita gtksourceview5 glib2 \
+            blueprint-compiler \
+            pkgconf \
+            xorg-server-xvfb \
+            dbus
+
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
-      - name: Install GTK / Blueprint stack
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb dbus-x11 \
-            blueprint-compiler \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libgtksourceview-5-dev \
-            libgirepository-2.0-dev \
-            pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
