@@ -1,0 +1,122 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the sqlator-gtk package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: sqlator-gtk\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-28 00:30-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: data/ui/window.blp:7 data/ui/window.blp:73
+msgid "SQLator"
+msgstr ""
+
+#: data/ui/window.blp:32
+msgid "Toggle Sidebar"
+msgstr ""
+
+#: data/ui/window.blp:39
+msgid "Run Statement Under Cursor"
+msgstr ""
+
+#: data/ui/window.blp:46
+msgid "Cancel Query"
+msgstr ""
+
+#: data/ui/window.blp:53 data/ui/window.blp:328
+msgid "Database Terminal"
+msgstr ""
+
+#: data/ui/window.blp:61
+msgid "Tab Overview"
+msgstr ""
+
+#: data/ui/window.blp:68
+msgid "Main Menu"
+msgstr ""
+
+#: data/ui/window.blp:119
+msgid "New Connection"
+msgstr ""
+
+#: data/ui/window.blp:125
+msgid "Connections menu"
+msgstr ""
+
+#: data/ui/window.blp:130
+msgid "Connections"
+msgstr ""
+
+#: data/ui/window.blp:167
+msgid "Schema"
+msgstr ""
+
+#: data/ui/window.blp:177
+msgid "Refresh schema"
+msgstr ""
+
+#: data/ui/window.blp:185
+msgid "Connect to browse schema"
+msgstr ""
+
+#: data/ui/window.blp:232
+msgid "No connection open"
+msgstr ""
+
+#: data/ui/window.blp:233
+msgid "Select a connection in the sidebar to open a query workspace."
+msgstr ""
+
+#: data/ui/window.blp:264
+msgid "New Group"
+msgstr ""
+
+#: data/ui/window.blp:271
+msgid "Import Connections…"
+msgstr ""
+
+#: data/ui/window.blp:276
+msgid "Export Connections…"
+msgstr ""
+
+#: data/ui/window.blp:285
+msgid "New Tab"
+msgstr ""
+
+#: data/ui/window.blp:290
+msgid "Close Tab"
+msgstr ""
+
+#: data/ui/window.blp:297
+msgid "Appearance"
+msgstr ""
+
+#: data/ui/window.blp:300
+msgid "System"
+msgstr ""
+
+#: data/ui/window.blp:306
+msgid "Light"
+msgstr ""
+
+#: data/ui/window.blp:312
+msgid "Dark"
+msgstr ""
+
+#: data/ui/window.blp:321
+msgid "Preferences"
+msgstr ""
+
+#: data/ui/window.blp:335
+msgid "Quit"
+msgstr ""

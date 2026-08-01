@@ -66,6 +66,16 @@ pub fn classify_docker_error(msg: &str) -> ClassifiedDockerError {
             "Check that Docker is running on the server:\nsudo systemctl status docker",
         );
     }
+    if (m.contains("flatpak") || m.contains("sandbox"))
+        && m.contains("local docker")
+        && (m.contains("unavailable") || m.contains("disabled"))
+    {
+        return ClassifiedDockerError::new(
+            DockerErrorKind::Other,
+            false,
+            "Local Docker is disabled in Flatpak. Use remote Docker over SSH instead.",
+        );
+    }
     if m.contains("isolated network") || m.contains("docker network") {
         return ClassifiedDockerError::new(
             DockerErrorKind::NetworkIsolated,
@@ -256,6 +266,16 @@ mod tests {
         let c = classify_docker_service_error(&err);
         assert_eq!(c.kind, DockerErrorKind::NetworkIsolated);
         assert!(c.hint.contains("network connect"));
+    }
+
+    #[test]
+    fn discovery_flatpak_local_docker_disabled() {
+        let c = classify_docker_error(
+            "Local Docker is unavailable inside Flatpak sandbox. Use remote Docker over SSH.",
+        );
+        assert_eq!(c.kind, DockerErrorKind::Other);
+        assert!(c.hint.contains("remote Docker over SSH"));
+        assert!(!c.transient);
     }
 
     #[test]

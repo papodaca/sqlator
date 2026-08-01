@@ -61,7 +61,7 @@ GOBJECT_DEBUG=instance-count GTK_DEBUG=interactive cargo run -p sqlator-gtk
 scrolling / streaming a large result set; GTK frame marks show main-loop
 blocks. Prefer evidence from Sysprof over impressions.
 
-## Desktop integration (no meson / Flatpak)
+## Desktop integration (no meson / Flatpak required)
 
 Install the `.desktop` entry, AppStream metainfo, icons, and GSettings schema
 into an XDG prefix (default `~/.local`):
@@ -78,7 +78,36 @@ desktop-file-validate gtk/data/im.apodaca.SqlatorGtk.desktop
 appstreamcli validate gtk/data/im.apodaca.SqlatorGtk.metainfo.xml
 ```
 
-Meson and Flatpak packaging are deferred (`sqlator-9g1.11`).
+## Meson packaging
+
+Meson installs the app binary, desktop file, metainfo, gsettings schema, and
+icons:
+
+```bash
+meson setup build-gtk-meson gtk
+meson compile -C build-gtk-meson
+meson install -C build-gtk-meson
+```
+
+## Flatpak packaging
+
+Manifest and cargo source list live under `build-aux/`:
+
+```bash
+flatpak-builder --user --install --force-clean \
+  build-dir build-aux/im.apodaca.SqlatorGtk.json
+```
+
+`build-aux/cargo-sources.json` is generated from `Cargo.lock`:
+
+```bash
+./build-aux/update-cargo-sources.sh
+```
+
+Permission rationale is documented in `build-aux/flatpak-permissions.md`.
+
+Inside Flatpak, local Docker discovery is disabled by design. Use remote Docker
+over SSH for container-based flows.
 
 ## App ID checklist
 

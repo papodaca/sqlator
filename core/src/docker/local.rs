@@ -8,6 +8,13 @@ pub struct LocalDockerAccess {
 
 impl LocalDockerAccess {
     pub fn new() -> Result<Self, DockerError> {
+        if is_flatpak_sandbox() {
+            return Err(DockerError::Other(
+                "Local Docker is unavailable inside Flatpak sandbox. Use remote Docker over SSH."
+                    .to_string(),
+            ));
+        }
+
         let socket = PathBuf::from("/var/run/docker.sock");
         if socket.exists() {
             Ok(Self {
@@ -104,6 +111,26 @@ impl LocalDockerAccess {
         }
 
         Ok(containers)
+    }
+}
+
+fn is_flatpak_sandbox() -> bool {
+    std::env::var_os("FLATPAK_ID").is_some() || std::path::Path::new("/.flatpak-info").exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalDockerAccess;
+
+    #[test]
+    fn local_docker_disabled_in_flatpak_env() {
+        unsafe { std::env::set_var("FLATPAK_ID", "im.apodaca.SqlatorGtk") };
+        let result = LocalDockerAccess::new();
+        unsafe { std::env::remove_var("FLATPAK_ID") };
+
+        assert!(result.is_err());
+        let msg = result.err().expect("error").to_string();
+        assert!(msg.contains("Local Docker is unavailable inside Flatpak sandbox"));
     }
 }
 

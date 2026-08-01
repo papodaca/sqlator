@@ -1,0 +1,57 @@
+{
+  "app-id": "im.apodaca.SqlatorGtk",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "sqlator-gtk",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--share=network",
+    "--talk-name=org.freedesktop.secrets",
+    "--filesystem=~/.ssh:ro",
+    "--filesystem=xdg-run/ssh-agent"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/sqlator/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "sqlator",
+      "buildsystem": "meson",
+      "config-opts": [
+        "--prefix=/app"
+      ],
+      "builddir": true,
+      "subdir": "gtk",
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": [
+            ".git",
+            ".flatpak-builder",
+            "build-dir",
+            "build",
+            "build-gtk-meson",
+            "target",
+            "node_modules",
+            "src-tauri/target",
+            "gtk/target",
+            "tmp",
+            "repo"
+          ]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}

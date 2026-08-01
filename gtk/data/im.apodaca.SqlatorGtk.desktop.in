@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=SQLator
+GenericName=SQL Client
+Comment=Multi-database SQL client with SSH tunnels
+Exec=sqlator-gtk %F
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Development;Database;
+Keywords=SQL;database;postgres;mysql;sqlite;query;
+MimeType=application/sql;text/x-sql;
+StartupNotify=true
+# DBusActivatable omitted — no .service file yet.
+X-GNOME-UsesNotifications=false

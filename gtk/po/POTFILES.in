@@ -1,0 +1,5 @@
+data/ui/window.blp
+data/ui/query_tab.blp
+src/main.rs
+src/application.rs
+src/window.rs

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@APP_ID@</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>SQLator</name>
+  <summary>Multi-database SQL client with SSH tunnels</summary>
+  <developer id="im.apodaca">
+    <name>Ethan Apodaca</name>
+  </developer>
+  <launchable type="desktop-id">@APP_ID@.desktop</launchable>
+  <url type="homepage">https://github.com/papodaca/sqlator</url>
+  <url type="bugtracker">https://github.com/papodaca/sqlator/issues</url>
+  <url type="vcs-browser">https://github.com/papodaca/sqlator</url>
+  <description>
+    <p>
+      SQLator is a multi-database SQL client for GNOME. Connect to PostgreSQL,
+      MySQL, MariaDB, SQLite, Microsoft SQL Server, Oracle, and ClickHouse.
+    </p>
+    <p>
+      Features include schema browsing, SQL editing and results grids, SSH
+      tunnels, and connection import/export.
+    </p>
+  </description>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <keywords>
+    <keyword>SQL</keyword>
+    <keyword>database</keyword>
+    <keyword>postgres</keyword>
+    <keyword>mysql</keyword>
+    <keyword>sqlite</keyword>
+  </keywords>
+  <provides>
+    <binary>sqlator-gtk</binary>
+    <mediatype>application/sql</mediatype>
+    <mediatype>text/x-sql</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-28" type="development">
+      <description>
+        <p>Initial meson and Flatpak packaging scaffold for sqlator-gtk.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+gettextrs = { package = "gettext-rs", version = "0.7", features = ["gettext-system"] }
 
 [build-dependencies]
 glib-build-tools = "0.22.8"

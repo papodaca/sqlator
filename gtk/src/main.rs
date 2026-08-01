@@ -21,15 +21,22 @@ mod widget_smoke;
 mod window;
 
 use application::SqlatorApplication;
+use gettextrs::{bind_textdomain_codeset, bindtextdomain, setlocale, textdomain, LocaleCategory};
 use gtk::gio;
 use gtk::prelude::*;
 use std::env;
+use std::path::Path;
 
 fn main() {
+    setup_i18n();
+
     // Must run before any gio::Settings construction — Settings::new aborts if
     // the schema is missing from the search path.
     if env::var_os("GSETTINGS_SCHEMA_DIR").is_none() {
-        env::set_var("GSETTINGS_SCHEMA_DIR", env!("SQLATOR_SCHEMA_DIR"));
+        let fallback = env!("SQLATOR_SCHEMA_DIR");
+        if Path::new(fallback).exists() {
+            env::set_var("GSETTINGS_SCHEMA_DIR", fallback);
+        }
     }
 
     gio::resources_register_include!("sqlator.gresource")
@@ -44,4 +51,14 @@ fn main() {
 
     let app = SqlatorApplication::new();
     app.run();
+}
+
+fn setup_i18n() {
+    const GETTEXT_PACKAGE: &str = "sqlator-gtk";
+    const LOCALEDIR: &str = "/usr/share/locale";
+
+    let _ = setlocale(LocaleCategory::LcAll, "");
+    let _ = bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
+    let _ = bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
+    let _ = textdomain(GETTEXT_PACKAGE);
 }

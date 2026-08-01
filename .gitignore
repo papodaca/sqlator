@@ -10,6 +10,13 @@ node_modules
 .claude
 tmp
 
+# Flatpak / meson local build artifacts
+.flatpak-builder/
+build-dir/
+build-gtk-meson/
+/repo/
+sqlator-gtk.flatpak
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
