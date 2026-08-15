@@ -4,7 +4,10 @@ mod mssql;
 mod mysql;
 mod oracle;
 mod postgres;
+mod sql_classify;
 mod sqlite;
+
+pub use sql_classify::PagedQueryOutcome;
 
 use crate::error::CoreError;
 use crate::models::{
@@ -12,9 +15,19 @@ use crate::models::{
     SchemaInfo, SortSpec, SqlBatch, TableInfo, TableMeta, TableQueryParams, TableQueryResult,
 };
 use dashmap::DashMap;
+use sql_classify::{PagedDialect, PaginationClassification};
 use sqlx::{AnyPool, MySqlPool, PgPool, Row, SqlitePool};
 use std::collections::HashMap;
 use std::time::Instant;
+
+/// Engine-side ceiling for paged query runs (KTD-5 / R5). Offsets at or above
+/// this are refused; the GTK UI shows the "50,000 row limit reached" message.
+pub const PAGED_ROW_CEILING: usize = 50_000;
+
+/// Sentinel-safe page-size bound (KTD-4): the wrapper fetches `limit + 1`
+/// rows and every driver's streaming path suppresses sends past 1,000, so the
+/// sentinel only works when `limit + 1 <= 1000`.
+const PAGED_MAX_PAGE_SIZE: usize = 999;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseType {
@@ -231,6 +244,169 @@ impl DbManager {
                     clickhouse::execute_statement(&p, sql_trimmed, sender, start).await
                 }
             }
+        };
+        self.active_backends.remove(connection_id);
+        result
+    }
+
+    /// Execute an ad-hoc query as one offset-driven page of rows (U1: R4/R5/R6).
+    ///
+    /// Wrappable queries (per [`sql_classify::classify_pagination`]) run inside
+    /// the transparent CTE wrapper with a `limit + 1` sentinel fetch (KTD-2);
+    /// events forwarded to `sender` keep the exact `Columns → Row* → Done`
+    /// sequencing of [`Self::execute_query`], with at most `limit` row events
+    /// and a `Done` whose `row_count` is the forwarded count. Passthrough
+    /// queries delegate to [`Self::execute_query`] unchanged.
+    ///
+    /// `sortable_columns` is the whitelist for sort rendering: pass the column
+    /// names from the page-one run of the same SQL (a sorted re-query has them
+    /// on screen already); pass `&[]` on a fresh first run — every sort spec is
+    /// then silently dropped, never string-interpolated. `limit` is clamped to
+    /// the sentinel-safe bound (KTD-4). Offsets ≥ [`PAGED_ROW_CEILING`]
+    /// short-circuit with a `capped` outcome and no driver call (R5).
+    // Flat param list mirrors execute_query + page spec (gtk browse.rs carries
+    // the same allow for its fetch signature).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_query_paged(
+        &self,
+        connection_id: &str,
+        sql: &str,
+        sort: &[SortSpec],
+        sortable_columns: &[String],
+        limit: usize,
+        offset: usize,
+        sender: tokio::sync::mpsc::Sender<QueryEvent>,
+    ) -> Result<PagedQueryOutcome, CoreError> {
+        let pool = self
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| CoreError {
+                message: "Not connected".into(),
+                code: "NO_CONNECTION".into(),
+            })?
+            .clone();
+
+        let dialect = paged_dialect_for_pool(&pool);
+
+        match sql_classify::classify_pagination(sql, dialect) {
+            PaginationClassification::Passthrough(reason) => {
+                tracing::debug!(
+                    connection_id,
+                    reason = reason.as_str(),
+                    "paged execution: passthrough"
+                );
+                self.execute_query(connection_id, sql, sender).await?;
+                return Ok(PagedQueryOutcome::passthrough());
+            }
+            PaginationClassification::Wrappable => {}
+        }
+
+        // Ceiling short-circuit: refuse the page entirely (no driver call).
+        if offset_at_ceiling(offset) {
+            return Ok(PagedQueryOutcome {
+                row_count: 0,
+                has_more: false,
+                capped: true,
+                paged: true,
+            });
+        }
+
+        let limit = clamp_page_size(limit);
+        let valid: Vec<&str> = sortable_columns.iter().map(String::as_str).collect();
+        let wrapped = sql_classify::wrap_for_pagination(sql, dialect, sort, &valid, limit, offset);
+
+        // Driver streams the wrapped SQL into an internal channel; we forward
+        // events through the sentinel gate while the driver runs (single-owner
+        // select! + mpsc bridge — no shared locks).
+        let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<QueryEvent>(64);
+        let start = Instant::now();
+        let driver =
+            self.execute_wrapped_page_select(connection_id, pool, &wrapped, inner_tx, start);
+        tokio::pin!(driver);
+
+        let mut driver_result: Option<Result<(), CoreError>> = None;
+        let mut gate = SentinelPageGate::new(limit);
+
+        loop {
+            tokio::select! {
+                res = &mut driver, if driver_result.is_none() => {
+                    driver_result = Some(res);
+                    // The driver sends everything before returning, so all
+                    // remaining events are already buffered — drain and stop.
+                    while let Ok(ev) = inner_rx.try_recv() {
+                        if let Some(ev) = gate.observe(ev) {
+                            let _ = sender.send(ev).await;
+                        }
+                    }
+                    break;
+                }
+                maybe = inner_rx.recv() => {
+                    match maybe {
+                        Some(ev) => {
+                            if let Some(ev) = gate.observe(ev) {
+                                let _ = sender.send(ev).await;
+                            }
+                        }
+                        // Channel closed ⟹ the driver future returned (its
+                        // sender dropped on completion); its result is
+                        // recovered below if this arm beat the driver arm in
+                        // the final select!.
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // The loop can exit via the channel-close arm while the driver arm was
+        // ready but not selected; a closed channel means the driver future
+        // already returned (its sender is dropped), so this await resolves
+        // immediately and only recovers the result — never losing an error.
+        let driver_result = match driver_result {
+            Some(res) => res,
+            None => driver.await,
+        };
+        driver_result?;
+
+        let row_count = gate.forwarded_count();
+        Ok(PagedQueryOutcome {
+            row_count,
+            has_more: gate.has_more(),
+            capped: page_end_capped(offset, row_count),
+            paged: true,
+        })
+    }
+
+    /// Run the wrapped page SELECT through the same per-driver `execute_select`
+    /// functions [`Self::execute_query`] uses, including `active_backends`
+    /// registration so server-side cancel works (mirrors `execute_query`).
+    async fn execute_wrapped_page_select(
+        &self,
+        connection_id: &str,
+        pool: DatabasePool,
+        sql: &str,
+        sender: tokio::sync::mpsc::Sender<QueryEvent>,
+        start: Instant,
+    ) -> Result<(), CoreError> {
+        let result = match pool {
+            DatabasePool::Postgres(p) => {
+                let mut register = |pid: i32| {
+                    self.active_backends
+                        .insert(connection_id.to_string(), BackendCancelId::Postgres(pid));
+                };
+                postgres::execute_select(&p, sql, sender, start, Some(&mut register)).await
+            }
+            DatabasePool::MySql(p) => {
+                let mut register = |id: u64| {
+                    self.active_backends
+                        .insert(connection_id.to_string(), BackendCancelId::MySql(id));
+                };
+                mysql::execute_select(&p, sql, sender, start, Some(&mut register)).await
+            }
+            DatabasePool::Sqlite(p) => sqlite::execute_select(&p, sql, sender, start).await,
+            DatabasePool::Any(p) => any::execute_select(&p, sql, sender, start).await,
+            DatabasePool::Mssql(p) => mssql::execute_select(&p, sql, sender, start).await,
+            DatabasePool::Oracle(p) => oracle::execute_select(&p, sql, sender, start).await,
+            DatabasePool::ClickHouse(p) => clickhouse::execute_select(&p, sql, sender, start).await,
         };
         self.active_backends.remove(connection_id);
         result
@@ -536,6 +712,85 @@ async fn close_pool(pool: DatabasePool) {
         DatabasePool::Oracle(_) => {} // deadpool Pool drops naturally; connections closed on drop
         DatabasePool::ClickHouse(_) => {} // Arc<ClickHouseClient> drops naturally; reqwest Client is shared
     }
+}
+
+// ── Paged query execution helpers (U1) ───────────────────────────────────────
+
+fn paged_dialect_for_pool(pool: &DatabasePool) -> PagedDialect {
+    match pool {
+        DatabasePool::Postgres(_) => PagedDialect::Postgres,
+        DatabasePool::MySql(_) => PagedDialect::MySql,
+        DatabasePool::Sqlite(_) => PagedDialect::Sqlite,
+        DatabasePool::Any(_) => PagedDialect::Any,
+        DatabasePool::Mssql(_) => PagedDialect::Mssql,
+        DatabasePool::Oracle(_) => PagedDialect::Oracle,
+        DatabasePool::ClickHouse(_) => PagedDialect::ClickHouse,
+    }
+}
+
+/// Sentinel-row gate for paged execution (KTD-2): forwards the first `limit`
+/// row events and passes `Columns`/`Error` through unchanged, drops the
+/// `limit + 1`-th (sentinel) row, and rewrites `Done`'s `row_count` to the
+/// forwarded count so the caller's event contract matches an unpaged run.
+struct SentinelPageGate {
+    limit: usize,
+    seen_rows: usize,
+    forwarded_rows: usize,
+}
+
+impl SentinelPageGate {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            seen_rows: 0,
+            forwarded_rows: 0,
+        }
+    }
+
+    /// Consume one driver event; `Some` means forward it, `None` means drop it
+    /// (the sentinel row).
+    fn observe(&mut self, ev: QueryEvent) -> Option<QueryEvent> {
+        match ev {
+            QueryEvent::Row { values } => {
+                self.seen_rows += 1;
+                if self.seen_rows <= self.limit {
+                    self.forwarded_rows += 1;
+                    Some(QueryEvent::Row { values })
+                } else {
+                    None
+                }
+            }
+            QueryEvent::Done { duration_ms, .. } => Some(QueryEvent::Done {
+                row_count: self.forwarded_rows,
+                duration_ms,
+            }),
+            other => Some(other),
+        }
+    }
+
+    /// Has-more iff the sentinel row arrived (stream exceeded `limit`).
+    fn has_more(&self) -> bool {
+        self.seen_rows > self.limit
+    }
+
+    fn forwarded_count(&self) -> usize {
+        self.forwarded_rows
+    }
+}
+
+/// Clamp the requested page size to the sentinel-safe bound (KTD-4).
+fn clamp_page_size(limit: usize) -> usize {
+    limit.clamp(1, PAGED_MAX_PAGE_SIZE)
+}
+
+/// Offsets at or beyond the ceiling are refused without a driver call (R5).
+fn offset_at_ceiling(offset: usize) -> bool {
+    offset >= PAGED_ROW_CEILING
+}
+
+/// A page whose end reaches or crosses the ceiling reports `capped` (R5).
+fn page_end_capped(offset: usize, forwarded_rows: usize) -> bool {
+    offset + forwarded_rows >= PAGED_ROW_CEILING
 }
 
 async fn execute_statement_pg(
@@ -1033,11 +1288,11 @@ async fn get_columns_sqlite(
 
 // ── Query Table helpers ────────────────────────────────────────────────────────
 
-fn validate_column(name: &str, valid: &[&str]) -> bool {
+pub(crate) fn validate_column(name: &str, valid: &[&str]) -> bool {
     valid.contains(&name)
 }
 
-fn build_order_by_pg(sort: &[SortSpec], valid: &[&str]) -> String {
+pub(crate) fn build_order_by_pg(sort: &[SortSpec], valid: &[&str]) -> String {
     if sort.is_empty() {
         return String::new();
     }
@@ -1062,7 +1317,7 @@ fn build_order_by_pg(sort: &[SortSpec], valid: &[&str]) -> String {
     format!(" ORDER BY {}", parts.join(", "))
 }
 
-fn build_order_by_generic(sort: &[SortSpec], valid: &[&str], quote: char) -> String {
+pub(crate) fn build_order_by_generic(sort: &[SortSpec], valid: &[&str], quote: char) -> String {
     if sort.is_empty() {
         return String::new();
     }
@@ -2300,5 +2555,129 @@ mod group_b_tests {
             events.iter().any(|e| matches!(e, QueryEvent::Error { .. })),
             "only_in_b must not exist on A; events={events:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod paged_tests {
+    use super::*;
+    use crate::models::QueryEvent;
+
+    fn row(v: i64) -> QueryEvent {
+        QueryEvent::Row {
+            values: vec![serde_json::json!(v)],
+        }
+    }
+
+    fn done(row_count: usize) -> QueryEvent {
+        QueryEvent::Done {
+            row_count,
+            duration_ms: 7,
+        }
+    }
+
+    // ── Sentinel-row gating (KTD-2) ───────────────────────────────────────────
+
+    #[test]
+    fn gate_forwards_exactly_limit_rows_when_stream_has_limit_plus_two() {
+        let mut gate = SentinelPageGate::new(2);
+        // Fake driver stream: Columns + 4 rows (limit+2) + Done.
+        let columns = gate
+            .observe(QueryEvent::Columns {
+                names: vec!["n".into()],
+            })
+            .expect("Columns forwards");
+        assert!(matches!(columns, QueryEvent::Columns { .. }));
+
+        let mut forwarded = 0;
+        for v in 0..4 {
+            if gate.observe(row(v)).is_some() {
+                forwarded += 1;
+            }
+        }
+        assert_eq!(forwarded, 2, "sentinel rows must be dropped");
+        assert!(gate.has_more(), "stream exceeded limit → has_more");
+        assert_eq!(gate.forwarded_count(), 2);
+
+        let done_ev = gate.observe(done(4)).expect("Done forwards");
+        match done_ev {
+            QueryEvent::Done {
+                row_count,
+                duration_ms,
+            } => {
+                assert_eq!(row_count, 2, "Done is rewritten to the forwarded count");
+                assert_eq!(duration_ms, 7, "duration preserved");
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn gate_forwards_all_when_stream_has_exactly_limit_rows() {
+        let mut gate = SentinelPageGate::new(2);
+        assert!(gate.observe(row(1)).is_some());
+        assert!(gate.observe(row(2)).is_some());
+        assert!(!gate.has_more(), "sentinel never arrived → no more pages");
+        assert_eq!(gate.forwarded_count(), 2);
+    }
+
+    #[test]
+    fn gate_empty_stream_forwards_zero_rows_no_columns_no_more() {
+        let mut gate = SentinelPageGate::new(500);
+        let done_ev = gate.observe(done(0)).expect("Done forwards");
+        match done_ev {
+            QueryEvent::Done { row_count, .. } => assert_eq!(row_count, 0),
+            _ => panic!("expected Done"),
+        }
+        assert!(!gate.has_more(), "empty first page → has_more false");
+        assert_eq!(gate.forwarded_count(), 0);
+    }
+
+    #[test]
+    fn gate_forwards_error_events_unchanged() {
+        let mut gate = SentinelPageGate::new(500);
+        let ev = gate
+            .observe(QueryEvent::Error {
+                message: "boom".into(),
+            })
+            .expect("Error forwards");
+        assert!(matches!(ev, QueryEvent::Error { .. }));
+        assert!(!gate.has_more());
+    }
+
+    // ── Page-size clamp (KTD-4: page + sentinel must stay under driver cap) ───
+
+    #[test]
+    fn page_size_clamped_to_sentinel_safe_bound() {
+        assert_eq!(clamp_page_size(500), 500);
+        assert_eq!(clamp_page_size(999), 999);
+        assert_eq!(
+            clamp_page_size(1000),
+            999,
+            "limit+1 must fit the driver send-cap"
+        );
+        assert_eq!(clamp_page_size(usize::MAX), 999);
+        assert_eq!(clamp_page_size(0), 1, "zero page size would loop forever");
+    }
+
+    // ── Ceiling (KTD-5 / R5) ──────────────────────────────────────────────────
+
+    #[test]
+    fn offset_at_or_over_ceiling_short_circuits() {
+        assert!(!offset_at_ceiling(PAGED_ROW_CEILING - 1));
+        assert!(offset_at_ceiling(PAGED_ROW_CEILING));
+        assert!(offset_at_ceiling(PAGED_ROW_CEILING + 1));
+        assert_eq!(PAGED_ROW_CEILING, 50_000);
+    }
+
+    #[test]
+    fn page_end_reaching_or_crossing_ceiling_is_capped() {
+        // Rows land exactly on the ceiling → capped.
+        assert!(page_end_capped(49_500, 500));
+        // Rows cross the ceiling → capped.
+        assert!(page_end_capped(49_900, 500));
+        // Page fully below the ceiling → not capped.
+        assert!(!page_end_capped(0, 500));
+        assert!(!page_end_capped(49_499, 500));
     }
 }

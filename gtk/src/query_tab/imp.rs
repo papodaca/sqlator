@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::editor::{SchemaCompletionProvider, SearchBarState};
+use super::paging::QueryPaging;
 use crate::results::{EditState, ResultsGrid};
 use crate::window::SqlatorWindow;
 
@@ -39,6 +40,11 @@ pub struct QueryTab {
     pub persist_id: RefCell<String>,
     pub generation: AtomicU64,
     pub cancel_token: RefCell<Option<CancellationToken>>,
+    /// Dedicated cancel for scroll-driven page fetches (KTD-9); not the tab spinner.
+    pub paging_cancel: RefCell<Option<CancellationToken>>,
+    pub(crate) paging: RefCell<QueryPaging>,
+    /// Column names from the current result (sort whitelist).
+    pub result_columns: RefCell<Vec<String>>,
     pub cancel_action: OnceCell<gio::SimpleAction>,
     /// Per-tab editable results state (never a process singleton).
     pub edit_state: RefCell<EditState>,
@@ -71,6 +77,9 @@ impl ObjectImpl for QueryTab {
     fn dispose(&self) {
         // Cancel any in-flight query when the tab is destroyed.
         if let Some(token) = self.cancel_token.borrow_mut().take() {
+            token.cancel();
+        }
+        if let Some(token) = self.paging_cancel.borrow_mut().take() {
             token.cancel();
         }
         self.dispose_template();

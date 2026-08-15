@@ -1,15 +1,18 @@
 pub(crate) mod imp;
+mod paging;
 
 use crate::application::SqlatorApplication;
+use crate::query_tab::paging::PAGE_SIZE;
 use crate::results::{
     present_row_editor, present_sql_preview, CellValue, EditOverlay, EditToolbarState,
-    RowEditorMode,
+    PagedStatus, RowEditorMode,
 };
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
-use sqlator_core::models::QueryEvent;
+use sqlator_core::db::PagedQueryOutcome;
+use sqlator_core::models::{QueryEvent, SortSpec};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -47,6 +50,7 @@ impl QueryTab {
         tab.setup_actions();
         tab.setup_editor();
         tab.setup_edit_handlers();
+        tab.setup_paging();
         tab.set_placeholder_sql();
         crate::preferences::style_editor(&tab.imp().editor.get());
         tab
@@ -331,6 +335,20 @@ impl QueryTab {
         self.insert_action_group("tab", Some(&group));
     }
 
+    fn setup_paging(&self) {
+        let grid = self.imp().results_grid.get();
+        grid.connect_near_bottom(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.fetch_page()
+        ));
+        grid.connect_server_sort(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |spec| tab.on_server_sort(spec)
+        ));
+    }
+
     fn setup_edit_handlers(&self) {
         let grid = self.imp().results_grid.get();
         grid.connect_edit_handlers(
@@ -392,7 +410,11 @@ impl QueryTab {
         if let Some(token) = self.imp().cancel_token.borrow_mut().take() {
             token.cancel();
         }
+        if let Some(token) = self.imp().paging_cancel.borrow_mut().take() {
+            token.cancel();
+        }
         self.set_busy(false);
+        self.imp().results_grid.set_loading_more(false);
     }
 
     fn set_busy(&self, busy: bool) {
@@ -508,6 +530,43 @@ impl QueryTab {
     }
 
     fn run_sql(&self, connection_id: String, sql: String) {
+        self.imp().paging.borrow_mut().begin(&sql, Vec::new());
+        self.imp().result_columns.borrow_mut().clear();
+        self.launch_page_one(connection_id, sql);
+    }
+
+    fn on_server_sort(&self, spec: Option<(String, bool)>) {
+        if !self.imp().paging.borrow().is_paged() {
+            return;
+        }
+        if self.imp().edit_state.borrow().has_changes() {
+            self.imp().toast_overlay.add_toast(adw::Toast::new(
+                "Save or discard unsaved cell edits before sorting",
+            ));
+            return;
+        }
+        if self.is_busy() || self.imp().paging.borrow().in_flight() {
+            return;
+        }
+        let sort = spec
+            .filter(|(column, _)| !column.is_empty())
+            .map(|(column, desc)| SortSpec { column, desc })
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.imp().paging.borrow_mut().sort_changed(sort);
+        let sql = self.imp().paging.borrow().sql().to_string();
+        let Some(connection_id) = self.connection_id() else {
+            return;
+        };
+        self.launch_page_one(connection_id, sql);
+    }
+
+    fn launch_page_one(&self, connection_id: String, sql: String) {
+        if let Some(token) = self.imp().paging_cancel.borrow_mut().take() {
+            token.cancel();
+        }
+        self.imp().results_grid.set_loading_more(false);
+
         let service = match self.imp().service.get() {
             Some(s) => Arc::clone(s),
             None => return,
@@ -520,6 +579,10 @@ impl QueryTab {
             .reset(&connection_id, &db_type, &sql);
         *self.imp().last_select_sql.borrow_mut() = Some(sql.clone());
 
+        let sort = self.imp().paging.borrow().sort().to_vec();
+        let sortable_columns = self.imp().result_columns.borrow().clone();
+        self.imp().paging.borrow_mut().page_started();
+
         let generation = self.imp().generation.fetch_add(1, Ordering::SeqCst) + 1;
         let token = CancellationToken::new();
         *self.imp().cancel_token.borrow_mut() = Some(token.clone());
@@ -527,34 +590,102 @@ impl QueryTab {
         self.clear_results();
         self.imp().results_stack.set_visible_child_name("results");
 
-        let (tx, rx) = async_channel::unbounded::<QueryEvent>();
+        self.spawn_paged_fetch(
+            service,
+            connection_id,
+            sql,
+            sort,
+            sortable_columns,
+            0,
+            token,
+            generation,
+            false,
+        );
+    }
 
-        let conn_id = connection_id.clone();
-        let sql_task = sql.clone();
+    fn fetch_page(&self) {
+        if self.is_busy() || !self.imp().paging.borrow().should_trigger() {
+            return;
+        }
+        let Some(connection_id) = self.connection_id() else {
+            return;
+        };
+        let Some(service) = self.imp().service.get().map(Arc::clone) else {
+            return;
+        };
+        let sql = self.imp().paging.borrow().sql().to_string();
+        if sql.is_empty() {
+            return;
+        }
+        let sort = self.imp().paging.borrow().sort().to_vec();
+        let sortable_columns = self.imp().result_columns.borrow().clone();
+        let offset = self.imp().paging.borrow().offset();
+        self.imp().paging.borrow_mut().page_started();
+        if let Some(token) = self.imp().paging_cancel.borrow_mut().take() {
+            token.cancel();
+        }
+        let token = CancellationToken::new();
+        *self.imp().paging_cancel.borrow_mut() = Some(token.clone());
+        self.imp().results_grid.set_loading_more(true);
+
+        let generation = self.imp().generation.load(Ordering::SeqCst);
+        self.spawn_paged_fetch(
+            service,
+            connection_id,
+            sql,
+            sort,
+            sortable_columns,
+            offset,
+            token,
+            generation,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_paged_fetch(
+        &self,
+        service: Arc<sqlator_service::AppService>,
+        connection_id: String,
+        sql: String,
+        sort: Vec<SortSpec>,
+        sortable_columns: Vec<String>,
+        offset: usize,
+        token: CancellationToken,
+        generation: u64,
+        chunk: bool,
+    ) {
+        let (tx, rx) = async_channel::unbounded::<QueryEvent>();
         let join = crate::spawn_tokio!(async move {
-            if let Err(e) = service.connect_database(&conn_id).await {
+            if let Err(e) = service.connect_database(&connection_id).await {
                 let _ = tx
                     .send(QueryEvent::Error {
                         message: e.to_string(),
                     })
                     .await;
-                return;
+                return None;
             }
 
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<QueryEvent>(256);
             let db = service.db_handle();
             let cancel = token.clone();
+            let conn_id = connection_id.clone();
             let exec = tokio::spawn(async move {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
                         let _ = db.cancel_query(&conn_id).await;
+                        None
                     }
-                    res = db.execute_query(&conn_id, &sql_task, event_tx) => {
-                        if let Err(e) = res {
-                            tracing::debug!("execute_query returned error: {e}");
-                        }
-                    }
+                    res = db.execute_query_paged(
+                        &conn_id,
+                        &sql,
+                        &sort,
+                        &sortable_columns,
+                        PAGE_SIZE,
+                        offset,
+                        event_tx,
+                    ) => Some(res)
                 }
             });
 
@@ -563,32 +694,100 @@ impl QueryTab {
                     break;
                 }
             }
-            let _ = exec.await;
+            exec.await.ok().flatten()
         });
 
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = tab)]
             self,
             async move {
+                let mut failed = false;
                 while let Ok(event) = rx.recv().await {
                     if tab.imp().generation.load(Ordering::SeqCst) != generation {
                         continue;
                     }
-                    tab.handle_event(event);
+                    if matches!(event, QueryEvent::Error { .. }) {
+                        failed = true;
+                    }
+                    tab.handle_event(event, chunk);
                 }
-                let _ = join.await;
-                if tab.imp().generation.load(Ordering::SeqCst) == generation {
+                let outcome = join.await;
+                if tab.imp().generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                if chunk {
+                    *tab.imp().paging_cancel.borrow_mut() = None;
+                    tab.imp().results_grid.set_loading_more(false);
+                } else {
                     *tab.imp().cancel_token.borrow_mut() = None;
                     tab.set_busy(false);
+                }
+                if failed {
+                    tab.imp().paging.borrow_mut().page_failed();
+                    return;
+                }
+                match outcome {
+                    Ok(Some(Ok(outcome))) => tab.apply_page_outcome(outcome),
+                    Ok(Some(Err(e))) => {
+                        tab.imp().paging.borrow_mut().page_failed();
+                        if chunk {
+                            tab.imp()
+                                .toast_overlay
+                                .add_toast(adw::Toast::new(&format!("Could not load more rows: {e}")));
+                        } else {
+                            tab.append_message(&e.to_string());
+                            tab.imp().results_stack.set_visible_child_name("messages");
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        tab.imp().paging.borrow_mut().page_failed();
+                    }
                 }
             }
         ));
     }
 
-    fn handle_event(&self, event: QueryEvent) {
+    fn apply_page_outcome(&self, outcome: PagedQueryOutcome) {
+        self.imp().paging.borrow_mut().page_completed(outcome);
+        let grid = self.imp().results_grid.get();
+        if !self.imp().paging.borrow().is_paged() {
+            grid.set_client_sorting(true);
+            return;
+        }
+        grid.set_client_sorting(false);
+        let loaded = self.imp().paging.borrow().offset();
+        let status = if self.imp().paging.borrow().capped() {
+            PagedStatus::Capped
+        } else if self.imp().paging.borrow().has_more() {
+            PagedStatus::More
+        } else {
+            PagedStatus::Exhausted
+        };
+        grid.show_paged_status(loaded, status);
+        self.maybe_fill_viewport();
+    }
+
+    fn maybe_fill_viewport(&self) {
+        let tab = self.downgrade();
+        glib::idle_add_local_once(move || {
+            let Some(tab) = tab.upgrade() else {
+                return;
+            };
+            let fits = tab.imp().results_grid.content_fits_viewport();
+            if tab.imp().paging.borrow().should_fill_viewport(fits) {
+                tab.fetch_page();
+            }
+        });
+    }
+
+    fn handle_event(&self, event: QueryEvent, chunk: bool) {
         let grid = self.imp().results_grid.get();
         match event {
             QueryEvent::Columns { names } => {
+                if chunk {
+                    return;
+                }
+                *self.imp().result_columns.borrow_mut() = names.clone();
                 grid.begin_columns(names);
                 self.imp().results_stack.set_visible_child_name("results");
             }
@@ -599,6 +798,11 @@ impl QueryTab {
                 row_count,
                 duration_ms,
             } => {
+                if chunk {
+                    return;
+                }
+                // Always finish page one (passthrough duration line). Paged runs
+                // overwrite this from `apply_page_outcome` after the join returns.
                 grid.finish(row_count, duration_ms);
                 self.imp().results_stack.set_visible_child_name("results");
                 if let Some(page) = self.tab_page() {
@@ -617,6 +821,12 @@ impl QueryTab {
                 self.refresh_edit_ui();
             }
             QueryEvent::Error { message } => {
+                if chunk {
+                    self.imp()
+                        .toast_overlay
+                        .add_toast(adw::Toast::new(&format!("Could not load more rows: {message}")));
+                    return;
+                }
                 self.append_message(&message);
                 self.imp().results_stack.set_visible_child_name("messages");
                 self.imp().edit_state.borrow_mut().clear_all();

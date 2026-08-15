@@ -1,13 +1,16 @@
 //! Table browse tab: server-side sort/filter + paged append (`query_table`).
 //!
-//! Parity target: Svelte `EnhancedGrid` (`LIMIT=50`, `MAX_ROWS=1000`).
+//! Pages of [`LIMIT`] rows, auto-fetched on scroll (and while the first
+//! pages still fit the viewport). Safety ceiling is
+//! [`sqlator_core::db::PAGED_ROW_CEILING`], same as the query tab.
 
 use crate::application::SqlatorApplication;
-use crate::results::ResultsGrid;
+use crate::results::{PagedStatus, ResultsGrid};
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
+use sqlator_core::db::PAGED_ROW_CEILING;
 use sqlator_core::models::{FilterSpec, SortSpec, TableQueryParams, TableQueryResult};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
@@ -15,8 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const LIMIT: i64 = 50;
-const DEFAULT_MAX_ROWS: usize = 1000;
+const LIMIT: i64 = 500;
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone)]
@@ -43,7 +45,7 @@ mod imp {
         pub stack: gtk::Stack,
         pub error_label: gtk::Label,
         pub grid: ResultsGrid,
-        pub load_more: gtk::Button,
+        pub in_flight: Cell<bool>,
         pub service: OnceCell<Arc<sqlator_service::AppService>>,
         pub window: OnceCell<glib::WeakRef<SqlatorWindow>>,
         pub connection_id: RefCell<String>,
@@ -175,15 +177,6 @@ mod imp {
             results_box.set_vexpand(true);
             results_box.append(&grid);
 
-            let load_more = gtk::Button::with_label("Load more");
-            load_more.add_css_class("flat");
-            load_more.set_margin_start(8);
-            load_more.set_margin_end(8);
-            load_more.set_margin_top(4);
-            load_more.set_margin_bottom(8);
-            load_more.set_visible(false);
-            results_box.append(&load_more);
-
             stack.add_named(&results_box, Some("results"));
 
             root.append(&toolbar);
@@ -206,7 +199,7 @@ mod imp {
                 stack,
                 error_label,
                 grid,
-                load_more,
+                in_flight: Cell::new(false),
                 service: OnceCell::new(),
                 window: OnceCell::new(),
                 connection_id: RefCell::new(String::new()),
@@ -353,10 +346,12 @@ impl TableBrowseTab {
             }
         ));
 
-        tab.imp().load_more.connect_clicked(glib::clone!(
+        // Scrolling near the bottom loads the next page (R2); the grid only
+        // signals proximity — the gating state check lives in maybe_load_more.
+        tab.imp().grid.connect_near_bottom(glib::clone!(
             #[weak]
             tab,
-            move |_| tab.load_more()
+            move || tab.maybe_load_more()
         ));
 
         tab.imp().filter_add.connect_clicked(glib::clone!(
@@ -429,15 +424,6 @@ impl TableBrowseTab {
         if let Some(id) = id {
             *self.imp().connection_id.borrow_mut() = id;
         }
-    }
-
-    fn max_rows(&self) -> usize {
-        self.imp()
-            .window
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|w| w.max_rows_pref())
-            .unwrap_or(DEFAULT_MAX_ROWS)
     }
 
     fn schedule_session_save(&self) {
@@ -623,11 +609,40 @@ impl TableBrowseTab {
 
     fn load_more(&self) {
         let next = self.imp().offset.get() + self.imp().total_returned.get() as i64;
-        let max_rows = self.max_rows();
-        if next as usize >= max_rows {
+        if next as usize >= PAGED_ROW_CEILING {
             return;
         }
         self.fetch(next, true);
+    }
+
+    /// Scroll-driven next page (R2): fire `load_more` from the grid's
+    /// near-bottom signal, gated on a loaded result, more rows under the
+    /// ceiling, and no fetch in flight — the state check replaces the gate
+    /// the removed button's disabled state provided.
+    fn maybe_load_more(&self) {
+        let next = self.imp().offset.get() + self.imp().total_returned.get() as i64;
+        if should_fetch_more(
+            self.imp().has_result.get(),
+            self.imp().has_more.get(),
+            self.imp().in_flight.get(),
+            next,
+            PAGED_ROW_CEILING,
+        ) {
+            self.load_more();
+        }
+    }
+
+    /// Keep fetching while the first pages still fit the viewport (U3).
+    fn maybe_fill_viewport(&self) {
+        let tab = self.downgrade();
+        glib::idle_add_local_once(move || {
+            let Some(tab) = tab.upgrade() else {
+                return;
+            };
+            if tab.imp().grid.content_fits_viewport() {
+                tab.maybe_load_more();
+            }
+        });
     }
 
     fn fetch(&self, offset: i64, append: bool) {
@@ -642,8 +657,10 @@ impl TableBrowseTab {
         let gen = self.imp().generation.fetch_add(1, Ordering::Relaxed) + 1;
 
         self.imp().offset.set(offset);
-        self.imp().load_more.set_sensitive(false);
-        if !self.imp().has_result.get() {
+        self.imp().in_flight.set(true);
+        if append {
+            self.imp().grid.set_loading_more(true);
+        } else if !self.imp().has_result.get() {
             self.imp().stack.set_visible_child_name("loading");
         } else {
             self.imp().inline_status.set_text("Updating…");
@@ -676,13 +693,14 @@ impl TableBrowseTab {
                     return;
                 }
 
+                tab.imp().in_flight.set(false);
+                tab.imp().grid.set_loading_more(false);
                 tab.imp().inline_status.set_visible(false);
                 match result {
                     Ok(data) => tab.apply_result(data, append),
                     Err(e) => {
                         tab.imp().error_label.set_text(&e.to_string());
                         tab.imp().stack.set_visible_child_name("error");
-                        tab.imp().load_more.set_sensitive(true);
                     }
                 }
             }
@@ -716,34 +734,27 @@ impl TableBrowseTab {
         } else {
             data.rows.len()
         });
-        let max_rows = self.max_rows();
-        self.imp().total_returned.set(returned.min(max_rows));
+        let capped = returned >= PAGED_ROW_CEILING;
+        self.imp()
+            .total_returned
+            .set(returned.min(PAGED_ROW_CEILING));
         self.imp()
             .has_more
-            .set(data.has_more && returned < max_rows);
+            .set(data.has_more && !capped);
         self.imp().has_result.set(true);
 
-        grid.finish(self.imp().total_returned.get(), 0);
-        let status = if self.imp().has_more.get() {
-            format!(
-                "Showing {} rows (load more for up to {max_rows})",
-                self.imp().total_returned.get()
-            )
+        let loaded = self.imp().total_returned.get();
+        let status = if capped {
+            PagedStatus::Capped
+        } else if self.imp().has_more.get() {
+            PagedStatus::More
         } else {
-            format!("Showing {} rows", self.imp().total_returned.get())
+            PagedStatus::Exhausted
         };
-        grid.show_message_line(&status);
+        grid.show_paged_status(loaded, status);
 
         self.imp().stack.set_visible_child_name("results");
-        let can_more = self.imp().has_more.get();
-        self.imp().load_more.set_visible(can_more);
-        self.imp().load_more.set_sensitive(can_more);
-        if can_more {
-            self.imp().load_more.set_label(&format!(
-                "Load more ({} shown)",
-                self.imp().total_returned.get()
-            ));
-        }
+        self.maybe_fill_viewport();
     }
 
     fn update_filter_column_model(&self, columns: &[String]) {
@@ -754,6 +765,19 @@ impl TableBrowseTab {
             self.imp().filter_column.set_selected(0);
         }
     }
+}
+
+/// Gate for the scroll-driven next-page trigger (R2): fire only when a
+/// result is loaded, more rows exist, no fetch is in flight, and the next
+/// offset sits below [`PAGED_ROW_CEILING`] (mirrors `load_more`'s check).
+fn should_fetch_more(
+    has_result: bool,
+    has_more: bool,
+    in_flight: bool,
+    next_offset: i64,
+    max_rows: usize,
+) -> bool {
+    has_result && has_more && !in_flight && (next_offset as usize) < max_rows
 }
 
 fn parse_filter_value(v: &str) -> serde_json::Value {
@@ -777,4 +801,53 @@ fn project_object_row(row: &serde_json::Value, columns: &[String]) -> Vec<serde_
                 .unwrap_or(serde_json::Value::Null)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_fetch_more;
+    use sqlator_core::db::PAGED_ROW_CEILING;
+
+    #[test]
+    fn ceiling_or_exhausted_result_blocks_trigger() {
+        assert!(!should_fetch_more(true, false, false, 49_500, PAGED_ROW_CEILING));
+        assert!(!should_fetch_more(
+            true,
+            true,
+            false,
+            PAGED_ROW_CEILING as i64,
+            PAGED_ROW_CEILING
+        ));
+        assert!(!should_fetch_more(
+            true,
+            true,
+            false,
+            (PAGED_ROW_CEILING + 500) as i64,
+            PAGED_ROW_CEILING
+        ));
+    }
+
+    #[test]
+    fn stays_silent_until_first_result_applies() {
+        // After refresh()/restore reset (offset back to 0, has_result false
+        // until the first apply), the trigger is not armed.
+        assert!(!should_fetch_more(false, false, false, 0, PAGED_ROW_CEILING));
+        assert!(!should_fetch_more(false, true, false, 0, PAGED_ROW_CEILING));
+    }
+
+    #[test]
+    fn armed_after_apply_with_more_rows() {
+        // After the first apply post-refresh, and after a filter/sort
+        // re-fetch (offset reset to 0) landing a fresh result with more
+        // rows under the ceiling, the trigger re-arms.
+        assert!(should_fetch_more(true, true, false, 500, PAGED_ROW_CEILING));
+    }
+
+    #[test]
+    fn in_flight_fetch_blocks_trigger() {
+        // A near-bottom signal while a fetch is in flight must not start
+        // another — exactly one fetch in flight, enforced by state now that
+        // the button's disabled state is gone.
+        assert!(!should_fetch_more(true, true, true, 500, PAGED_ROW_CEILING));
+    }
 }

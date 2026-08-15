@@ -8,7 +8,10 @@
 //!
 //! Bare `cargo test --workspace` must pass with no docker (tests skip).
 
-use sqlator_core::models::{ParameterizedStatement, QueryEvent, SqlBatch, TableQueryParams};
+use sqlator_core::db::PagedQueryOutcome;
+use sqlator_core::models::{
+    ParameterizedStatement, QueryEvent, SortSpec, SqlBatch, TableQueryParams,
+};
 use sqlator_core::{DbManager, SshAuthConfig, SshHostConfig, SshTunnel};
 use std::time::Duration;
 
@@ -617,4 +620,433 @@ async fn ssh_shared_session_two_forwards_independent_teardown() {
     SshTunnel::close_session(session)
         .await
         .expect("close_session after last forward");
+}
+
+// ── 7. Paged ad-hoc query execution (U1) ──────────────────────────────────────
+//
+// Pins for `DbManager::execute_query_paged`: page sequence with the
+// LIMIT+1 sentinel, server-side sort across page boundaries, empty first page,
+// the 50,000-row ceiling short-circuit, and passthrough equivalence with the
+// unpaged path. SQLite pins run whenever integration is enabled (no docker);
+// Postgres/MySQL pins follow the same reachability gates as sections 1–6.
+
+async fn collect_paged(
+    mgr: &DbManager,
+    id: &str,
+    sql: &str,
+    sort: &[SortSpec],
+    sortable_columns: &[String],
+    limit: usize,
+    offset: usize,
+) -> (PagedQueryOutcome, Vec<QueryEvent>) {
+    // Capacity 1024 > 500-row page + Columns/Done so the driver never blocks.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<QueryEvent>(1024);
+    let outcome = mgr
+        .execute_query_paged(id, sql, sort, sortable_columns, limit, offset, tx)
+        .await
+        .unwrap_or_else(|e| panic!("execute_query_paged failed: {e:?}"));
+    // execute_query_paged returns only after every event is forwarded and
+    // dropped its copy of the sender.
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    (outcome, events)
+}
+
+fn seed_values_insert(table: &str, rows: usize) -> String {
+    // Single-statement multi-row INSERT — fast on every dialect.
+    let values: Vec<String> = (1..=rows)
+        .map(|i| format!("({i}, {})", rows - i + 1))
+        .collect();
+    format!("INSERT INTO {table} (id, n) VALUES {}", values.join(","))
+}
+
+fn ids_from(events: &[QueryEvent]) -> Vec<i64> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            QueryEvent::Row { values } => values[0].as_i64(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Serialize events for equality pins with `duration_ms` stripped — timings
+/// are inherently nondeterministic across two runs of the same SQL.
+fn without_durations(events: &[QueryEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|e| {
+            let mut v = serde_json::to_value(e).expect("serialize event");
+            if let Some(data) = v.get_mut("data").and_then(|d| d.as_object_mut()) {
+                data.remove("duration_ms");
+            }
+            v
+        })
+        .collect()
+}
+
+async fn assert_page_shape(
+    mgr: &DbManager,
+    id: &str,
+    sql: &str,
+    sort: &[SortSpec],
+    sortable: &[String],
+    offset: usize,
+    expect: (usize, bool), // (rows, has_more)
+) -> Vec<QueryEvent> {
+    let (expect_rows, expect_has_more) = expect;
+    let (outcome, events) = collect_paged(mgr, id, sql, sort, sortable, 500, offset).await;
+    assert!(outcome.paged, "SELECT must run through the wrapper");
+    assert_eq!(outcome.row_count, expect_rows, "offset {offset}");
+    assert_eq!(outcome.has_more, expect_has_more, "offset {offset}");
+    assert!(!outcome.capped, "small result must not be capped");
+    assert!(
+        matches!(events.first(), Some(QueryEvent::Columns { .. })),
+        "page at offset {offset} must start with Columns; got {events:?}"
+    );
+    let row_events = events
+        .iter()
+        .filter(|e| matches!(e, QueryEvent::Row { .. }))
+        .count();
+    assert_eq!(row_events, expect_rows, "offset {offset}; got {events:?}");
+    assert!(
+        matches!(events.last(), Some(QueryEvent::Done { .. })),
+        "page at offset {offset} must end with Done; got {events:?}"
+    );
+    if let Some(QueryEvent::Done { row_count, .. }) = events.last() {
+        assert_eq!(*row_count, expect_rows, "Done carries the forwarded count");
+    }
+    events
+}
+
+#[tokio::test]
+async fn paged_sqlite_pages_of_500_sequence_and_has_more() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = sqlite_url(&dir.path().join("paged.db"));
+    let mgr = DbManager::new();
+    mgr.connect("paged", &url).await.expect("connect");
+
+    collect_events(
+        &mgr,
+        "paged",
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+    )
+    .await;
+    collect_events(&mgr, "paged", &seed_values_insert("big", 1250)).await;
+
+    let sql = "SELECT id, n FROM big";
+    assert_page_shape(&mgr, "paged", sql, &[], &[], 0, (500, true)).await;
+    assert_page_shape(&mgr, "paged", sql, &[], &[], 500, (500, true)).await;
+    assert_page_shape(&mgr, "paged", sql, &[], &[], 1000, (250, false)).await;
+
+    mgr.disconnect("paged").await;
+}
+
+#[tokio::test]
+async fn paged_sqlite_sort_spec_orders_across_page_boundaries() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = sqlite_url(&dir.path().join("paged_sort.db"));
+    let mgr = DbManager::new();
+    mgr.connect("paged-sort", &url).await.expect("connect");
+
+    collect_events(
+        &mgr,
+        "paged-sort",
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+    )
+    .await;
+    collect_events(&mgr, "paged-sort", &seed_values_insert("big", 1250)).await;
+
+    let sql = "SELECT id, n FROM big";
+    let sort = [SortSpec {
+        column: "id".into(),
+        desc: true,
+    }];
+    let sortable = ["id".to_string(), "n".to_string()];
+
+    let mut seen: Vec<i64> = Vec::new();
+    for offset in [0, 500, 1000] {
+        let events = assert_page_shape(
+            &mgr,
+            "paged-sort",
+            sql,
+            &sort,
+            &sortable,
+            offset,
+            (if offset < 1000 { 500 } else { 250 }, offset < 1000),
+        )
+        .await;
+        seen.extend(ids_from(&events));
+    }
+
+    let expected: Vec<i64> = (1..=1250).rev().collect();
+    assert_eq!(
+        seen, expected,
+        "server-side sort must hold across page boundaries"
+    );
+
+    mgr.disconnect("paged-sort").await;
+}
+
+#[tokio::test]
+async fn paged_sqlite_empty_first_page_no_columns_event() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = sqlite_url(&dir.path().join("paged_empty.db"));
+    let mgr = DbManager::new();
+    mgr.connect("paged-empty", &url).await.expect("connect");
+
+    collect_events(
+        &mgr,
+        "paged-empty",
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+    )
+    .await;
+
+    let (outcome, events) = collect_paged(
+        &mgr,
+        "paged-empty",
+        "SELECT id, n FROM big WHERE 1 = 0",
+        &[],
+        &[],
+        500,
+        0,
+    )
+    .await;
+
+    assert!(outcome.paged);
+    assert_eq!(outcome.row_count, 0);
+    assert!(!outcome.has_more, "empty first page → has_more false");
+    assert!(!outcome.capped);
+    // Documented acceptable: drivers emit Columns on the first row, so an
+    // empty page emits none — same as today's empty-result behavior.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, QueryEvent::Columns { .. })),
+        "empty page must not emit Columns; got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(QueryEvent::Done { row_count: 0, .. })),
+        "only a Done with 0 rows; got {events:?}"
+    );
+
+    mgr.disconnect("paged-empty").await;
+}
+
+#[tokio::test]
+async fn paged_sqlite_offset_at_ceiling_short_circuits_without_driver_call() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = sqlite_url(&dir.path().join("paged_ceiling.db"));
+    let mgr = DbManager::new();
+    mgr.connect("paged-ceiling", &url).await.expect("connect");
+
+    // The table does not exist: if the driver were called, an Error event
+    // would appear. A clean capped outcome with zero events proves the
+    // ceiling short-circuits before touching the database (R5).
+    let (outcome, events) = collect_paged(
+        &mgr,
+        "paged-ceiling",
+        "SELECT id, n FROM definitely_missing_table",
+        &[],
+        &[],
+        500,
+        50_000,
+    )
+    .await;
+
+    assert!(outcome.paged);
+    assert_eq!(outcome.row_count, 0);
+    assert!(!outcome.has_more);
+    assert!(outcome.capped, "offset at ceiling must report capped");
+    assert!(
+        events.is_empty(),
+        "no driver call ⇒ no events at all; got {events:?}"
+    );
+
+    mgr.disconnect("paged-ceiling").await;
+}
+
+#[tokio::test]
+async fn paged_passthrough_events_identical_to_execute_query_sqlite() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = sqlite_url(&dir.path().join("paged_passthrough.db"));
+    let mgr = DbManager::new();
+    mgr.connect("paged-pt", &url).await.expect("connect");
+
+    collect_events(
+        &mgr,
+        "paged-pt",
+        "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
+    )
+    .await;
+    collect_events(&mgr, "paged-pt", "INSERT INTO kv (k, v) VALUES ('a', '1')").await;
+
+    // Every passthrough class must behave exactly like the unpaged path (R6).
+    for sql in [
+        "UPDATE kv SET v = '2' WHERE k = 'a'", // DML
+        "EXPLAIN SELECT k FROM kv",            // meta
+        "SELECT 1; SELECT 2",                  // multi-statement
+        "SELEC definitely not sql",            // parse failure
+    ] {
+        let today = collect_events(&mgr, "paged-pt", sql).await;
+        let (outcome, paged_events) = collect_paged(&mgr, "paged-pt", sql, &[], &[], 500, 0).await;
+
+        assert!(
+            !outcome.paged,
+            "{sql:?} must be a passthrough run, not wrapped"
+        );
+        assert_eq!(outcome.row_count, 0, "passthrough reports no page rows");
+        assert!(!outcome.has_more);
+        assert!(!outcome.capped);
+
+        assert_eq!(
+            without_durations(&today),
+            without_durations(&paged_events),
+            "passthrough events must match execute_query modulo timings for {sql:?}"
+        );
+    }
+
+    mgr.disconnect("paged-pt").await;
+}
+
+// Same pins against live drivers when compose services are up (soft-skip
+// otherwise, same posture as the MySQL/Postgres gates above).
+
+#[tokio::test]
+async fn paged_postgres_pages_and_sort_boundaries() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+    if !postgres_reachable().await {
+        skip("Postgres not reachable at localhost:5454");
+        return;
+    }
+
+    let id = "paged-pg";
+    let mgr = DbManager::new();
+    mgr.connect(id, POSTGRES_URL).await.expect("connect pg");
+
+    collect_events(&mgr, id, "DROP TABLE IF EXISTS u1_paged_big").await;
+    collect_events(
+        &mgr,
+        id,
+        "CREATE TABLE u1_paged_big (id INT PRIMARY KEY, n INT NOT NULL)",
+    )
+    .await;
+    collect_events(
+        &mgr,
+        id,
+        "INSERT INTO u1_paged_big SELECT i, 1251 - i FROM generate_series(1, 1250) AS i",
+    )
+    .await;
+
+    let sql = "SELECT id, n FROM u1_paged_big";
+    let sort = [SortSpec {
+        column: "id".into(),
+        desc: true,
+    }];
+    let sortable = ["id".to_string(), "n".to_string()];
+
+    let mut seen: Vec<i64> = Vec::new();
+    for (offset, expected) in [(0usize, 500usize), (500, 500), (1000, 250)] {
+        let events = assert_page_shape(
+            &mgr,
+            id,
+            sql,
+            &sort,
+            &sortable,
+            offset,
+            (expected, offset < 1000),
+        )
+        .await;
+        seen.extend(ids_from(&events));
+    }
+    let expected: Vec<i64> = (1..=1250).rev().collect();
+    assert_eq!(seen, expected, "pg sort must hold across page boundaries");
+
+    collect_events(&mgr, id, "DROP TABLE IF EXISTS u1_paged_big").await;
+    mgr.disconnect(id).await;
+}
+
+#[tokio::test]
+async fn paged_mysql_pages_and_sort_boundaries() {
+    if !integration_enabled() {
+        skip("set SQLATOR_INTEGRATION=1 or --features integration");
+        return;
+    }
+    if !mysql_reachable().await {
+        skip("MySQL not reachable at localhost:3336");
+        return;
+    }
+
+    let id = "paged-mysql";
+    let mgr = DbManager::new();
+    mgr.connect(id, MYSQL_URL).await.expect("connect mysql");
+
+    collect_events(&mgr, id, "DROP TABLE IF EXISTS u1_paged_big").await;
+    collect_events(
+        &mgr,
+        id,
+        "CREATE TABLE u1_paged_big (id INT PRIMARY KEY, n INT NOT NULL)",
+    )
+    .await;
+    collect_events(&mgr, id, &seed_values_insert("u1_paged_big", 1250)).await;
+
+    let sql = "SELECT id, n FROM u1_paged_big";
+    let sort = [SortSpec {
+        column: "id".into(),
+        desc: true,
+    }];
+    let sortable = ["id".to_string(), "n".to_string()];
+
+    let mut seen: Vec<i64> = Vec::new();
+    for (offset, expected) in [(0usize, 500usize), (500, 500), (1000, 250)] {
+        let events = assert_page_shape(
+            &mgr,
+            id,
+            sql,
+            &sort,
+            &sortable,
+            offset,
+            (expected, offset < 1000),
+        )
+        .await;
+        seen.extend(ids_from(&events));
+    }
+    let expected: Vec<i64> = (1..=1250).rev().collect();
+    assert_eq!(
+        seen, expected,
+        "mysql sort must hold across page boundaries"
+    );
+
+    collect_events(&mgr, id, "DROP TABLE IF EXISTS u1_paged_big").await;
+    mgr.disconnect(id).await;
 }
