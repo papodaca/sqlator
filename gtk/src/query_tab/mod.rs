@@ -415,6 +415,7 @@ impl QueryTab {
         }
         self.set_busy(false);
         self.imp().results_grid.set_loading_more(false);
+        self.imp().results_grid.set_refreshing(false);
     }
 
     fn set_busy(&self, busy: bool) {
@@ -587,7 +588,16 @@ impl QueryTab {
         let token = CancellationToken::new();
         *self.imp().cancel_token.borrow_mut() = Some(token.clone());
         self.set_busy(true);
-        self.clear_results();
+        self.imp().messages_view.buffer().set_text("");
+        self.imp().page_one_saw_columns.set(false);
+        let grid = self.imp().results_grid.get();
+        if grid.has_rows() {
+            grid.clear_overlay();
+            grid.set_refreshing(true);
+        } else {
+            grid.clear();
+        }
+        self.refresh_edit_ui();
         self.imp().results_stack.set_visible_child_name("results");
 
         self.spawn_paged_fetch(
@@ -721,6 +731,7 @@ impl QueryTab {
                 } else {
                     *tab.imp().cancel_token.borrow_mut() = None;
                     tab.set_busy(false);
+                    tab.imp().results_grid.set_refreshing(false);
                 }
                 if failed {
                     tab.imp().paging.borrow_mut().page_failed();
@@ -787,6 +798,8 @@ impl QueryTab {
                 if chunk {
                     return;
                 }
+                self.imp().page_one_saw_columns.set(true);
+                grid.set_refreshing(false);
                 *self.imp().result_columns.borrow_mut() = names.clone();
                 grid.begin_columns(names);
                 self.imp().results_stack.set_visible_child_name("results");
@@ -801,6 +814,10 @@ impl QueryTab {
                 if chunk {
                     return;
                 }
+                if !self.imp().page_one_saw_columns.get() {
+                    grid.clear();
+                }
+                grid.set_refreshing(false);
                 // Always finish page one (passthrough duration line). Paged runs
                 // overwrite this from `apply_page_outcome` after the join returns.
                 grid.finish(row_count, duration_ms);
@@ -813,6 +830,7 @@ impl QueryTab {
                 self.fetch_edit_metadata_after_select();
             }
             QueryEvent::RowsAffected { count, duration_ms } => {
+                grid.set_refreshing(false);
                 let msg = format!("{count} rows affected in {duration_ms} ms");
                 grid.show_message_line(&msg);
                 self.append_message(&msg);
@@ -827,6 +845,7 @@ impl QueryTab {
                         .add_toast(adw::Toast::new(&format!("Could not load more rows: {message}")));
                     return;
                 }
+                grid.set_refreshing(false);
                 self.append_message(&message);
                 self.imp().results_stack.set_visible_child_name("messages");
                 self.imp().edit_state.borrow_mut().clear_all();

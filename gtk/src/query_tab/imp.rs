@@ -3,7 +3,7 @@ use gtk::gio;
 use gtk::prelude::StaticTypeExt;
 use gtk::{glib, CompositeTemplate};
 use sqlator_service::AppService;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -53,6 +53,8 @@ pub struct QueryTab {
     pub schema_provider: OnceCell<SchemaCompletionProvider>,
     pub search: RefCell<Option<Rc<SearchBarState>>>,
     pub vim_controller: RefCell<Option<gtk::EventControllerKey>>,
+    /// Whether this page-one run has applied a `Columns` event (R6 empty Done).
+    pub page_one_saw_columns: Cell<bool>,
 }
 
 #[glib::object_subclass]

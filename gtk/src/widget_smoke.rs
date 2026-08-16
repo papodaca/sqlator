@@ -47,6 +47,35 @@ fn composite_templates_inflate_and_children_resolve() {
         grid.set_loading_more(false);
         assert!(!grid.imp().loading_more_row.is_visible());
 
+        assert!(
+            grid.imp().refresh_overlay.parent().is_some(),
+            "refresh overlay wraps the scrolled data area"
+        );
+        assert!(!grid.imp().refresh_scrim.is_visible(), "scrim starts hidden");
+        assert!(!grid.imp().refresh_card.is_visible(), "card starts hidden");
+        grid.set_refreshing(true);
+        assert!(grid.imp().refresh_scrim.is_visible());
+        assert!(grid.imp().refresh_card.is_visible());
+        grid.set_refreshing(true);
+        grid.set_refreshing(false);
+        assert!(
+            !grid.imp().refresh_scrim.is_visible() && !grid.imp().refresh_card.is_visible(),
+            "consecutive set_refreshing(true) still hides exactly once"
+        );
+
+        grid.set_refreshing(true);
+        grid.set_loading_more(true);
+        assert!(grid.imp().refresh_scrim.is_visible());
+        assert!(grid.imp().loading_more_row.is_visible());
+        grid.set_refreshing(false);
+        assert!(
+            grid.imp().loading_more_row.is_visible(),
+            "hiding overlay does not hide the chunk indicator"
+        );
+        assert!(!grid.imp().refresh_scrim.is_visible());
+        grid.set_loading_more(false);
+        assert!(!grid.imp().loading_more_row.is_visible());
+
         // Unallocated grid reports content-fits-viewport; the near-bottom
         // signal itself stays silent there (gated on upper > page_size).
         assert!(grid.content_fits_viewport());

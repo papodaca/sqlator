@@ -4,6 +4,11 @@
   opacity: 0.7;
 }
 
+/* Dimmed scrim over the results grid during refresh (not first-load). */
+.refresh-scrim {
+  background-color: alpha(@borders, 0.35);
+}
+
 /* NULL cells in the ColumnView results grid */
 .null-cell {
   font-style: italic;

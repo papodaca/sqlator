@@ -60,6 +60,10 @@ mod imp {
         pub save_btn: gtk::Button,
         pub status: gtk::Label,
         pub scrolled: gtk::ScrolledWindow,
+        /// Dimmed refresh overlay wrapping `scrolled` (toolbar/status stay outside).
+        pub refresh_overlay: gtk::Overlay,
+        pub refresh_scrim: gtk::Box,
+        pub refresh_card: gtk::Box,
         /// Bottom loading row appended after the scrolled area (R3); hidden by default.
         pub loading_more_row: gtk::Box,
         pub column_view: ColumnView,
@@ -173,9 +177,44 @@ mod imp {
             loading_more_row.append(&loading_caption);
             loading_more_row.set_visible(false);
 
+            let refresh_scrim = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            refresh_scrim.add_css_class("refresh-scrim");
+            refresh_scrim.set_hexpand(true);
+            refresh_scrim.set_vexpand(true);
+            refresh_scrim.set_halign(gtk::Align::Fill);
+            refresh_scrim.set_valign(gtk::Align::Fill);
+            refresh_scrim.set_can_target(false);
+            refresh_scrim.set_visible(false);
+
+            let refresh_card = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            refresh_card.add_css_class("card");
+            refresh_card.set_halign(gtk::Align::Center);
+            refresh_card.set_valign(gtk::Align::Center);
+            let refresh_spinner = gtk::Spinner::new();
+            refresh_spinner.set_spinning(true);
+            refresh_spinner.set_margin_start(12);
+            refresh_spinner.set_margin_top(10);
+            refresh_spinner.set_margin_bottom(10);
+            let refresh_caption = gtk::Label::new(Some("Loading data…"));
+            refresh_caption.add_css_class("dimmed");
+            refresh_caption.set_margin_end(12);
+            refresh_card.append(&refresh_spinner);
+            refresh_card.append(&refresh_caption);
+            refresh_card.set_visible(false);
+            let card_click = GestureClick::new();
+            card_click.connect_pressed(|_, _, _, _| {});
+            refresh_card.add_controller(card_click);
+
+            let refresh_overlay = gtk::Overlay::new();
+            refresh_overlay.set_hexpand(true);
+            refresh_overlay.set_vexpand(true);
+            refresh_overlay.set_child(Some(&scrolled));
+            refresh_overlay.add_overlay(&refresh_scrim);
+            refresh_overlay.add_overlay(&refresh_card);
+
             root.append(&action_bar);
             root.append(&status);
-            root.append(&scrolled);
+            root.append(&refresh_overlay);
             root.append(&loading_more_row);
 
             Self {
@@ -189,6 +228,9 @@ mod imp {
                 save_btn,
                 status,
                 scrolled,
+                refresh_overlay,
+                refresh_scrim,
+                refresh_card,
                 loading_more_row,
                 column_view,
                 model: RefCell::new(Some(model)),
@@ -405,6 +447,18 @@ impl ResultsGrid {
     /// area (R3) while a chunk fetch is in flight. Hidden by default.
     pub fn set_loading_more(&self, active: bool) {
         self.imp().loading_more_row.set_visible(active);
+    }
+
+    /// Show/hide the dimmed refresh overlay over the data area. Independent
+    /// of [`Self::set_loading_more`]; hidden by default.
+    pub fn set_refreshing(&self, active: bool) {
+        self.imp().refresh_scrim.set_visible(active);
+        self.imp().refresh_card.set_visible(active);
+    }
+
+    pub fn has_rows(&self) -> bool {
+        self.flush_pending();
+        self.model().n_items() > 0
     }
 
     /// True while every loaded row fits inside the viewport

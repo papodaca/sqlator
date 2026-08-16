@@ -41,7 +41,6 @@ mod imp {
         pub filter_add: gtk::Button,
         pub filter_clear: gtk::Button,
         pub filter_chips: gtk::Box,
-        pub inline_status: gtk::Label,
         pub stack: gtk::Stack,
         pub error_label: gtk::Label,
         pub grid: ResultsGrid,
@@ -135,14 +134,6 @@ mod imp {
             filter_chips.set_margin_bottom(4);
             filter_chips.set_visible(false);
 
-            let inline_status = gtk::Label::builder()
-                .xalign(0.0)
-                .margin_start(8)
-                .margin_end(8)
-                .css_classes(["dimmed", "caption"])
-                .build();
-            inline_status.set_visible(false);
-
             let stack = gtk::Stack::new();
             stack.set_hexpand(true);
             stack.set_vexpand(true);
@@ -182,7 +173,6 @@ mod imp {
             root.append(&toolbar);
             root.append(&filter_bar);
             root.append(&filter_chips);
-            root.append(&inline_status);
             root.append(&stack);
 
             Self {
@@ -195,7 +185,6 @@ mod imp {
                 filter_add,
                 filter_clear,
                 filter_chips,
-                inline_status,
                 stack,
                 error_label,
                 grid,
@@ -663,8 +652,7 @@ impl TableBrowseTab {
         } else if !self.imp().has_result.get() {
             self.imp().stack.set_visible_child_name("loading");
         } else {
-            self.imp().inline_status.set_text("Updating…");
-            self.imp().inline_status.set_visible(true);
+            self.imp().grid.set_refreshing(true);
         }
 
         let params = TableQueryParams {
@@ -695,7 +683,7 @@ impl TableBrowseTab {
 
                 tab.imp().in_flight.set(false);
                 tab.imp().grid.set_loading_more(false);
-                tab.imp().inline_status.set_visible(false);
+                tab.imp().grid.set_refreshing(false);
                 match result {
                     Ok(data) => tab.apply_result(data, append),
                     Err(e) => {
