@@ -9,6 +9,14 @@ services:
       POSTGRES_DB: sqlator
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # First boot only (empty volume). Re-seed: docker compose down -v
+      - ./core/tests/fixtures/engines/postgres.sql:/docker-entrypoint-initdb.d/01-sqlator.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sqlator -d sqlator"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   mysql:
     image: mysql:8.4
@@ -21,6 +29,13 @@ services:
       MYSQL_DATABASE: sqlator
     volumes:
       - mysqldata:/var/lib/mysql
+      - ./core/tests/fixtures/engines/mysql.sql:/docker-entrypoint-initdb.d/01-sqlator.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-usqlator", "-psqlator"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
   mariadb:
     image: mariadb:11
@@ -33,6 +48,13 @@ services:
       MARIADB_DATABASE: sqlator
     volumes:
       - mariadbdata:/var/lib/mysql
+      - ./core/tests/fixtures/engines/mariadb.sql:/docker-entrypoint-initdb.d/01-sqlator.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -44,6 +66,19 @@ services:
       MSSQL_DB: sqlator
     volumes:
       - mssqldata:/var/opt/mssql
+      - ./core/tests/fixtures/engines/mssql.sql:/init/mssql.sql:ro
+      - ./docker/mssql/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["bash", "/entrypoint.sh"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $$MSSQL_SA_PASSWORD -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P $$MSSQL_SA_PASSWORD -Q \"SELECT 1\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
 
   oracle:
     image: gvenzl/oracle-free:latest-faststart
@@ -53,6 +88,13 @@ services:
       ORACLE_PASSWORD: Sqlator123!
     volumes:
       - oracledata:/opt/oracle/oradata
+      - ./core/tests/fixtures/engines/oracle.sql:/container-entrypoint-initdb.d/01-sqlator.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -65,6 +107,13 @@ services:
       CLICKHOUSE_DB: sqlator
     volumes:
       - clickhousedata:/var/lib/clickhouse
+      - ./core/tests/fixtures/engines/clickhouse.sql:/docker-entrypoint-initdb.d/01-sqlator.sql:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   # Group C: SSH tunnel concurrency characterization (password auth).
   # From the host: ssh sqlator@localhost -p 2222 (password: sqlator)

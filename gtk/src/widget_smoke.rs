@@ -37,7 +37,10 @@ fn composite_templates_inflate_and_children_resolve() {
         // non-paged status path (characterization pins below keep U3 honest).
         let grid = ResultsGrid::new();
 
-        assert!(grid.imp().loading_more_row.parent().is_some(), "loading row appended");
+        assert!(
+            grid.imp().loading_more_row.parent().is_some(),
+            "loading row appended"
+        );
         assert!(
             !grid.imp().loading_more_row.is_visible(),
             "loading row starts hidden"
@@ -51,7 +54,10 @@ fn composite_templates_inflate_and_children_resolve() {
             grid.imp().refresh_overlay.parent().is_some(),
             "refresh overlay wraps the scrolled data area"
         );
-        assert!(!grid.imp().refresh_scrim.is_visible(), "scrim starts hidden");
+        assert!(
+            !grid.imp().refresh_scrim.is_visible(),
+            "scrim starts hidden"
+        );
         assert!(!grid.imp().refresh_card.is_visible(), "card starts hidden");
         grid.set_refreshing(true);
         assert!(grid.imp().refresh_scrim.is_visible());
@@ -87,7 +93,10 @@ fn composite_templates_inflate_and_children_resolve() {
         grid.begin_columns(vec!["id".to_string(), "name".to_string()]);
         assert_eq!(grid.imp().status.text(), "0 rows \u{00b7} 2 columns");
         grid.finish(42, 7);
-        assert_eq!(grid.imp().status.text(), "42 rows in 7 ms \u{00b7} 2 columns");
+        assert_eq!(
+            grid.imp().status.text(),
+            "42 rows in 7 ms \u{00b7} 2 columns"
+        );
 
         // Paged status copy reaches the same label with the same column
         // suffix; the R5 ceiling message is pinned verbatim.

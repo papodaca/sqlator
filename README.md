@@ -71,7 +71,7 @@ cargo run -p sqlator-web
 
 ### Development databases
 
-A `docker-compose.yml` is included with pre-configured instances for local development:
+A `docker-compose.yml` is included with pre-configured instances for local development. Seed SQL in `core/tests/fixtures/engines/` is applied on **first boot of an empty volume**. Existing named volumes are not re-initialized; live tests re-apply seeds idempotently. To force Compose to re-run init scripts: `docker compose down -v`.
 
 ```bash
 docker compose up -d
@@ -85,6 +85,19 @@ docker compose up -d
 | MSSQL | `mssql://sa:Sqlator123!@localhost:1444/master` |
 | Oracle | `oracle://system:Sqlator123!@localhost:1522/FREEPDB1` |
 | ClickHouse | `clickhouse://sqlator:sqlator@localhost:8123/sqlator` |
+
+### CI / integration tests
+
+Everyday `cargo test` (no `integration` feature) stays offline: Group C skips unreachable engines.
+
+Live pagination wrap/passthrough tests require Docker. Same path as GitHub Actions:
+
+```bash
+docker compose up -d --wait postgres mysql mariadb mssql oracle clickhouse
+cargo test -p sqlator-core --features integration --test engine_paged
+```
+
+If a required engine is down, that suite **fails** (it does not skip). SQLite proofs use a temp file and do not need Compose.
 
 ## License
 

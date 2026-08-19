@@ -3,8 +3,8 @@
 use crate::results::cell::{CellValue, ColumnMeta};
 use crate::results::model::ResultModel;
 use crate::results::paging_helpers::{self, NearBottomGuard};
-use crate::results::PagedStatus;
 use crate::results::row::RowObject;
+use crate::results::PagedStatus;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{
@@ -428,11 +428,11 @@ impl ResultsGrid {
                 #[weak(rename_to = grid)]
                 self,
                 move |adj| {
-                    let fire = grid
-                        .imp()
-                        .near_bottom_guard
-                        .borrow_mut()
-                        .evaluate(adj.value(), adj.page_size(), adj.upper());
+                    let fire = grid.imp().near_bottom_guard.borrow_mut().evaluate(
+                        adj.value(),
+                        adj.page_size(),
+                        adj.upper(),
+                    );
                     if !fire {
                         return;
                     }

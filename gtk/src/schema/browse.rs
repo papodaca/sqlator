@@ -726,9 +726,7 @@ impl TableBrowseTab {
         self.imp()
             .total_returned
             .set(returned.min(PAGED_ROW_CEILING));
-        self.imp()
-            .has_more
-            .set(data.has_more && !capped);
+        self.imp().has_more.set(data.has_more && !capped);
         self.imp().has_result.set(true);
 
         let loaded = self.imp().total_returned.get();
@@ -798,7 +796,13 @@ mod tests {
 
     #[test]
     fn ceiling_or_exhausted_result_blocks_trigger() {
-        assert!(!should_fetch_more(true, false, false, 49_500, PAGED_ROW_CEILING));
+        assert!(!should_fetch_more(
+            true,
+            false,
+            false,
+            49_500,
+            PAGED_ROW_CEILING
+        ));
         assert!(!should_fetch_more(
             true,
             true,
@@ -819,7 +823,13 @@ mod tests {
     fn stays_silent_until_first_result_applies() {
         // After refresh()/restore reset (offset back to 0, has_result false
         // until the first apply), the trigger is not armed.
-        assert!(!should_fetch_more(false, false, false, 0, PAGED_ROW_CEILING));
+        assert!(!should_fetch_more(
+            false,
+            false,
+            false,
+            0,
+            PAGED_ROW_CEILING
+        ));
         assert!(!should_fetch_more(false, true, false, 0, PAGED_ROW_CEILING));
     }
 

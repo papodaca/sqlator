@@ -54,6 +54,84 @@ fn parse_url(url: &str) -> Result<Config, CoreError> {
     Ok(Config::new(host, port, service, user, password))
 }
 
+/// oracle-rs `query()` hardcodes a 100-row prefetch and `has_more_rows = false`,
+/// so `fetch_more` returns nothing. Re-run the same statement with a later
+/// OFFSET to collect the rest of a page.
+const ORACLE_QUERY_PREFETCH: usize = 100;
+
+fn parse_trailing_oracle_fetch(sql: &str) -> Option<usize> {
+    let upper = sql.to_ascii_uppercase();
+    let pos = upper.rfind("FETCH NEXT ")?;
+    sql[pos + 11..]
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+}
+
+fn parse_trailing_oracle_offset(sql: &str) -> usize {
+    let Some(pos) = sql.rfind("OFFSET ") else {
+        return 0;
+    };
+    sql[pos + 7..]
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+fn oracle_window_sql(sql: &str, skip: usize, remain: usize) -> String {
+    if let Some(pos) = sql.rfind("OFFSET ") {
+        let tail = &sql[pos..];
+        if tail.to_ascii_uppercase().contains("FETCH NEXT") {
+            return format!(
+                "{}OFFSET {skip} ROWS FETCH NEXT {remain} ROWS ONLY",
+                &sql[..pos]
+            );
+        }
+    }
+    format!(
+        "SELECT * FROM ({sql}) sqlator_drain_q ORDER BY 1 OFFSET {skip} ROWS FETCH NEXT {remain} ROWS ONLY"
+    )
+}
+
+async fn drain_query(
+    conn: &oracle_rs::Connection,
+    sql: &str,
+    max_rows: usize,
+) -> Result<oracle_rs::QueryResult, oracle_rs::Error> {
+    let mut result = conn.query(sql, &[]).await?;
+    let mut rows = std::mem::take(&mut result.rows);
+    let base_offset = parse_trailing_oracle_offset(sql);
+    let page_cap = parse_trailing_oracle_fetch(sql)
+        .unwrap_or(max_rows)
+        .min(max_rows);
+    while rows.len() < page_cap && rows.len() % ORACLE_QUERY_PREFETCH == 0 && !rows.is_empty() {
+        let remain = page_cap - rows.len();
+        let skip = base_offset + rows.len();
+        let next_sql = oracle_window_sql(sql, skip, remain);
+        let more = match conn.query(&next_sql, &[]).await {
+            Ok(more) => more,
+            Err(_) => break,
+        };
+        let got = more.rows.len();
+        if got == 0 {
+            result.has_more_rows = false;
+            break;
+        }
+        rows.extend(more.rows);
+        if got < ORACLE_QUERY_PREFETCH {
+            result.has_more_rows = false;
+            break;
+        }
+    }
+    if rows.len() > page_cap {
+        rows.truncate(page_cap);
+        result.has_more_rows = true;
+    }
+    result.rows = rows;
+    Ok(result)
+}
+
 pub async fn execute_select(
     pool: &OraclePool,
     sql: &str,
@@ -65,7 +143,7 @@ pub async fn execute_select(
         code: "CONNECTION_FAILED".into(),
     })?;
 
-    let result = match conn.query(sql, &[]).await {
+    let result = match drain_query(&conn, sql, 1000).await {
         Ok(r) => r,
         Err(e) => {
             let _ = sender
@@ -77,20 +155,16 @@ pub async fn execute_select(
         }
     };
 
-    let mut row_count: usize = 0;
-    let max_rows: usize = 1000;
-
     if !result.columns.is_empty() {
         let names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
         let _ = sender.send(QueryEvent::Columns { names }).await;
     }
 
+    let mut row_count: usize = 0;
     for row in &result.rows {
-        if row_count < max_rows {
-            let values: Vec<serde_json::Value> =
-                row.values().iter().map(oracle_value_to_json).collect();
-            let _ = sender.send(QueryEvent::Row { values }).await;
-        }
+        let values: Vec<serde_json::Value> =
+            row.values().iter().map(oracle_value_to_json).collect();
+        let _ = sender.send(QueryEvent::Row { values }).await;
         row_count += 1;
     }
 
@@ -887,10 +961,12 @@ pub async fn query_table(
         code: "CONNECTION_FAILED".into(),
     })?;
 
-    let result = conn.query(&sql, &[]).await.map_err(|e| CoreError {
-        message: e.to_string(),
-        code: "QUERY_TABLE".into(),
-    })?;
+    let result = drain_query(&conn, &sql, limit as usize)
+        .await
+        .map_err(|e| CoreError {
+            message: e.to_string(),
+            code: "QUERY_TABLE".into(),
+        })?;
 
     let has_more = result.rows.len() as i64 > params.limit.min(1000);
     let rows_slice = if has_more {
@@ -990,7 +1066,8 @@ fn build_order_by_oracle(sort: &[crate::models::SortSpec], valid: &[&str]) -> St
         .iter()
         .filter(|s| valid.contains(&s.column.as_str()))
         .map(|s| {
-            let col = format!("\"{}\"", s.column.replace('"', "\"\""));
+            let ident = s.column.to_ascii_uppercase().replace('"', "\"\"");
+            let col = format!("\"{ident}\"");
             format!("{} {}", col, if s.desc { "DESC" } else { "ASC" })
         })
         .collect();

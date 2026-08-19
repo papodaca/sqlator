@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::editor::{SchemaCompletionProvider, SearchBarState};
 use super::paging::QueryPaging;
+use crate::editor::{SchemaCompletionProvider, SearchBarState};
 use crate::results::{EditState, ResultsGrid};
 use crate::window::SqlatorWindow;
 

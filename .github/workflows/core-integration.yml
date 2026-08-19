@@ -1,0 +1,31 @@
+# Fail-hard live pagination tests against docker-compose engines.
+#
+# Starts Compose databases, waits until they accept connections, then runs
+# `sqlator-core` with `--features integration`. A down engine fails the job.
+
+name: core-integration
+
+on:
+  push:
+    branches: [main, master, gtk]
+  pull_request:
+
+concurrency:
+  group: core-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-paged:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start Compose databases
+        run: docker compose up -d --wait postgres mysql mariadb mssql oracle clickhouse
+
+      - name: Live wrap and passthrough suite
+        run: cargo test -p sqlator-core --features integration --test engine_paged -- --nocapture

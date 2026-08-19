@@ -131,8 +131,8 @@ pub(crate) fn classify_pagination(sql: &str, dialect: PagedDialect) -> Paginatio
 /// Build the pagination wrapper from the HTD anatomy:
 ///
 /// ```text
-/// WITH __sqlator_q AS ( <user sql> )
-/// SELECT * FROM __sqlator_q [ORDER BY <validated sort>] <dialect page clause>
+/// WITH sqlator_page_q AS ( <user sql> )
+/// SELECT * FROM sqlator_page_q [ORDER BY <validated sort>] <dialect page clause>
 /// ```
 ///
 /// A user `LIMIT`/`TOP` stays inside the body and applies first — semantics
@@ -171,7 +171,23 @@ pub(crate) fn wrap_for_pagination(
         }
     };
 
-    format!("WITH __sqlator_q AS (\n{body}\n)\nSELECT * FROM __sqlator_q{order}\n{page}")
+    // Oracle rejects a CTE whose body is itself a WITH. Subquery wrap keeps
+    // OFFSET/FETCH while remaining valid SQL.
+    if dialect == PagedDialect::Oracle && body_has_top_level_with(body) {
+        return format!("SELECT * FROM (\n{body}\n) sqlator_page_q{order}\n{page}");
+    }
+
+    format!("WITH sqlator_page_q AS (\n{body}\n)\nSELECT * FROM sqlator_page_q{order}\n{page}")
+}
+
+fn body_has_top_level_with(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return false;
+    };
+    matches!(
+        statements.first(),
+        Some(Statement::Query(query)) if query.with.is_some()
+    )
 }
 
 /// Outer ORDER BY, reusing the module's quoting helpers (plan U1 approach).
@@ -181,8 +197,18 @@ fn order_clause(dialect: PagedDialect, sort: &[SortSpec], valid_columns: &[&str]
         PagedDialect::MySql | PagedDialect::ClickHouse => {
             super::build_order_by_generic(sort, valid_columns, '`')
         }
-        PagedDialect::Sqlite | PagedDialect::Any | PagedDialect::Oracle => {
+        PagedDialect::Sqlite | PagedDialect::Any => {
             super::build_order_by_generic(sort, valid_columns, '"')
+        }
+        PagedDialect::Oracle => {
+            // OFFSET/FETCH NEXT requires ORDER BY. Unquoted seed columns are
+            // stored uppercase; quoted mixed-case names close the session.
+            let order = build_order_by_oracle_paged(sort, valid_columns);
+            if order.is_empty() {
+                " ORDER BY 1".to_string()
+            } else {
+                order
+            }
         }
         PagedDialect::Mssql => {
             // OFFSET/FETCH NEXT requires ORDER BY (existing precedent in
@@ -194,6 +220,24 @@ fn order_clause(dialect: PagedDialect, sort: &[SortSpec], valid_columns: &[&str]
                 order
             }
         }
+    }
+}
+
+/// Quote Oracle sort identifiers uppercase so they match unquoted columns.
+fn build_order_by_oracle_paged(sort: &[SortSpec], valid: &[&str]) -> String {
+    let parts: Vec<String> = sort
+        .iter()
+        .filter(|s| super::validate_column(&s.column, valid))
+        .map(|s| {
+            let ident = s.column.to_ascii_uppercase().replace('"', "\"\"");
+            format!("\"{}\" {}", ident, if s.desc { "DESC" } else { "ASC" })
+        })
+        .collect();
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", parts.join(", "))
     }
 }
 
@@ -387,7 +431,7 @@ mod tests {
             PagedDialect::ClickHouse,
         ] {
             let wrapped = wrap_for_pagination("SELECT * FROM t", dialect, &[], &[], 500, 100);
-            let expected = "WITH __sqlator_q AS (\nSELECT * FROM t\n)\nSELECT * FROM __sqlator_q\nLIMIT 501 OFFSET 100";
+            let expected = "WITH sqlator_page_q AS (\nSELECT * FROM t\n)\nSELECT * FROM sqlator_page_q\nLIMIT 501 OFFSET 100";
             assert_eq!(wrapped, expected, "wrapper shape wrong for {dialect:?}");
         }
     }
@@ -396,16 +440,25 @@ mod tests {
     fn wrap_mssql_no_sort_emits_select_null_fallback() {
         let wrapped =
             wrap_for_pagination("SELECT * FROM t", PagedDialect::Mssql, &[], &[], 500, 100);
-        let expected = "WITH __sqlator_q AS (\nSELECT * FROM t\n)\nSELECT * FROM __sqlator_q ORDER BY (SELECT NULL)\nOFFSET 100 ROWS FETCH NEXT 501 ROWS ONLY";
+        let expected = "WITH sqlator_page_q AS (\nSELECT * FROM t\n)\nSELECT * FROM sqlator_page_q ORDER BY (SELECT NULL)\nOFFSET 100 ROWS FETCH NEXT 501 ROWS ONLY";
         assert_eq!(wrapped, expected);
     }
 
     #[test]
-    fn wrap_oracle_offset_fetch_without_forced_order() {
+    fn wrap_oracle_offset_fetch_requires_order_by() {
         let wrapped =
             wrap_for_pagination("SELECT * FROM t", PagedDialect::Oracle, &[], &[], 500, 100);
-        let expected = "WITH __sqlator_q AS (\nSELECT * FROM t\n)\nSELECT * FROM __sqlator_q\nOFFSET 100 ROWS FETCH NEXT 501 ROWS ONLY";
+        let expected = "WITH sqlator_page_q AS (\nSELECT * FROM t\n)\nSELECT * FROM sqlator_page_q ORDER BY 1\nOFFSET 100 ROWS FETCH NEXT 501 ROWS ONLY";
         assert_eq!(wrapped, expected);
+    }
+
+    #[test]
+    fn wrap_oracle_top_level_with_uses_subquery_not_nested_cte() {
+        let sql = "WITH q AS (SELECT id FROM t) SELECT id FROM q";
+        let wrapped = wrap_for_pagination(sql, PagedDialect::Oracle, &[], &[], 500, 0);
+        let expected = "SELECT * FROM (\nWITH q AS (SELECT id FROM t) SELECT id FROM q\n) sqlator_page_q ORDER BY 1\nOFFSET 0 ROWS FETCH NEXT 501 ROWS ONLY";
+        assert_eq!(wrapped, expected);
+        assert!(!wrapped.contains("WITH sqlator_page_q"), "{wrapped}");
     }
 
     #[test]
@@ -456,6 +509,43 @@ mod tests {
         assert!(
             wrapped.contains(" ORDER BY \"a\" ASC, \"b\" DESC\nLIMIT 101 OFFSET 0"),
             "two-column sort must render ASC then DESC in spec order: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn wrap_oracle_honors_user_sort() {
+        let sort = [sort("id", true)];
+        let wrapped = wrap_for_pagination(
+            "SELECT id FROM t",
+            PagedDialect::Oracle,
+            &sort,
+            &["id"],
+            10,
+            20,
+        );
+        assert!(
+            wrapped.contains(" ORDER BY \"ID\" DESC\nOFFSET 20 ROWS FETCH NEXT 11 ROWS ONLY"),
+            "oracle must quote unquoted columns uppercase: {wrapped}"
+        );
+        assert!(!wrapped.contains("ORDER BY 1"), "{wrapped}");
+        assert!(!wrapped.contains("\"id\""), "{wrapped}");
+    }
+
+    #[test]
+    fn wrap_oracle_unknown_sort_column_falls_back_to_ordinal() {
+        let sort = [sort("evil_col", false)];
+        let wrapped = wrap_for_pagination(
+            "SELECT a FROM t",
+            PagedDialect::Oracle,
+            &sort,
+            &["a"],
+            500,
+            0,
+        );
+        assert!(!wrapped.contains("evil_col"), "{wrapped}");
+        assert!(
+            wrapped.contains("ORDER BY 1"),
+            "oracle still needs an ORDER BY for OFFSET/FETCH: {wrapped}"
         );
     }
 

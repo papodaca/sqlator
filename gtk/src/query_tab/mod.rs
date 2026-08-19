@@ -4,8 +4,8 @@ mod paging;
 use crate::application::SqlatorApplication;
 use crate::query_tab::paging::PAGE_SIZE;
 use crate::results::{
-    present_row_editor, present_sql_preview, CellValue, EditOverlay, EditToolbarState,
-    PagedStatus, RowEditorMode,
+    present_row_editor, present_sql_preview, CellValue, EditOverlay, EditToolbarState, PagedStatus,
+    RowEditorMode,
 };
 use crate::window::SqlatorWindow;
 use adw::prelude::*;
@@ -742,9 +742,9 @@ impl QueryTab {
                     Ok(Some(Err(e))) => {
                         tab.imp().paging.borrow_mut().page_failed();
                         if chunk {
-                            tab.imp()
-                                .toast_overlay
-                                .add_toast(adw::Toast::new(&format!("Could not load more rows: {e}")));
+                            tab.imp().toast_overlay.add_toast(adw::Toast::new(&format!(
+                                "Could not load more rows: {e}"
+                            )));
                         } else {
                             tab.append_message(&e.to_string());
                             tab.imp().results_stack.set_visible_child_name("messages");
@@ -840,9 +840,9 @@ impl QueryTab {
             }
             QueryEvent::Error { message } => {
                 if chunk {
-                    self.imp()
-                        .toast_overlay
-                        .add_toast(adw::Toast::new(&format!("Could not load more rows: {message}")));
+                    self.imp().toast_overlay.add_toast(adw::Toast::new(&format!(
+                        "Could not load more rows: {message}"
+                    )));
                     return;
                 }
                 grid.set_refreshing(false);
